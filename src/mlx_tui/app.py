@@ -40,9 +40,6 @@ class MlxTuiApp(App[None]):
         ("ctrl+q", "quit", "Quit"),
         ("escape", "cancel_chat", "Cancel"),
         ("ctrl+s", "cold_start", "Start server"),
-        # A plain letter here would fire whenever the chat input is not the
-        # focused widget — and mid-swap nothing is — suspending into $EDITOR
-        # on a stray keypress. Chords are immune to that.
         ("ctrl+g", "edit_config", "Edit config"),
     ]
 
@@ -68,6 +65,9 @@ class MlxTuiApp(App[None]):
         self.latest_avail_gib: float | None = None
         self.swap_machine = SwapMachine()
         self.server_ctl = ServerController()
+        # Set synchronously on ctrl+s so a second press cannot slip through
+        # during the await inside the async action (busy alone is too late).
+        self._cold_start_in_flight = False
         # Seam: integration tests override this attribute; production
         # derives the loaded model from cmdline/tracked state.
         self.current_model_supplier: Callable[[], str | None] = self.effective_model
@@ -179,30 +179,81 @@ class MlxTuiApp(App[None]):
         except NoMatches:
             return
 
-    def action_cold_start(self) -> None:
+    async def action_cold_start(self) -> None:
         # Same busy guard as the pane's load action: a second ctrl+s inside a
         # running boot would raise InvalidTransition (starting -> starting)
-        # and crash the app.
-        if self.swap_machine.busy:
+        # and crash the app. The in-flight flag covers the window before the
+        # machine leaves IDLE (the action awaits below).
+        if self._cold_start_in_flight or self.swap_machine.busy:
             self.log_app("swap already in progress", "yellow")
-            return
-        if self.status_state != "red":
-            self.log_app("server is already up", "dim")
             return
         if not self.config.start_cmd:
             self.log_app("set start_cmd in the config to enable cold start", "yellow")
             return
+        self._cold_start_in_flight = True
+        try:
+            # The 2s poll leaves startup windows where status_state still
+            # carries its initial "red" against an already-running server;
+            # decide on a fresh classification, not the last render.
+            state = await self._classify_liveness()
+            if state == "green":
+                self.status_state = state
+                self.log_app("server is already up", "dim")
+                return
+            # A server process may exist without answering health yet (still
+            # loading, or wedged): blind-spawning a second instance cannot
+            # bind the port and dies with an OSError traceback. Restart it
+            # through the configured commands instead.
+            pid = self._process_finder.find(self.config.pidfile)
+            if pid is not None:
+                self._restart_config_model(pid)
+                return
+            if state == "amber":
+                self.log_app(
+                    "something else is answering on this port — "
+                    "not starting the server",
+                    "yellow",
+                )
+                return
+            try:
+                pane = self.query_one(ModelsPane)
+            except NoMatches:
+                return
+            self.swap_machine.transition(SwapState.STARTING)
+            self.set_swap_ui(True)
+            pane.run_boot(
+                BootPlan(
+                    model_id=self.config.model,
+                    size_on_disk=pane.row_size(self.config.model),
+                    stop_first=False,
+                    success_line="✓ server is up",
+                )
+            )
+        finally:
+            self._cold_start_in_flight = False
+
+    def _restart_config_model(self, pid: int) -> None:
+        """Restart path for ctrl+s over an existing-but-unhealthy process."""
         try:
             pane = self.query_one(ModelsPane)
         except NoMatches:
             return
-        self.swap_machine.transition(SwapState.STARTING)
+        if not (self.config.start_cmd and self.config.stop_cmd):
+            self.log_app(
+                f"a server process (pid {pid}) is running but not healthy — "
+                "set stop_cmd/start_cmd to let mlx-tui restart it",
+                "red",
+            )
+            return
+        if self.chat_has_live_turn():
+            self.cancel_chat_for_swap()
+        self.swap_machine.transition(SwapState.STOPPING)
         self.set_swap_ui(True)
         pane.run_boot(
             BootPlan(
                 model_id=self.config.model,
                 size_on_disk=pane.row_size(self.config.model),
-                stop_first=False,
+                stop_first=True,
                 success_line="✓ server is up",
             )
         )

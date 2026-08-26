@@ -159,6 +159,7 @@ Merge `_run_restart_swap` and `_run_cold_start` into one parameterized worker; m
             self.call_from_thread(self._log_app, message, "red")
         self.call_from_thread(self._set_swap_ui, False)
 
+
     @work(exclusive=True, group="swap", thread=True)
     def _run_boot(self, plan: BootPlan) -> None:
         def stream(line: str) -> None:
@@ -172,9 +173,7 @@ Merge `_run_restart_swap` and `_run_cold_start` into one parameterized worker; m
             # Marker hygiene: clear tracked state the moment stop fires.
             self._tracked_model = None
             self.call_from_thread(self._refresh_markers)
-            stop_rc = self._server_ctl.run_command(
-                self.config.stop_cmd, on_line=stream
-            )
+            stop_rc = self._server_ctl.run_command(self.config.stop_cmd, on_line=stream)
             if stop_rc != 0:
                 self._fail_swap(f"[swap] stop_cmd exited {stop_rc}")
                 return
@@ -201,9 +200,7 @@ Merge `_run_restart_swap` and `_run_cold_start` into one parameterized worker; m
         deadline = health_timeout(plan.size_on_disk)
 
         def tick(seconds: int) -> None:
-            self.call_from_thread(
-                self._progress_line, plan.model_id or "server", seconds
-            )
+            self.call_from_thread(self._progress_line, plan.model_id or "server", seconds)
 
         ok = self._server_ctl.wait_healthy(
             f"http://{self.host}:{self.port}/v1/models",
@@ -341,7 +338,8 @@ Glyphs, column geometry, and cell rendering become `table.py` concerns behind `s
 - `src/mlx_tui/app.py` — delete `_FITS_GLYPHS`, `_COL_FITS`, `_COL_LOADED` (app.py:55-57); delete the `add_column` loop in `on_mount` (now in `ModelsTable.on_mount`); rewrite `_populate_table` body after the `NoMatches` guard as:
   ```python
   table.set_rows(
-      rows, effective_model=self._effective_model(),
+      rows,
+      effective_model=self._effective_model(),
       avail_gib=self._latest_avail_gib,
   )
   self._rows = rows
@@ -349,7 +347,8 @@ Glyphs, column geometry, and cell rendering become `table.py` concerns behind `s
   and `_refresh_markers` body as:
   ```python
   table.refresh_markers(
-      self._rows, effective_model=self._effective_model(),
+      self._rows,
+      effective_model=self._effective_model(),
       avail_gib=self._latest_avail_gib,
   )
   ```
@@ -463,6 +462,7 @@ Models-tab UI (progress line, table, rescan/populate/markers, load/delete reques
           #   self._swap_machine.transition(...) → unchanged via self.tui.swap_machine
           #   self._run_restart_swap(row)  → self.tui.run_boot(self._boot_plan_for(row))
           ...
+
       def _boot_plan_for(self, row: ModelRow) -> BootPlan:
           return BootPlan(
               model_id=row.repo_id,
@@ -470,16 +470,20 @@ Models-tab UI (progress line, table, rescan/populate/markers, load/delete reques
               stop_first=True,
               success_line=f"✓ {row.repo_id} is serving",
           )
+
       def row_size(self, repo_id: str | None) -> int:
           ...  # moved verbatim from app.py:322-328, self._rows → self.rows
           #   (public: App.action_cold_start queries it — see below)
+
       def request_delete_model(self) -> None:
           ...  # moved verbatim from app.py:685-699; push_screen via
           #   self.app.push_screen(ConfirmScreen(...), self._on_delete_confirmed);
           #   self._log_app → self.tui.log_app; self._rows/self.cursor indexing
           #   over self.rows + queried table
-      def _on_delete_confirmed(self, confirmed: bool | None) -> None:
-          ...  # moved verbatim from app.py:701-707
+
+      def _on_delete_confirmed(
+          self, confirmed: bool | None
+      ) -> None: ...  # moved verbatim from app.py:701-707
       @work(exclusive=True, group="delete", thread=True)
       def _run_delete(self, row: ModelRow) -> None:
           ...  # moved verbatim from app.py:709-723; final self._rescan_models()
@@ -640,9 +644,11 @@ Chat-tab UI (stream/log/input, turn lifecycle, abort-with-socket-shutdown, trans
         except NoMatches:
             return None
 
+
     def chat_has_live_turn(self) -> bool:
         pane = self._chat_pane_or_none()
         return pane is not None and pane.has_live_turn
+
 
     def cancel_chat_for_swap(self) -> None:
         pane = self._chat_pane_or_none()

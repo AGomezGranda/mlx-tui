@@ -234,6 +234,8 @@ The placeholder becomes a live `DataTable`: rescan in a thread worker, columns n
 - create `src/mlx_tui/table.py` (widget subclass, thin on purpose):
   ```python
   """Models DataTable with load/delete key bindings."""
+
+
   class ModelsTable(DataTable):
       BINDINGS = [
           ("enter", "load_swap", "Load/swap"),
@@ -277,13 +279,17 @@ The placeholder becomes a live `DataTable`: rescan in a thread worker, columns n
 - create `src/mlx_tui/confirm.py`:
   ```python
   """Reusable yes/no modal screen."""
+
+
   class ConfirmScreen(ModalScreen[bool]):
       BINDINGS = [
           ("y", "confirm", "yes"),
           ("n", "dismiss_no", "no"),
           ("escape", "dismiss_no", "keep"),
       ]
+
       def __init__(self, prompt: str) -> None: ...
+
       # compose: Vertical centered: Static(prompt), Horizontal(Button("delete", id="btn-yes"),
       # Button("keep", id="btn-no"))
       # action_confirm -> self.dismiss(True); action_dismiss_no -> self.dismiss(False)

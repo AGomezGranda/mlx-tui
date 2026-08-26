@@ -14,6 +14,7 @@ from mlx_tui.app import MlxTuiApp
 from mlx_tui.config import AppConfig
 from mlx_tui.models import ModelRow
 from mlx_tui.models_pane import ModelsPane
+from mlx_tui.process import ServerProcessFinder
 from mlx_tui.serverctl import HealthWatch, ServerController
 from mlx_tui.swap import SwapState, health_timeout
 from mlx_tui.table import ModelsTable
@@ -26,6 +27,18 @@ def _stub_rows(avail_gib: float | None) -> list[ModelRow]:
     return [ROW]
 
 
+class _StaticFinder(ServerProcessFinder):
+    """Process discovery pinned to a fixed answer (or none)."""
+
+    def __init__(self, pid: int | None) -> None:
+        super().__init__()
+        self._pid = pid
+
+    @override
+    def find(self, pidfile: str | None = None) -> int | None:
+        return self._pid
+
+
 @pytest.fixture
 async def stub_harness(
     stub_server_factory: Callable[[str], StubServer],
@@ -36,10 +49,13 @@ async def stub_harness(
     The patch must precede app mount: a mount-time rescan against the real
     HF cache is a thread that exclusive-cancellation cannot stop, and its
     late ``_populate_table`` would otherwise overwrite the stub rows.
+    Process discovery is neutralized too — a real mlx server running on the
+    dev machine must not flip cold-start into its restart branch.
     """
     monkeypatch.setattr("mlx_tui.models_pane.scan_models", _stub_rows)
     server = stub_server_factory("ok")
     app = MlxTuiApp(host="127.0.0.1", port=int(server.server_address[1]))
+    app._process_finder = _StaticFinder(None)
     async with app.run_test() as pilot:
         yield AppHarness(app=app, pilot=pilot, server=server)
 
@@ -180,6 +196,79 @@ async def test_double_cold_start_is_guarded(
     assert harness.app.swap_machine.state is SwapState.STARTING
 
 
+async def test_cold_start_when_server_already_up_never_spawns(
+    stub_harness: AppHarness,
+) -> None:
+    """ctrl+s during the stale startup-red window must not spawn a duplicate."""
+    harness = stub_harness
+    # No _poll: status_state still carries its initial "red" while the stub
+    # server is in fact up — exactly the enter-the-app-and-start flow.
+    recorder = _SpawnRecorder()
+    harness.app.server_ctl = recorder
+    harness.app.config = AppConfig(model=ROW.repo_id, start_cmd="true")
+
+    await harness.pilot.press("ctrl+s")
+
+    assert await harness.wait_for(
+        lambda a: "server is already up" in _log_text(harness)
+    ), _log_text(harness)
+    assert recorder.procs == []
+    assert harness.app.swap_machine.state is SwapState.IDLE
+
+
+async def test_cold_start_with_unhealthy_process_restarts_it(
+    stub_harness: AppHarness,
+) -> None:
+    """An existing mlx process holding the port is stopped first, not raced."""
+    harness = stub_harness
+    harness.server.mode = "html"
+    await harness.app._poll()
+    harness.app._process_finder = _StaticFinder(4242)
+    harness.app.config = AppConfig(
+        model=ROW.repo_id,
+        start_cmd=f"{sys.executable} -c \"print('booting')\"",
+        stop_cmd=f"{sys.executable} -c \"print('bye')\"",
+    )
+    harness.app.current_model_supplier = lambda: ROW.repo_id
+    ctl = _SpawnRecorder()
+    harness.app.server_ctl = ctl
+
+    await harness.pilot.press("ctrl+s")
+    # The server "comes back" only after dispatch so the health wait succeeds.
+    harness.server.mode = "ok"
+
+    assert await harness.wait_for(lambda a: "✓ server is up" in _log_text(harness)), (
+        _log_text(harness)
+    )
+    lines = _log_text(harness)
+    assert "[swap] bye" in lines, lines
+    assert "[swap] booting" in lines, lines
+    assert ctl.procs, "restart path must spawn start_cmd"
+    assert harness.app.swap_machine.state is SwapState.IDLE
+    assert harness.app._tracked_model == ROW.repo_id
+
+
+async def test_cold_start_with_process_but_no_stop_cmd_guides(
+    stub_harness: AppHarness,
+) -> None:
+    """Without stop_cmd an existing process can only be reported, not raced."""
+    harness = stub_harness
+    harness.server.mode = "html"
+    await harness.app._poll()
+    harness.app._process_finder = _StaticFinder(4242)
+    harness.app.config = AppConfig(start_cmd="true")
+    recorder = _SpawnRecorder()
+    harness.app.server_ctl = recorder
+
+    await harness.pilot.press("ctrl+s")
+
+    assert await harness.wait_for(
+        lambda a: "running but not healthy" in _log_text(harness)
+    ), _log_text(harness)
+    assert recorder.procs == []
+    assert harness.app.swap_machine.state is SwapState.IDLE
+
+
 class _SpawnRecorder(ServerController):
     """Records spawned processes so tests can reap them."""
 
@@ -245,7 +334,9 @@ async def test_cold_start_instant_crash_fails_fast(
     harness = stub_harness
     monkeypatch.setattr(MlxTuiApp, "_classify_liveness", _always_red)
     await harness.app._poll()
-    harness.app.config = AppConfig(start_cmd=f"{sys.executable} -c 'raise SystemExit(3)'")
+    harness.app.config = AppConfig(
+        start_cmd=f"{sys.executable} -c 'raise SystemExit(3)'"
+    )
 
     await harness.pilot.press("ctrl+s")
 
@@ -266,8 +357,7 @@ async def test_cold_start_reports_mid_boot_death(
     harness.app.config = AppConfig(
         model=ROW.repo_id,
         start_cmd=(
-            f"{sys.executable} -c "
-            "\"import time; time.sleep(3); raise SystemExit(1)\""
+            f'{sys.executable} -c "import time; time.sleep(3); raise SystemExit(1)"'
         ),
     )
     # The model never matches, so only the death check can end the wait.
