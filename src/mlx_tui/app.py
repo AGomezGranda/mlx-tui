@@ -7,7 +7,6 @@ import argparse
 import os
 import shlex
 import subprocess
-from collections.abc import Callable
 from typing import override
 
 import httpx
@@ -29,7 +28,6 @@ from mlx_tui.config import (
 )
 from mlx_tui.models_pane import ModelsPane
 from mlx_tui.process import ServerProcessFinder, memory_snapshot, model_from_cmdline
-from mlx_tui.serverctl import ServerController
 from mlx_tui.status import ColdTracker, classify_liveness, format_status_line
 from mlx_tui.swap import BootPlan, SwapMachine, SwapState
 from mlx_tui.table import ModelsTable
@@ -43,7 +41,23 @@ class MlxTuiApp(App[None]):
         ("ctrl+g", "edit_config", "Edit config"),
     ]
 
-    CSS_PATH = "app.tcss"
+    DEFAULT_CSS = """
+    #status-bar {
+        dock: top;
+        width: 100%;
+    }
+    #app-log {
+        dock: bottom;
+        height: 6;
+        border-top: solid $primary;
+    }
+    #chat-log {
+        height: 1fr;
+    }
+    #swap-progress {
+        height: auto;
+    }
+    """
 
     _http: httpx.AsyncClient
 
@@ -64,13 +78,9 @@ class MlxTuiApp(App[None]):
         self._tracked_model: str | None = None
         self.latest_avail_gib: float | None = None
         self.swap_machine = SwapMachine()
-        self.server_ctl = ServerController()
         # Set synchronously on ctrl+s so a second press cannot slip through
         # during the await inside the async action (busy alone is too late).
         self._cold_start_in_flight = False
-        # Seam: integration tests override this attribute; production
-        # derives the loaded model from cmdline/tracked state.
-        self.current_model_supplier: Callable[[], str | None] = self.effective_model
 
     @override
     def compose(self) -> ComposeResult:
@@ -107,23 +117,33 @@ class MlxTuiApp(App[None]):
             self.status_state = state
             self.cold_tracker.observe(state)
             self.latest_avail_gib = memory_snapshot().avail_gib
-            pid = self._process_finder.find(self.config.pidfile)
-            model: str | None = None
             rss_gib: float | None = None
+            model: str | None = None
+            pid = self._process_finder.find(self.config.pidfile)
             if pid is not None:
                 try:
-                    proc = psutil.Process(pid)
-                    model = model_from_cmdline(proc)
-                    rss_gib = proc.memory_info().rss / 2**30
+                    rss_gib = psutil.Process(pid).memory_info().rss / 2**30
                 except psutil.NoSuchProcess:
                     pass
+                # Effective is authoritative for the marker/status text:
+                # warm swaps shadow stale cmdline, while restarts keep both
+                # in sync. Gate on pid so a down server (red, no pid) shows
+                # "—" rather than a stale tracked value.
+                model = self.effective_model()
             self._render_status(model=model, rss_gib=rss_gib)
             self.refresh_models()
         finally:
             self._poll_in_flight = False
 
     def effective_model(self) -> str | None:
-        """The union view: cmdline ``--model`` wins, TUI-tracked swaps fill the gap."""
+        """The union view: tracked warm-swaps are authoritative, cmdline is fallback.
+
+        Warm in-server loads never update the server's argv, so a successful
+        probe-load's ``_tracked_model`` is more truthful than ``--model``.
+        Restart/cold paths keep both values in sync, so priority is moot there.
+        """
+        if self._tracked_model is not None:
+            return self._tracked_model
         pid = self._process_finder.find(self.config.pidfile)
         if pid is not None:
             try:
@@ -132,7 +152,7 @@ class MlxTuiApp(App[None]):
                 cmdline_model = None
             if cmdline_model is not None:
                 return cmdline_model
-        return self._tracked_model
+        return None
 
     def refresh_models(self) -> None:
         """Update fits/loaded markers via the pane; a missing pane is fine."""

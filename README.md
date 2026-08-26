@@ -26,12 +26,26 @@ mlx_lm.server --model ornith-ai/Ornith-1.5-9B-MLX-4bit --port 8080
 |-----|--------|
 | `enter` (Models tab) | Load / swap to the selected model |
 | `d` (Models tab) | Delete the selected repo from the HF cache (confirm modal) |
+| `/` (Models tab) | Search `mlx-community` (limit 50) — see Search & download |
 | `ctrl+s` | Cold start the server from the red dot (`start_cmd` required) |
 | `ctrl+g` | Edit `~/.config/mlx-tui/config.toml` in `$EDITOR`, reload on save |
-| `esc` | Cancel an in-flight chat turn |
+| `esc` | Cancel an in-flight chat turn; also closes the search modal / cancels a download |
 | `ctrl+q` | Quit |
 
 Tab switching between Models and Chat works by click or arrow keys.
+
+## Search & download
+
+`/` on the Models tab opens a search modal over `mlx-community` (limit 50).
+Type a query and press `enter` to search; arrows navigate results, `enter` on a
+result row downloads the selected repo. The exact download size vs free disk
+appears as you browse (`1.9 GB ✓` / `⚠` / `—` while loading); a short-disk
+warning (`warning: needs … GB, only … GB free — downloading anyway`) never
+blocks — an actual download failure is the ground truth. `esc` closes the
+modal and cancels an in-flight download (partials resume on the next attempt).
+Downloads pull only `*.safetensors`, `*.json`, `tokenizer*`; on completion the
+Models table rescans automatically, so the new model is one `enter` away from
+loading.
 
 ## Config file
 

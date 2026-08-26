@@ -61,11 +61,6 @@ def fits_headroom(size_on_disk: int, avail_gib: float | None) -> bool | None:
     return size_on_disk * (1 + _HEADROOM_MARGIN_RATIO) <= avail_gib * 2**30
 
 
-def _row_order(row: ModelRow) -> tuple[int, str]:
-    """Biggest first; repo_id breaks size ties deterministically."""
-    return (-row.size_on_disk, row.repo_id)
-
-
 def collect_rows(info: HFCacheInfo, avail_gib: float | None) -> list[ModelRow]:
     """Map MLX-ish cache repos to rows, biggest first, repo_id breaking ties."""
     rows: list[ModelRow] = [
@@ -79,7 +74,7 @@ def collect_rows(info: HFCacheInfo, avail_gib: float | None) -> list[ModelRow]:
         for r in info.repos
         if _is_mlx_model(r)
     ]
-    rows.sort(key=_row_order)
+    rows.sort(key=lambda r: (-r.size_on_disk, r.repo_id))  # pyrefly: ignore[implicit-any-lambda]
     return rows
 
 

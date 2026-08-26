@@ -24,16 +24,18 @@ class SwapState(Enum):
     FAILED = "failed"
 
 
-_ALLOWED: dict[SwapState, frozenset[SwapState]] = {
-    SwapState.IDLE: frozenset(
-        {SwapState.STOPPING, SwapState.STARTING, SwapState.WAITING_HEALTH}
-    ),
+_ALLOWED: dict[SwapState, set[SwapState]] = {
+    SwapState.IDLE: {
+        SwapState.STOPPING,
+        SwapState.STARTING,
+        SwapState.WAITING_HEALTH,
+    },
     # STOPPING/STARTING = restart path; STARTING alone also serves cold-start;
     # WAITING_HEALTH from IDLE = warm probe path.
-    SwapState.STOPPING: frozenset({SwapState.STARTING, SwapState.FAILED}),
-    SwapState.STARTING: frozenset({SwapState.WAITING_HEALTH, SwapState.FAILED}),
-    SwapState.WAITING_HEALTH: frozenset({SwapState.IDLE, SwapState.FAILED}),
-    SwapState.FAILED: frozenset({SwapState.IDLE}),  # acknowledged reset
+    SwapState.STOPPING: {SwapState.STARTING, SwapState.FAILED},
+    SwapState.STARTING: {SwapState.WAITING_HEALTH, SwapState.FAILED},
+    SwapState.WAITING_HEALTH: {SwapState.IDLE, SwapState.FAILED},
+    SwapState.FAILED: {SwapState.IDLE},  # acknowledged reset
 }
 
 
@@ -53,6 +55,13 @@ class SwapMachine:
                 f"illegal swap transition {self.state.value} -> {new.value}"
             )
         self.state = new
+
+    def reset(self) -> None:
+        if self.state is SwapState.FAILED:
+            self.transition(SwapState.IDLE)
+        elif self.state is not SwapState.IDLE:
+            self.transition(SwapState.FAILED)
+            self.transition(SwapState.IDLE)
 
     @property
     def busy(self) -> bool:

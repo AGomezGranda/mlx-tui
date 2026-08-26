@@ -8,7 +8,7 @@ from functools import partial
 import httpx
 import pytest
 
-from mlx_tui.chat import ChatClient, error_detail
+from mlx_tui.chat import error_detail, stream_turn
 from tests.builders import SseStreamBuilder
 
 Handler = Callable[[httpx.Request], httpx.Response]
@@ -65,9 +65,8 @@ def test_happy_path_with_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     install_transport(monkeypatch, lambda request: stream_response(body))
     flushes: list[str] = []
-    client = ChatClient()
 
-    result = client.stream_turn(
+    result = stream_turn(
         URL,
         {"messages": []},
         user_chars=2,
@@ -98,9 +97,8 @@ def test_estimate_fallback_without_usage(monkeypatch: pytest.MonkeyPatch) -> Non
         .build()
     )
     install_transport(monkeypatch, lambda request: stream_response(body))
-    client = ChatClient()
 
-    result = client.stream_turn(
+    result = stream_turn(
         URL, {"messages": []}, user_chars=70, on_flush=_noop_flush
     )
 
@@ -123,9 +121,8 @@ def test_skips_malformed_keepalive_and_stops_at_done(
         .build()
     )
     install_transport(monkeypatch, lambda request: stream_response(body))
-    client = ChatClient()
 
-    result = client.stream_turn(URL, {}, user_chars=1, on_flush=_noop_flush)
+    result = stream_turn(URL, {}, user_chars=1, on_flush=_noop_flush)
 
     assert result.full_text == "A"
     assert result.skipped_frames == 1
@@ -142,9 +139,8 @@ def test_length_finish_reason_is_surfaced(monkeypatch: pytest.MonkeyPatch) -> No
         .build()
     )
     install_transport(monkeypatch, lambda request: stream_response(body))
-    client = ChatClient()
 
-    result = client.stream_turn(
+    result = stream_turn(
         URL, {"messages": []}, user_chars=2, on_flush=_noop_flush
     )
 
@@ -157,10 +153,9 @@ def test_exceptions_propagate(monkeypatch: pytest.MonkeyPatch) -> None:
         raise httpx.ConnectError("boom")
 
     install_transport(monkeypatch, boom)
-    client = ChatClient()
 
     with pytest.raises(httpx.ConnectError):
-        client.stream_turn(URL, {}, user_chars=0, on_flush=_noop_flush)
+        stream_turn(URL, {}, user_chars=0, on_flush=_noop_flush)
 
 
 def test_http_error_status_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -172,10 +167,9 @@ def test_http_error_status_raises(monkeypatch: pytest.MonkeyPatch) -> None:
             content=b'{"detail": "model load failed"}',
         ),
     )
-    client = ChatClient()
 
     with pytest.raises(httpx.HTTPStatusError) as excinfo:
-        client.stream_turn(URL, {}, user_chars=0, on_flush=_noop_flush)
+        stream_turn(URL, {}, user_chars=0, on_flush=_noop_flush)
 
     # The body must survive the closed stream context so the UI can show
     # the server's explanation, not just the status code.
@@ -195,10 +189,9 @@ def test_remote_protocol_error_mid_stream_propagates(
         )
 
     install_transport(monkeypatch, handler)
-    client = ChatClient()
 
     with pytest.raises(httpx.RemoteProtocolError):
-        client.stream_turn(URL, {}, user_chars=0, on_flush=_noop_flush)
+        stream_turn(URL, {}, user_chars=0, on_flush=_noop_flush)
 
 
 def test_active_response_exposed_mid_stream(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -212,13 +205,20 @@ def test_active_response_exposed_mid_stream(monkeypatch: pytest.MonkeyPatch) -> 
         return response
 
     install_transport(monkeypatch, handler)
-    client = ChatClient()
     seen_during_flush: list[httpx.Response | None] = []
+    holder: list[httpx.Response | None] = [None]
 
     def flush(_text: str) -> None:
-        seen_during_flush.append(client.active_response)
+        seen_during_flush.append(holder[0])
 
-    client.stream_turn(URL, {}, user_chars=1, on_flush=flush, flush_interval=0.0)
+    stream_turn(
+        URL,
+        {},
+        user_chars=1,
+        on_flush=flush,
+        flush_interval=0.0,
+        on_active=lambda r: holder.__setitem__(0, r),
+    )
 
     assert len(responses) == 1
     # The seam matters mid-stream (that is when cancel reads it): the flush

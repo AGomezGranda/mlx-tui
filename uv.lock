@@ -219,15 +219,15 @@ dependencies = [
     { name = "httpx" },
     { name = "huggingface-hub" },
     { name = "psutil" },
-    { name = "pyrefly" },
-    { name = "pytest" },
-    { name = "ruff" },
     { name = "textual" },
 ]
 
 [package.dev-dependencies]
 dev = [
+    { name = "pyrefly" },
+    { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "ruff" },
 ]
 
 [package.metadata]
@@ -235,14 +235,16 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28" },
     { name = "huggingface-hub", specifier = ">=1.28" },
     { name = "psutil", specifier = ">=7.0" },
-    { name = "pyrefly", specifier = ">=1.2.0" },
-    { name = "pytest", specifier = ">=9.1.1" },
-    { name = "ruff", specifier = ">=0.16.4" },
     { name = "textual", specifier = ">=8.2.8" },
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest-asyncio", specifier = ">=1.4" }]
+dev = [
+    { name = "pyrefly", specifier = ">=1.2.0" },
+    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "pytest-asyncio", specifier = ">=1.4" },
+    { name = "ruff", specifier = ">=0.16.4" },
+]
 
 [[package]]
 name = "packaging"

@@ -64,3 +64,28 @@ class SseStreamBuilder:
 
     def build(self) -> bytes:
         return b"".join(self._frames)
+
+
+def sse_frames(
+    deltas: list[str] | None = None,
+    *,
+    finish: str | None = "stop",
+    malformed: bool = False,
+    keepalive: tuple[int, int] | None = None,
+    usage: tuple[int, int] | None = None,
+) -> bytes:
+    """One-liner for 80% of builder uses; builder remains for odd shapes."""
+    b = SseStreamBuilder()
+    if malformed:
+        b.malformed()
+    if keepalive is not None:
+        b.keepalive(*keepalive)
+    b.role_frame()
+    for d in deltas or []:
+        b.delta(d)
+    if finish is not None:
+        b.finish_frame(finish)
+    if usage is not None:
+        b.usage(*usage)
+    b.done()
+    return b.build()

@@ -33,13 +33,13 @@ CONFIG_TEMPLATE = """\
 # start_cmd = "mlx_lm.server --port 8080"
 # stop_cmd = "pkill -f mlx_lm.server"
 # pidfile = "/tmp/mlx-server.pid"
-""".encode()
+"""
 
 
 def write_template(path: Path) -> None:
     """Create parent directories and write the commented default config."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(CONFIG_TEMPLATE)
+    path.write_text(CONFIG_TEMPLATE)
 
 
 _KEY_TYPES: dict[str, type] = {

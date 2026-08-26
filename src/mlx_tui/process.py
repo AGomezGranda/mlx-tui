@@ -12,15 +12,7 @@ _SERVER_TOKEN_SUFFIXES = ("mlx_lm.server", "mlx_vlm.server")
 
 
 class ServerProcessFinder:
-    """Finds the mlx-lm server pid, caching it between polls.
-
-    Cache policy: a full ``psutil.process_iter`` scan happens **only** when
-    the cached pid died or nothing is cached — never every tick. (Accepted
-    trade-off from the v0 plan.) A cache hit is re-validated against
-    ``_SERVER_TOKEN_SUFFIXES`` so a recycled pid pointing at an unrelated
-    process is not trusted. An optional ``pidfile`` is consulted before
-    cache/scan, validated by the same suffix matcher before being trusted.
-    """
+    """Finds mlx server pid; cache pid, revalidate suffix, scan only on miss."""
 
     def __init__(self) -> None:
         self.pid_cache: int | None = None

@@ -8,9 +8,6 @@ dependencies = [
     "httpx>=0.28",
     "huggingface_hub>=1.28",
     "psutil>=7.0",
-    "pyrefly>=1.2.0",
-    "pytest>=9.1.1",
-    "ruff>=0.16.4",
     "textual>=8.2.8",
 ]
 
@@ -43,7 +40,12 @@ python-version = "3.13"
 preset = "strict"
 
 [dependency-groups]
-dev = ["pytest-asyncio>=1.4"]
+dev = [
+    "pyrefly>=1.2.0",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4",
+    "ruff>=0.16.4",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

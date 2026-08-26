@@ -10,11 +10,8 @@ from collections.abc import Callable
 import httpx
 import pytest
 
-from mlx_tui.serverctl import (
-    HealthWatch,
-    ServerController,
-    build_start_command,
-)
+from mlx_tui import serverctl
+from mlx_tui.serverctl import HealthWatch, build_start_command
 from tests.unit.test_chat import install_transport
 
 MODELS_URL = "http://stub/v1/models"
@@ -58,14 +55,14 @@ def test_run_command_streams_merged_output() -> None:
     # after the unbuffered stderr line, making the merged order unstable.
     cmd = f"{sys.executable} -c \"print('a', flush=True); import sys; print('e', file=sys.stderr)\""
 
-    rc = ServerController().run_command(cmd, on_line=lines.append)
+    rc = serverctl.run_command(cmd, on_line=lines.append)
 
     assert rc == 0
     assert lines == ["a", "e"]
 
 
 def test_run_command_failing_exit_code_does_not_raise() -> None:
-    rc = ServerController().run_command("exit 3", on_line=lambda _line: None)
+    rc = serverctl.run_command("exit 3", on_line=lambda _line: None)
 
     assert rc == 3
 
@@ -76,10 +73,9 @@ def test_spawn_command_returns_before_exit_and_streams() -> None:
         f"{sys.executable} -c "
         "\"print('boot', flush=True); import time; time.sleep(10)\""
     )
-    controller = ServerController()
 
     start = time.monotonic()
-    proc = controller.spawn_command(cmd, on_line=lines.append)
+    proc = serverctl.spawn_command(cmd, on_line=lines.append)
 
     try:
         # A serving start_cmd never exits; spawning must not block on it.
@@ -95,7 +91,7 @@ def test_spawn_command_returns_before_exit_and_streams() -> None:
 
 
 def test_spawn_with_grace_detects_instant_crash() -> None:
-    proc, monitor = ServerController().spawn_with_grace(
+    proc, monitor = serverctl.spawn_with_grace(
         f'{sys.executable} -c "raise SystemExit(3)"',
         on_line=lambda _line: None,
         grace_s=1.0,
@@ -107,7 +103,7 @@ def test_spawn_with_grace_detects_instant_crash() -> None:
 
 
 def test_spawn_with_grace_monitors_surviving_process() -> None:
-    proc, monitor = ServerController().spawn_with_grace(
+    proc, monitor = serverctl.spawn_with_grace(
         f'{sys.executable} -c "import time; time.sleep(5)"',
         on_line=lambda _line: None,
         grace_s=0.05,
@@ -131,7 +127,7 @@ def test_wait_healthy_bails_when_spawned_command_dies(
     )
 
     start = time.monotonic()
-    ok = ServerController().wait_healthy(
+    ok = serverctl.wait_healthy(
         MODELS_URL,
         HealthWatch(
             target_model="m",
@@ -158,7 +154,7 @@ def test_warm_load_sends_probe_payload(monkeypatch: pytest.MonkeyPatch) -> None:
 
     install_transport(monkeypatch, handler)
 
-    ServerController().warm_load(
+    serverctl.warm_load(
         "http://stub/v1/chat/completions", "repo/a", timeout_s=5
     )
 
@@ -175,7 +171,7 @@ def test_warm_load_http_error_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     with pytest.raises(httpx.HTTPStatusError):
-        ServerController().warm_load("http://stub/x", "repo/a", timeout_s=5)
+        serverctl.warm_load("http://stub/x", "repo/a", timeout_s=5)
 
 
 def _not_json(_request: httpx.Request) -> httpx.Response:
@@ -201,7 +197,7 @@ def test_warm_load_unexpected_body_raises_runtimeerror(
     install_transport(monkeypatch, handler)
 
     with pytest.raises(RuntimeError):
-        ServerController().warm_load("http://stub/x", "repo/a", timeout_s=5)
+        serverctl.warm_load("http://stub/x", "repo/a", timeout_s=5)
 
 
 def test_warm_load_connect_error_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -211,7 +207,7 @@ def test_warm_load_connect_error_propagates(monkeypatch: pytest.MonkeyPatch) -> 
     install_transport(monkeypatch, boom)
 
     with pytest.raises(httpx.ConnectError):
-        ServerController().warm_load("http://stub/x", "repo/a", timeout_s=5)
+        serverctl.warm_load("http://stub/x", "repo/a", timeout_s=5)
 
 
 def test_wait_healthy_green_first_poll_with_matching_model(
@@ -221,9 +217,8 @@ def test_wait_healthy_green_first_poll_with_matching_model(
         monkeypatch,
         lambda request: httpx.Response(200, json={"data": [{"id": "m"}]}),
     )
-    controller = ServerController()
 
-    ok = controller.wait_healthy(
+    ok = serverctl.wait_healthy(
         MODELS_URL,
         HealthWatch(target_model="m", current_model=lambda: "m"),
         timeout_s=5,
@@ -246,7 +241,7 @@ def test_wait_healthy_wrong_model_then_right(
         calls += 1
         return "other" if calls <= 2 else "m"
 
-    ok = ServerController().wait_healthy(
+    ok = serverctl.wait_healthy(
         MODELS_URL,
         HealthWatch(target_model="m", current_model=flipper),
         timeout_s=10,
@@ -266,7 +261,7 @@ def test_wait_healthy_times_out_when_always_red(
     ticks: list[int] = []
     start = time.monotonic()
 
-    ok = ServerController().wait_healthy(
+    ok = serverctl.wait_healthy(
         MODELS_URL,
         HealthWatch(target_model=None, current_model=lambda: "m"),
         timeout_s=1,
@@ -286,7 +281,7 @@ def test_wait_healthy_target_none_accepts_any_green(
         lambda request: httpx.Response(200, json={"data": [{"id": "someone"}]}),
     )
 
-    ok = ServerController().wait_healthy(
+    ok = serverctl.wait_healthy(
         MODELS_URL,
         HealthWatch(target_model=None, current_model=lambda: "never-matches"),
         timeout_s=5,

@@ -10,8 +10,6 @@ class MemorySnapshot(NamedTuple):
     total_gib: float
 
 
-_STATUS_COLOURS = {"green": "green", "amber": "yellow", "red": "red"}
-
 _HTTP_OK = 200
 
 
@@ -70,7 +68,7 @@ def format_status_line(
     port: int,
 ) -> str:
     """Render the status bar line; em-dashes stand in for missing pieces."""
-    colour = _STATUS_COLOURS[state]
+    colour = "yellow" if state == "amber" else state
     model_part = model if model else "—"
     rss_part = f"{rss_gib:.1f}" if rss_gib is not None else "—"
     return (

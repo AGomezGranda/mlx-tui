@@ -10,6 +10,7 @@ from textual.containers import Vertical
 from textual.css.query import NoMatches
 from textual.widgets import Static
 
+from mlx_tui import serverctl
 from mlx_tui.confirm import ConfirmScreen
 from mlx_tui.models import CacheNotFound, ModelRow, delete_repos, scan_models
 from mlx_tui.serverctl import HealthWatch, build_start_command
@@ -19,19 +20,9 @@ from mlx_tui.table import ModelsTable
 if TYPE_CHECKING:
     from mlx_tui.app import MlxTuiApp
 
-# How long a spawned start_cmd has to exit before we stop treating it as a
-# possibly-crashing command and accept it as a long-lived server process.
-_CRASH_GRACE_S = 2.0
-_CRASH_POLL_S = 0.05
-
 
 class ModelsPane(Vertical):
-    """Owns #swap-progress and #models-table plus the rescan/delete/boot workers.
-
-    Pane↔App contract: the pane renders and handles its own widgets while
-    shared state and cross-pane orchestration live on ``MlxTuiApp``, accessed
-    via the typed :attr:`tui` property.
-    """
+    """Owns #swap-progress and #models-table plus the rescan/delete/boot workers."""
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -139,16 +130,13 @@ class ModelsPane(Vertical):
     def run_warm_swap(self, row: ModelRow) -> None:
         timeout = health_timeout(row.size_on_disk)
         try:
-            self.tui.server_ctl.warm_load(
+            serverctl.warm_load(
                 f"http://{self.tui.host}:{self.tui.port}/v1/chat/completions",
                 row.repo_id,
                 timeout_s=timeout,
             )
         except Exception as exc:
-            # Only this worker touches the machine mid-swap, so these
-            # transitions cannot themselves be invalid.
-            self.tui.swap_machine.transition(SwapState.FAILED)
-            self.tui.swap_machine.transition(SwapState.IDLE)
+            self.tui.swap_machine.reset()
             detail = f"{exc.__class__.__name__}: {exc}"[:200]
             self.tui.call_from_thread(self.tui.log_app, f"load failed: {detail}", "red")
             self.tui.call_from_thread(self.tui.set_swap_ui, False)
@@ -161,8 +149,7 @@ class ModelsPane(Vertical):
 
     def _fail_swap(self, message: str | None) -> None:
         """FAILED→IDLE reset, optional red log line, then UI release."""
-        self.tui.swap_machine.transition(SwapState.FAILED)
-        self.tui.swap_machine.transition(SwapState.IDLE)
+        self.tui.swap_machine.reset()
         if message is not None:
             self.tui.call_from_thread(self.tui.log_app, message, "red")
         self.tui.call_from_thread(self.tui.set_swap_ui, False)
@@ -180,7 +167,7 @@ class ModelsPane(Vertical):
             # Marker hygiene: clear tracked state the moment stop fires.
             self.tui._tracked_model = None
             self.tui.call_from_thread(self.tui.refresh_models)
-            stop_rc = self.tui.server_ctl.run_command(
+            stop_rc = serverctl.run_command(
                 self.tui.config.stop_cmd, on_line=stream
             )
             if stop_rc != 0:
@@ -197,8 +184,8 @@ class ModelsPane(Vertical):
             return
         start_full = build_start_command(start_cmd, plan.model_id)
         self.tui.call_from_thread(self.tui.log_app, f"[swap] starting: {start_full}")
-        proc, monitor = self.tui.server_ctl.spawn_with_grace(
-            start_full, on_line=stream, grace_s=_CRASH_GRACE_S, poll_s=_CRASH_POLL_S
+        proc, monitor = serverctl.spawn_with_grace(
+            start_full, on_line=stream, grace_s=2.0, poll_s=0.05
         )
         start_rc = proc.poll()
         if start_rc is not None and start_rc != 0:
@@ -213,11 +200,11 @@ class ModelsPane(Vertical):
                 self._progress_line, plan.model_id or "server", seconds
             )
 
-        ok = self.tui.server_ctl.wait_healthy(
+        ok = serverctl.wait_healthy(
             f"http://{self.tui.host}:{self.tui.port}/v1/models",
             HealthWatch(
                 target_model=plan.model_id,
-                current_model=self.tui.current_model_supplier,
+                current_model=self.tui.effective_model,
                 is_running=(lambda: proc.poll() is None) if monitor else None,
             ),
             timeout_s=deadline,
@@ -242,11 +229,28 @@ class ModelsPane(Vertical):
         self.tui.call_from_thread(self.tui.set_swap_ui, False)
 
     def request_delete_model(self) -> None:
+        if self.tui.swap_machine.busy:
+            self.tui.log_app("swap already in progress", "yellow")
+            return
         table = self.query_one("#models-table", ModelsTable)
         if not self.rows or not 0 <= table.cursor_row < len(self.rows):
             self.tui.log_app("no model selected to delete", "dim")
             return
         row = self.rows[table.cursor_row]
+        # Deleting the model that is currently backing the server leaves the
+        # green dot and loaded marker stale (the process keeps the weights in
+        # RAM while the files vanish), breaks the next warm-load (effective
+        # model still points at the deleted id), and makes the next chat
+        # re-download the deleted repo. Block it with a hint.
+        # Effective is authoritative: tracked warm-swaps shadow stale cmdline,
+        # and when tracked is None it already falls back to cmdline.
+        effective = self.tui.effective_model()
+        if effective is not None and row.repo_id == effective:
+            self.tui.log_app(
+                f"cannot delete {row.repo_id}: it is currently loaded — swap first",
+                "yellow",
+            )
+            return
         # The modal blocks interaction, so the selection cannot move before
         # the callback fires; stash the row there for _on_delete_confirmed.
         self._pending_delete_row = row
@@ -267,6 +271,17 @@ class ModelsPane(Vertical):
 
     @work(exclusive=True, group="delete", thread=True)
     def _run_delete(self, row: ModelRow) -> None:
+        # Race: the loaded model may have changed between the button press
+        # and confirmation (or via an external restart). Re-check here before
+        # touching the cache.
+        effective_now = self.tui.effective_model()
+        if effective_now is not None and row.repo_id == effective_now:
+            self.tui.call_from_thread(
+                self.tui.log_app,
+                f"cannot delete {row.repo_id}: it became active — swap first",
+                "yellow",
+            )
+            return
         try:
             freed = delete_repos(row.revision_hashes)
         except (CacheNotFound, OSError) as exc:
@@ -276,6 +291,12 @@ class ModelsPane(Vertical):
                 "red",
             )
             return
+        # Defensive: if a warm-loaded model slipped past the guard, clear the
+        # tracked marker so the next effective_model() does not keep pointing
+        # at a deleted repo (which would re-trigger a download on chat).
+        if row.repo_id == self.tui._tracked_model:
+            self.tui._tracked_model = None
+            self.tui.call_from_thread(self.tui.refresh_models)
         self.tui.call_from_thread(
             self.tui.log_app, f"deleted {row.repo_id} — freed {freed / 2**30:.1f} GB"
         )

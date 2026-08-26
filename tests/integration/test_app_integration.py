@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 
+import pytest
 from textual.widgets import Input, Static
 
 from mlx_tui.app import MlxTuiApp
@@ -43,8 +44,10 @@ async def test_status_green_and_chat_stamp_over_stub_http(harness: AppHarness) -
     assert stream.content == ""
 
 
-async def test_chat_payload_carries_effective_model(harness: AppHarness) -> None:
-    harness.app.current_model_supplier = lambda: "mlx-community/stub-test"
+async def test_chat_payload_carries_effective_model(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(harness.app, "effective_model", lambda: "mlx-community/stub-test")
     inp = harness.app.query_one("#chat-input", Input)
     inp.value = "hi"
     inp.focus()
@@ -61,8 +64,10 @@ async def test_chat_payload_carries_effective_model(harness: AppHarness) -> None
     assert posts[-1].get("model") == "mlx-community/stub-test"
 
 
-async def test_chat_payload_omits_model_when_unknown(harness: AppHarness) -> None:
-    harness.app.current_model_supplier = lambda: None
+async def test_chat_payload_omits_model_when_unknown(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(harness.app, "effective_model", lambda: None)
     inp = harness.app.query_one("#chat-input", Input)
     inp.value = "hi"
     inp.focus()

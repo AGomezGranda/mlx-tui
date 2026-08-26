@@ -10,8 +10,6 @@ from textual.widgets import DataTable
 from mlx_tui.models import ModelRow, fits_headroom
 
 _FITS_GLYPHS: dict[bool | None, str] = {True: "✓", False: "⚠", None: "—"}
-_COL_FITS = 3
-_COL_LOADED = 4
 
 
 def loaded_cell(repo_id: str, effective_model: str | None) -> str:
@@ -28,6 +26,7 @@ class ModelsTable(DataTable[str]):
     BINDINGS = [
         ("enter", "load_swap", "Load/swap"),
         ("d", "delete_model", "Delete"),
+        ("slash", "search_hf", "Search HF"),
     ]
 
     @override
@@ -65,9 +64,9 @@ class ModelsTable(DataTable[str]):
         for index, row in enumerate(rows):
             new_loaded = loaded_cell(row.repo_id, effective_model)
             new_fits = fits_cell(row.size_on_disk, avail_gib)
-            if self.get_cell_at(Coordinate(index, _COL_LOADED)) != new_loaded:
+            if self.get_cell_at(Coordinate(index, 4)) != new_loaded:
                 self.update_cell(row.repo_id, "loaded", new_loaded)
-            if self.get_cell_at(Coordinate(index, _COL_FITS)) != new_fits:
+            if self.get_cell_at(Coordinate(index, 3)) != new_fits:
                 self.update_cell(row.repo_id, "fits", new_fits)
 
     def action_load_swap(self) -> None:
@@ -81,3 +80,10 @@ class ModelsTable(DataTable[str]):
         from mlx_tui.models_pane import ModelsPane  # noqa: PLC0415
 
         self.app.query_one(ModelsPane).request_delete_model()
+
+    def action_search_hf(self) -> None:
+        # Local import: search_screen hands off to models_pane lazily, so a
+        # module-top import would cycle (same reason as the ModelsPane imports).
+        from mlx_tui.search_screen import SearchScreen  # noqa: PLC0415
+
+        self.app.push_screen(SearchScreen())
