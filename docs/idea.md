@@ -14,8 +14,8 @@ MLX only (`mlx-lm`/`mlx-vlm`) — no vLLM/GGUF/llama.cpp. That constraint is
 deliberate: it removes the need for a backend-abstraction layer or a
 multi-engine config schema.
 
-`local-ai` (this repo) is just one example MLX setup it could point at — the TUI
-owns its own config and doesn't read `mise.toml`/`.env` from here.
+`local-ai` is just one example MLX setup it could point at — the TUI owns its
+own config and doesn't read `mise.toml`/`.env` from there.
 
 ## Why not just use what exists
 
@@ -105,7 +105,10 @@ The app's reason to exist, so it's always on screen.
 
 - **Liveness + loaded model:** `GET /v1/models` every 2s, `httpx`, 500ms timeout.
   Timeout → red dot, not a crash. Same signal a real client would see; no log
-  parsing.
+  parsing. When the dot is red and `start_cmd` is configured, offer a cold
+  start — one keystroke on the red dot, output streamed into the log pane —
+  rather than auto-running the server as a side effect of opening the TUI. A
+  surprising side effect is worse than one extra keystroke.
 - **Memory:** `psutil.Process(pid).memory_info().rss` on the server pid. RSS is
   the honest number — MLX allocates in unified memory, and `mx.get_peak_memory()`
   isn't reachable across a process boundary. Pid from the configured pidfile if
@@ -119,14 +122,19 @@ The app's reason to exist, so it's always on screen.
   accounting makes `available` an approximation, not a hard number — it can read
   low while a load would still succeed. Don't hard-block a load on this number;
   use it to color the fits-in-headroom ✓/⚠ column as a hint, and let an actual
-  load attempt (and its failure) be the ground truth.
+  load attempt (and its failure) be the ground truth. Second caveat: size-on-disk
+  is weights only — KV cache grows with context (~0.1–0.5 MB/token depending on
+  architecture, so GBs at 8k–32k ctx), meaning ✓ against weights alone drifts
+  toward ⚠ as the context fills. The column stays a weights-only hint;
+  long-context loads are the risky end.
 - One `Static`, `set_interval(2, poll)`, reactive update. ~40 lines.
 
 ### Models — a loader, not a browser
 
 One `DataTable`, rows = models actually in the HF cache. Columns: name, size on
 disk, quant bits (parsed from the repo id — `-4bit`/`-8bit`/`-bf16`), fits-in-
-headroom (✓/⚠), loaded-now marker.
+headroom weights-only (✓/⚠ — see the status-bar caveat on KV cache), loaded-now
+marker.
 
 Keys: `enter` load/swap · `d` delete · `/` search HF.
 
@@ -148,7 +156,10 @@ Keys: `enter` load/swap · `d` delete · `/` search HF.
     model swapping" in the chat pane instead of letting it error silently.
 - **Search:** `HfApi().list_models(author="mlx-community", search=q, limit=50)`;
   `↓` = `snapshot_download` in a `@work(thread=True)` worker, progress into the
-  log pane. A search box and a download key — not a full HF browser.
+  log pane. A search box and a download key — not a full HF browser. Scoping to
+  `author=mlx-community` misses MLX repos published elsewhere — accepted until a
+  wanted model doesn't show up; widening is then a one-line change to plain
+  `search=`.
 
 ### Chat — an instrument, not a chat client
 
@@ -160,6 +171,10 @@ Every assistant turn is stamped: `1,284 tok in · 512 out · 13.9 tok/s · TTFT 
 - **Transport:** `POST /v1/chat/completions`, `stream: true`, plain `httpx` SSE.
 - **Numbers:** TTFT = clock at first chunk; tok/s = output tokens ÷ (now − first
   chunk). Client-measured — more honest than log-scraping, and zero new infra.
+  The first turn after a load/swap is stamped **cold** — its TTFT includes
+  weight paging and graph compile, not serving speed. Cold turns are tagged in
+  the pane and excluded from the history sparkline, so a fresh load doesn't
+  paint a fake degradation cliff.
 - **Prompt tokens:** from `usage` in the final chunk if present (may require
   `stream_options.include_usage` — verify); else `len(text)/3.5`, labelled as an
   estimate. No tokenizer dependency just for a status line.
@@ -185,7 +200,9 @@ Five strings don't need form widgets, validation, and a save flow.
 
 ## Verify before writing code
 
-Cheap to check against a running server; the design leans on all three.
+Cheap to check against a running server — ~15 minutes of curl total — and the
+design leans on all three. Run them before touching code, v0 scaffolding
+included.
 
 1. Does `mlx_lm.server` load on demand from the request's `model` field, or is
    swapping a restart? Answer this first, not in parallel with writing v0/v1 —
@@ -220,6 +237,23 @@ Shortcuts taken on purpose: no config file (host/port hardcoded or `--port`),
 no markdown rendering (raw text into a `RichLog`), no params sidebar, no
 history. Prompt tokens estimated as `len/3.5` unless `usage` shows up free.
 
+Implementation notes worth fixing early, while everything still fits on one
+screen:
+
+- **Poll overlap:** guard the 2s poll — if the previous request is still in
+  flight, skip the tick. A wedged server plus a naive loop piles up sockets.
+- **Pid discovery cost:** `psutil.process_iter()` walks every process on the
+  box; run the scan once, cache the pid, re-scan only when the cached pid dies.
+- **Threading:** chat streams in a `@work(exclusive=True)` worker; chunks cross
+  into widgets via `call_from_thread`. Widgets are not thread-safe — this is
+  the classic Textual hang, and v0 is where it gets built or avoided.
+- **TTFT definition:** clock at the first chunk *carrying text*, not the first
+  byte — some servers send a role-only delta first. Fix the definition now;
+  every cold-vs-warm comparison later depends on it not moving.
+- **Liveness isn't just TCP:** a proxy answering 502 HTML or an unrelated
+  service squatting on :8080 must read amber, not green — require parsed JSON
+  with a non-empty `data` list before the dot goes solid.
+
 **Done when:** it runs for a week in a tmux pane during real work.
 **Kill if:** after that week the answer to "is the server up" still comes from
 somewhere else, or the chat pane is only ever used for hello-world prompts —
@@ -232,9 +266,9 @@ is no product. An afternoon lost, not a month.
 model-swapping happen rarely enough that a shell alias covers it?
 
 `DataTable` from `scan_cache_dir()` — name, size on disk, quant bits, fits-in-
-headroom ✓/⚠ (computed against the status bar's available-memory number, which
-is why this comes after v0), loaded-now marker. `enter` loads/swaps, `d`
-deletes behind a confirm modal.
+headroom ✓/⚠ (weights only, computed against the status bar's available-memory
+number, which is why this comes after v0), loaded-now marker. `enter`
+loads/swaps, `d` deletes behind a confirm modal.
 
 This is where the config file arrives, because swap needs `start_cmd` /
 `stop_cmd` / `pidfile` — five strings in `~/.config/mlx-tui/config.toml`, `e`
@@ -244,6 +278,29 @@ any doubt, since it works either way and the warm path is an optimisation.
 
 The real deliverable is not the table — it's owning the *wait*. A progress
 bar and a log pane instead of `tail -f` and guessing whether it's stuck.
+
+Swap is a state machine, because every failure mode lives between states:
+
+```
+idle → stopping → starting → waiting-health → idle
+          │           │             │
+          └───────────┴─────────────┴→ failed → log pane
+```
+
+- **waiting-health is the real progress bar.** Poll `/v1/models` until the new
+  id appears, timeout scaled to model size (~60s base + a margin per GB).
+  mlx-lm emits no structured load progress, so the bar is phase labels plus
+  streamed stderr in the log pane — indeterminate, but never silent.
+- **One swap at a time.** `enter` disabled on the table while a swap is in
+  flight; double-press is the first bug this screen meets.
+- **Marker hygiene:** clear the loaded-now marker the moment `stop_cmd` fires,
+  not when the next poll notices — the status bar lags up to one cycle, and a
+  stale ✓ next to an evicted model is exactly the kind of lie this app exists
+  to prevent.
+- **fits-in-headroom margin:** ⚠ when `size_on_disk > available − margin`,
+  margin ≈ 20% of size — slack for lazy-touch RSS climbing and some KV growth.
+- **Config reload:** re-read the TOML when `$EDITOR` exits; five strings don't
+  justify an mtime watcher.
 
 **Done when:** a model swap is one keystroke and the terminal never leaves the
 TUI.
@@ -258,12 +315,25 @@ in-app, given `hf download` exists?
 Search box over `HfApi().list_models(author="mlx-community", search=q,
 limit=50)`, `↓` triggers `snapshot_download` in a `@work(thread=True)` worker
 with progress into the log pane. Results show repo id, quant, and download
-size against free disk.
+size against free disk. Scoped to `mlx-community`; widen only when a wanted
+repo isn't there (see Search above).
 
 Weakest version of the four, and the most tempting to over-build. The line is:
 a search box and a download key. Not filters, not sorting, not model cards, not
 a README preview, not a favourites list. If it grows past ~80 lines it has
 stopped being v2 and become an HF browser, which is out of scope.
+
+Where the 80 lines actually go:
+
+- **`allow_patterns`** on `snapshot_download` (`*.safetensors`, `*.json`,
+  `tokenizer*`). mlx-community repos often carry multiple formats; a blind pull
+  is gigabytes you'll never load. This one argument is the difference between
+  a downloader and a disk-filler.
+- **Resume is free** — `huggingface_hub` picks up partial downloads on retry.
+  Rely on it silently; building UI for it is already scope creep.
+- **Pre-flight:** `shutil.disk_usage()` against expected size, warn when short.
+- **Handoff:** on completion, rescan and refresh the Models table rows — v2's
+  exit feeds v1's entrance, and that seam working cleanly *is* the feature.
 
 **Done when:** a new model can be found, downloaded, and loaded without a
 second terminal.
@@ -277,12 +347,23 @@ than a live reading, and therefore genuinely can't be answered by any existing
 tool.
 
 Footer strip: last N turns of `(model, ctx_len, tok/s)` in memory, drawn as a
-braille sparkline. ~30 lines. Gated on v0 proving the app, not on v1/v2 — if
+braille sparkline, cold first-turns excluded. ~30 lines. Gated on v0 proving the app, not on v1/v2 — if
 the chat instrumentation is the part being used, this is the natural next
 increment and v1/v2 can be skipped entirely.
 
 In memory only. The moment it wants persistence it's append-JSONL and a
 `--since` flag, not a database and not a Metrics tab.
+
+Fix the buffer record now so the persistence path stays mechanical:
+`(ts, model, prompt_tok, out_tok, ttft_s, tok_s, ctx_len, cold)` — ring buffer,
+one series per model, so a swap doesn't smear two models into one line. Cold
+and cancelled turns are already flagged upstream; the plot just honours the
+flags rather than re-deriving them.
+
+Render two variables, not one: y = tok/s buckets, x = turn order, cell shade =
+ctx depth. The failure worth seeing — fast at 1k, slow at 24k — is inherently
+two-dimensional, which is why a plain tok/s line chart answers the wrong
+question.
 
 **Done when:** the sparkline has actually changed a decision (evicted a model,
 capped a context length).

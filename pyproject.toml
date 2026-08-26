@@ -5,11 +5,23 @@ description = "mlx tui"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "httpx>=0.28",
+    "psutil>=7.0",
     "pyrefly>=1.2.0",
     "pytest>=9.1.1",
     "ruff>=0.16.4",
     "textual>=8.2.8",
 ]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mlx_tui"]
+
+[project.scripts]
+mlx-tui = "mlx_tui.app:main"
 
 [tool.ruff]
 line-length = 88
@@ -18,10 +30,20 @@ src = ["src"]
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I", "PL", "UP", "TID", "ASYNC", "DTZ"]
 
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["PLR2004"]
+
 [tool.pyrefly]
 disable-project-excludes-heuristics = true
 project-includes = ["src", "tests"]
-search-path = ["src", "tests"]
+search-path = [".", "src", "tests"]
 infer-with-first-use = false
 python-version = "3.13"
 preset = "strict"
+
+[dependency-groups]
+dev = ["pytest-asyncio>=1.4"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

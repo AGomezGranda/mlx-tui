@@ -1,0 +1,7 @@
+#status-bar {
+    dock: top;
+    width: 100%;
+}
+#chat-log {
+    height: 1fr;
+}
