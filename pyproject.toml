@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "httpx>=0.28",
+    "huggingface_hub>=1.28",
     "psutil>=7.0",
     "pyrefly>=1.2.0",
     "pytest>=9.1.1",

@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
 
+from mlx_tui.history import CHARS_PER_TOKEN_EST
+
 
 def iter_sse_data(lines: Iterable[str]) -> Iterator[str]:
     """Yield the JSON payload string of each ``data: `` frame.
@@ -109,7 +111,7 @@ def token_accounting(
     tok_in_str = (
         str(prompt_tokens)
         if prompt_tokens is not None
-        else f"{user_chars / 3.5:.0f} (est)"
+        else f"{user_chars / CHARS_PER_TOKEN_EST:.0f} (est)"
     )
     tok_s = rate / elapsed if elapsed > 0 else 0.0
     return tok_in_str, tok_out_str, tok_s

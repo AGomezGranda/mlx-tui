@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pathlib
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import cast
@@ -187,6 +188,82 @@ def test_no_match_returns_none_and_keeps_scanning(
         fake_process_iter([FakeProcess(_PID_LATE, MATCHING_CMDLINE)]),
     )
     assert finder.find() == _PID_LATE
+
+
+def test_pidfile_valid_and_cached(
+    finder: ServerProcessFinder,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pidfile = tmp_path / "server.pid"
+    pidfile.write_text(f"{_PID_CACHED}\n")
+    monkeypatch.setattr(
+        psutil, "Process", fake_process_ctor(running=True, cmdline=MATCHING_CMDLINE)
+    )
+    scans = 0
+
+    def counting_iter(attrs: list[str]) -> Iterator[FakeProcess]:
+        nonlocal scans
+        scans += 1
+        return iter([])
+
+    monkeypatch.setattr(psutil, "process_iter", counting_iter)
+
+    assert finder.find(pidfile=str(pidfile)) == _PID_CACHED
+    assert finder.pid_cache == _PID_CACHED
+
+    # A later poll with no pidfile rides the cache the pidfile seeded.
+    monkeypatch.setattr(psutil, "process_iter", counting_iter)
+    assert finder.find() == _PID_CACHED
+    assert scans == 0
+
+
+def test_pidfile_garbage_falls_through_to_scan(
+    finder: ServerProcessFinder,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pidfile = tmp_path / "server.pid"
+    pidfile.write_text("not-a-pid")
+    monkeypatch.setattr(
+        psutil,
+        "process_iter",
+        fake_process_iter([FakeProcess(_PID_RESCAN, MATCHING_CMDLINE)]),
+    )
+    assert finder.find(pidfile=str(pidfile)) == _PID_RESCAN
+
+
+def test_pidfile_unrelated_cmdline_falls_through_to_scan(
+    finder: ServerProcessFinder,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pidfile = tmp_path / "server.pid"
+    pidfile.write_text(str(_PID_LATE))
+    monkeypatch.setattr(
+        psutil,
+        "Process",
+        fake_process_ctor(running=True, cmdline=["python", "-m", "unrelated.svc"]),
+    )
+    monkeypatch.setattr(
+        psutil,
+        "process_iter",
+        fake_process_iter([FakeProcess(_PID_RESCAN, MATCHING_CMDLINE)]),
+    )
+    assert finder.find(pidfile=str(pidfile)) == _PID_RESCAN
+
+
+def test_pidfile_missing_file_falls_through_to_scan(
+    finder: ServerProcessFinder,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        psutil,
+        "process_iter",
+        fake_process_iter([FakeProcess(_PID_RESCAN, MATCHING_CMDLINE)]),
+    )
+    assert finder.find(pidfile=str(tmp_path / "absent.pid")) == _PID_RESCAN
 
 
 @pytest.mark.parametrize(

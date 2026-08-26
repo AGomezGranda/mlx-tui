@@ -12,12 +12,12 @@ from math import ceil
 
 Message = dict[str, str]
 
-_CHARS_PER_TOKEN_EST = 3.5
+CHARS_PER_TOKEN_EST = 3.5
 
 
 def estimate_tokens(text: str) -> int:
     """Estimate token count as ``chars / 3.5``, matching the stamp heuristic."""
-    return ceil(len(text) / _CHARS_PER_TOKEN_EST)
+    return ceil(len(text) / CHARS_PER_TOKEN_EST)
 
 
 def trim_for_context(

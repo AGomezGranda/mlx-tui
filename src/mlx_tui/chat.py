@@ -20,6 +20,30 @@ from mlx_tui.sse import (
 _FLUSH_INTERVAL_S = 0.1
 
 
+def error_detail(response: httpx.Response) -> str:
+    """Extract the server's explanation from an error body, if one parses.
+
+    mlx-lm/FastAPI errors carry ``{"detail": ...}``; OpenAI-style servers use
+    ``{"error": {"message": ...}}``. A bare status code alone turns
+    "prompt too long" and "model failed to load" into the same red line.
+    """
+    try:
+        body: object = response.json()
+    except ValueError:
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    detail: object = body.get("detail")
+    error = body.get("error")
+    if detail is None and isinstance(error, dict):
+        detail = error.get("message")
+    if detail is None:
+        detail = error
+    if not isinstance(detail, str) or not detail.strip():
+        return ""
+    return f": {detail.strip()}"
+
+
 @dataclass(frozen=True)
 class TurnResult:
     """Values of one completed turn, ready for UI stamp formatting."""

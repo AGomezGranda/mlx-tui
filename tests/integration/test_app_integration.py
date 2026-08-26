@@ -17,7 +17,7 @@ _REPLY = "Hello world this is MLX."
 async def test_status_green_and_chat_stamp_over_stub_http(harness: AppHarness) -> None:
     await harness.app._poll()
     assert harness.app.status_state == "green"
-    assert harness.app._cold_tracker.ever_green is True
+    assert harness.app.cold_tracker.ever_green is True
     inp = harness.app.query_one("#chat-input", Input)
     inp.value = "hi"
     inp.focus()
@@ -43,6 +43,42 @@ async def test_status_green_and_chat_stamp_over_stub_http(harness: AppHarness) -
     assert stream.content == ""
 
 
+async def test_chat_payload_carries_effective_model(harness: AppHarness) -> None:
+    harness.app.current_model_supplier = lambda: "mlx-community/stub-test"
+    inp = harness.app.query_one("#chat-input", Input)
+    inp.value = "hi"
+    inp.focus()
+    await harness.pilot.press("enter")
+
+    def reply_recorded(a: MlxTuiApp) -> bool:
+        return len(harness.chat_pane().messages) == 2
+
+    assert await harness.wait_for(reply_recorded), (
+        f"turn never completed; messages={harness.chat_pane().messages}"
+    )
+    posts = [r for r in harness.server.requests if "messages" in r]
+    assert posts, f"no chat POST captured; requests={harness.server.requests}"
+    assert posts[-1].get("model") == "mlx-community/stub-test"
+
+
+async def test_chat_payload_omits_model_when_unknown(harness: AppHarness) -> None:
+    harness.app.current_model_supplier = lambda: None
+    inp = harness.app.query_one("#chat-input", Input)
+    inp.value = "hi"
+    inp.focus()
+    await harness.pilot.press("enter")
+
+    def reply_recorded(a: MlxTuiApp) -> bool:
+        return len(harness.chat_pane().messages) == 2
+
+    assert await harness.wait_for(reply_recorded), (
+        f"turn never completed; messages={harness.chat_pane().messages}"
+    )
+    posts = [r for r in harness.server.requests if "messages" in r]
+    assert posts, f"no chat POST captured; requests={harness.server.requests}"
+    assert "model" not in posts[-1]
+
+
 async def test_assistant_reply_recorded_in_history(harness: AppHarness) -> None:
     inp = harness.app.query_one("#chat-input", Input)
     inp.value = "hi"
@@ -50,13 +86,13 @@ async def test_assistant_reply_recorded_in_history(harness: AppHarness) -> None:
     await harness.pilot.press("enter")
 
     def reply_recorded(a: MlxTuiApp) -> bool:
-        return len(a.messages) == 2
+        return len(harness.chat_pane().messages) == 2
 
     assert await harness.wait_for(reply_recorded), (
-        f"assistant reply never recorded; messages={harness.app.messages}"
+        f"assistant reply never recorded; messages={harness.chat_pane().messages}"
     )
-    assert harness.app.messages[0] == {"role": "user", "content": "hi"}
-    assert harness.app.messages[1] == {"role": "assistant", "content": _REPLY}
+    assert harness.chat_pane().messages[0] == {"role": "user", "content": "hi"}
+    assert harness.chat_pane().messages[1] == {"role": "assistant", "content": _REPLY}
 
 
 async def test_empty_response_warns_instead_of_silence(harness: AppHarness) -> None:
@@ -74,7 +110,7 @@ async def test_empty_response_warns_instead_of_silence(harness: AppHarness) -> N
     )
     # A stamp still lands (the turn did complete), but nothing was appended.
     assert any("tok/s" in t for t in harness.log_lines())
-    assert harness.app.messages == [{"role": "user", "content": "hi"}]
+    assert harness.chat_pane().messages == [{"role": "user", "content": "hi"}]
 
     def input_enabled(a: MlxTuiApp) -> bool:
         return not a.query_one("#chat-input", Input).disabled
@@ -97,7 +133,10 @@ async def test_length_capped_reply_shows_notice(harness: AppHarness) -> None:
     )
     # The partial reply is still a real answer: shown and recorded.
     assert "Partial ans" in harness.log_lines()
-    assert harness.app.messages[-1] == {"role": "assistant", "content": "Partial ans"}
+    assert harness.chat_pane().messages[-1] == {
+        "role": "assistant",
+        "content": "Partial ans",
+    }
 
     def input_enabled(a: MlxTuiApp) -> bool:
         return not a.query_one("#chat-input", Input).disabled

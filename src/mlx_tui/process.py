@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import psutil
 
 from mlx_tui.status import MemorySnapshot
@@ -16,13 +18,19 @@ class ServerProcessFinder:
     the cached pid died or nothing is cached — never every tick. (Accepted
     trade-off from the v0 plan.) A cache hit is re-validated against
     ``_SERVER_TOKEN_SUFFIXES`` so a recycled pid pointing at an unrelated
-    process is not trusted.
+    process is not trusted. An optional ``pidfile`` is consulted before
+    cache/scan, validated by the same suffix matcher before being trusted.
     """
 
     def __init__(self) -> None:
         self.pid_cache: int | None = None
 
-    def find(self) -> int | None:
+    def find(self, pidfile: str | None = None) -> int | None:
+        if pidfile is not None:
+            pid = self._pid_from_file(pidfile)
+            if pid is not None and self._cmdline_matches(pid):
+                self.pid_cache = pid
+                return pid
         if self.pid_cache is not None and self._cmdline_matches(self.pid_cache):
             return self.pid_cache
         self.pid_cache = None
@@ -32,6 +40,12 @@ class ServerProcessFinder:
                 self.pid_cache = proc.pid
                 return self.pid_cache
         return None
+
+    def _pid_from_file(self, pidfile: str) -> int | None:
+        try:
+            return int(Path(pidfile).read_text().strip())
+        except (OSError, ValueError):
+            return None
 
     def _cmdline_matches(self, pid: int) -> bool:
         try:

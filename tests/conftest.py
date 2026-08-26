@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
@@ -15,11 +16,21 @@ from textual.pilot import Pilot
 from textual.widgets import RichLog
 
 from mlx_tui.app import MlxTuiApp
+from mlx_tui.chat_pane import ChatPane
+from mlx_tui.models_pane import ModelsPane
 from tests.builders import SseStreamBuilder
 
 
 class StubServer(HTTPServer):
     mode: str = "ok"
+
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        handler: type[StubHandler],
+    ) -> None:
+        super().__init__(server_address, handler)
+        self.requests: list[dict[str, object]] = []
 
 
 class StubHandler(BaseHTTPRequestHandler):
@@ -30,6 +41,16 @@ class StubHandler(BaseHTTPRequestHandler):
     def _mode(self) -> str:
         assert isinstance(self.server, StubServer)
         return self.server.mode
+
+    def _record_post(self) -> None:
+        assert isinstance(self.server, StubServer)
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length)
+        try:
+            payload: dict[str, object] = json.loads(raw)
+        except ValueError:
+            payload = {}
+        self.server.requests.append(payload)
 
     def do_GET(self) -> None:
         if self._mode() == "html":
@@ -55,6 +76,20 @@ class StubHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self) -> None:
+        self._record_post()
+        if self._mode() == "probe":
+            # The warm-swap probe: a plain OpenAI-shaped completion reply.
+            body = (
+                b'{"choices": [{"message": {"role": "assistant", "content": "hi"}}],'
+                b' "usage": {"prompt_tokens": 1, "completion_tokens": 1,'
+                b' "total_tokens": 2}}'
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self._mode() == "error500":
             body = b'{"detail": "model load failed"}'
             self.send_response(500)
@@ -152,8 +187,18 @@ class AppHarness:
     def port(self) -> int:
         return int(self.server.server_address[1])
 
+    def models_pane(self) -> ModelsPane:
+        return self.app.query_one(ModelsPane)
+
+    def chat_pane(self) -> ChatPane:
+        return self.app.query_one("#chat-pane", ChatPane)
+
     def log_lines(self) -> list[str]:
         log = self.app.query_one("#chat-log", RichLog)
+        return [strip.text for strip in log.lines]
+
+    def app_log_lines(self) -> list[str]:
+        log = self.app.query_one("#app-log", RichLog)
         return [strip.text for strip in log.lines]
 
     async def wait_for(

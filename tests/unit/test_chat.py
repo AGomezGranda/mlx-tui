@@ -8,7 +8,7 @@ from functools import partial
 import httpx
 import pytest
 
-from mlx_tui.chat import ChatClient
+from mlx_tui.chat import ChatClient, error_detail
 from tests.builders import SseStreamBuilder
 
 Handler = Callable[[httpx.Request], httpx.Response]
@@ -17,6 +17,27 @@ URL = "http://stub/v1/chat/completions"
 
 def _noop_flush(_text: str) -> None:
     return None
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "expected"),
+    [
+        (500, {"detail": "boom"}, ": boom"),
+        (500, {"error": {"message": "nope"}}, ": nope"),
+        (500, {"error": "flat"}, ": flat"),
+        (500, {"detail": "   "}, ""),
+    ],
+)
+def test_error_detail_extracts_server_explanation(
+    status: int, body: object, expected: str
+) -> None:
+    response = httpx.Response(status, json=body)
+    assert error_detail(response) == expected
+
+
+def test_error_detail_non_json_body_yields_empty() -> None:
+    response = httpx.Response(502, text="<html>")
+    assert error_detail(response) == ""
 
 
 def install_transport(monkeypatch: pytest.MonkeyPatch, handler: Handler) -> None:

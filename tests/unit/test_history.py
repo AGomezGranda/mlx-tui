@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mlx_tui.history import estimate_tokens, trim_for_context
+from mlx_tui.history import CHARS_PER_TOKEN_EST, estimate_tokens, trim_for_context
 
 
 def u(text: str) -> dict[str, str]:
@@ -11,6 +11,11 @@ def u(text: str) -> dict[str, str]:
 
 def a(text: str) -> dict[str, str]:
     return {"role": "assistant", "content": text}
+
+
+def test_chars_per_token_constant_is_pinned() -> None:
+    # Both history.py and sse.py depend on this value's stability.
+    assert CHARS_PER_TOKEN_EST == 3.5
 
 
 def test_estimate_tokens_matches_chars_over_three_point_five() -> None:
