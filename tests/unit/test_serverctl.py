@@ -154,9 +154,7 @@ def test_warm_load_sends_probe_payload(monkeypatch: pytest.MonkeyPatch) -> None:
 
     install_transport(monkeypatch, handler)
 
-    serverctl.warm_load(
-        "http://stub/v1/chat/completions", "repo/a", timeout_s=5
-    )
+    serverctl.warm_load("http://stub/v1/chat/completions", "repo/a", timeout_s=5)
 
     payload = json.loads(requests[0].read())
     assert payload["model"] == "repo/a"

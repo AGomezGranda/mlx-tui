@@ -70,5 +70,9 @@ template if it is missing. Note that an in-server load keeps both models
 resident briefly —
 memory pressure is exactly what the ⚠ fits column warns about.
 
+## History strip
+
+Footer braille sparkline above the log, always visible; shows last 64 turns of the current model as y=tok/s over x=turn order (shade=ctx depth via dim/normal/bold quartiles), cold/cancelled excluded; in-memory only — future `--since` will read JSONL.
+
 `ctrl+q` quits.
 

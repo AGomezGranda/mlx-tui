@@ -26,11 +26,37 @@ from mlx_tui.config import (
     parse_config,
     write_template,
 )
+from mlx_tui.history import (
+    SPARKLINE_HEIGHT_ROWS,
+    SPARKLINE_WIDTH,
+    HistoryStore,
+    render_sparkline,
+    sparkline_visible,
+)
 from mlx_tui.models_pane import ModelsPane
 from mlx_tui.process import ServerProcessFinder, memory_snapshot, model_from_cmdline
 from mlx_tui.status import ColdTracker, classify_liveness, format_status_line
 from mlx_tui.swap import BootPlan, SwapMachine, SwapState
 from mlx_tui.table import ModelsTable
+
+
+def _shade_for_ctx(ctx_lens: list[int]) -> list[str]:
+    """Map ctx lengths to Rich styles via quartiles: dim / "" / bold."""
+    if not ctx_lens:
+        return []
+    sorted_lens = sorted(ctx_lens)
+    n = len(sorted_lens)
+    q1 = sorted_lens[n // 4]
+    q3 = sorted_lens[3 * n // 4]
+    styles: list[str] = []
+    for ctx in ctx_lens:
+        if ctx <= q1:
+            styles.append("dim")
+        elif ctx >= q3:
+            styles.append("bold")
+        else:
+            styles.append("")
+    return styles
 
 
 class MlxTuiApp(App[None]):
@@ -45,6 +71,12 @@ class MlxTuiApp(App[None]):
     #status-bar {
         dock: top;
         width: 100%;
+    }
+    #history-strip {
+        dock: bottom;
+        height: 3;
+        border-top: solid $primary;
+        padding: 0 1;
     }
     #app-log {
         dock: bottom;
@@ -78,6 +110,7 @@ class MlxTuiApp(App[None]):
         self._tracked_model: str | None = None
         self.latest_avail_gib: float | None = None
         self.swap_machine = SwapMachine()
+        self.history = HistoryStore()
         # Set synchronously on ctrl+s so a second press cannot slip through
         # during the await inside the async action (busy alone is too late).
         self._cold_start_in_flight = False
@@ -90,6 +123,7 @@ class MlxTuiApp(App[None]):
                 yield ModelsPane(id="models-pane")
             with TabPane("Chat", id="chat"):
                 yield ChatPane(id="chat-pane")
+        yield Static("", id="history-strip")
         yield RichLog(id="app-log", markup=False, wrap=True)
 
     def on_mount(self) -> None:
@@ -99,6 +133,50 @@ class MlxTuiApp(App[None]):
         )
         self.set_interval(2.0, self._poll)
         self.query_one(ModelsPane).rescan()
+        self.update_history_strip()
+
+    def update_history_strip(self) -> None:
+        try:
+            strip = self.query_one("#history-strip", Static)
+        except NoMatches:
+            return
+        model = self.effective_model() or "—"
+        records = self.history.series(model)
+        braille, legend = render_sparkline(
+            records, width=SPARKLINE_WIDTH, height_rows=SPARKLINE_HEIGHT_ROWS
+        )
+        if not braille:
+            strip.update(Text(legend, style="dim"))
+            return
+        # Shade braille chars by ctx quartiles (history.py stays stdlib-only)
+        visible = sparkline_visible(records, SPARKLINE_WIDTH)
+        ctx_lens = [r.ctx_len for r in visible]
+        styles = _shade_for_ctx(ctx_lens)
+        n = len(visible)
+        col_styles: list[str] = []
+        for k in range((n + 1) // 2):
+            s_left: str | None = styles[2 * k] if 2 * k < n else None
+            s_right: str | None = styles[2 * k + 1] if 2 * k + 1 < n else None
+            present = [s for s in (s_left, s_right) if s is not None]
+            if "bold" in present:
+                col_styles.append("bold")
+            elif "" in present:
+                col_styles.append("")
+            else:
+                col_styles.append("dim")
+        lines = braille.split("\n")
+        text = Text()
+        for row_idx, line in enumerate(lines):
+            for k, ch in enumerate(line):
+                style = col_styles[k] if k < len(col_styles) else ""
+                if ch == " ":
+                    style = ""
+                text.append(ch, style=style)
+            if row_idx < len(lines) - 1:
+                text.append("\n")
+        text.append("\n")
+        text.append(legend)
+        strip.update(text)
 
     @on(TabbedContent.TabActivated)
     def _on_tab_activated(self, event: TabbedContent.TabActivated) -> None:
@@ -153,6 +231,10 @@ class MlxTuiApp(App[None]):
             if cmdline_model is not None:
                 return cmdline_model
         return None
+
+    def set_tracked_model(self, model: str | None) -> None:
+        """UI-thread setter for warm-swap tracking (hop via call_from_thread)."""
+        self._tracked_model = model
 
     def refresh_models(self) -> None:
         """Update fits/loaded markers via the pane; a missing pane is fine."""

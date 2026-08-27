@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import socket
+import time
 from typing import TYPE_CHECKING, Any, cast, override
 
 import httpx
@@ -13,7 +14,7 @@ from textual.containers import Vertical
 from textual.widgets import Input, RichLog, Static
 
 from mlx_tui.chat import error_detail, stream_turn
-from mlx_tui.history import trim_for_context
+from mlx_tui.history import TurnRecord, _tok_int, estimate_tokens, trim_for_context
 
 if TYPE_CHECKING:
     from mlx_tui.app import MlxTuiApp
@@ -64,15 +65,17 @@ class ChatPane(Vertical):
 
     @work(exclusive=True, group="chat", thread=True)
     def _run_turn(self, messages: list[dict[str, str]], cold: bool) -> None:
+        model_at_send = self.tui.effective_model() or "—"
+        trimmed = trim_for_context(messages, _MAX_CONTEXT_TOKENS_EST)
+        ctx_len_estimate = sum(estimate_tokens(m["content"]) for m in trimmed)
         payload: dict[str, object] = {
-            "messages": trim_for_context(messages, _MAX_CONTEXT_TOKENS_EST),
+            "messages": trimmed,
             "stream": True,
             "max_tokens": _MAX_OUTPUT_TOKENS,
             "stream_options": {"include_usage": True},
         }
-        model = self.tui.effective_model()
-        if model is not None:
-            payload["model"] = model
+        if model_at_send != "—":
+            payload["model"] = model_at_send
         url = f"http://{self.tui.host}:{self.tui.port}/v1/chat/completions"
         user_chars = len(messages[-1]["content"]) if messages else 0
         try:
@@ -86,10 +89,26 @@ class ChatPane(Vertical):
                 on_active=lambda r: setattr(self, "_active_response", r),
             )
             if self._cancel_requested:
-                self.tui.call_from_thread(
-                    self._write_system_line, "cancelled — request aborted", "dim"
-                )
+                self._record_cancelled(model_at_send, cold, ctx_len_estimate)
                 return
+            ctx_len = (
+                _tok_int(result.tok_in_str)
+                if " (est)" not in result.tok_in_str
+                else ctx_len_estimate
+            )
+            record = TurnRecord(
+                ts=time.time(),
+                model=model_at_send,
+                prompt_tok=_tok_int(result.tok_in_str),
+                out_tok=_tok_int(result.tok_out_str),
+                ttft_s=result.ttft,
+                tok_s=result.tok_s,
+                ctx_len=ctx_len,
+                cold=cold,
+                cancelled=False,
+            )
+            self.tui.call_from_thread(self.tui.history.add, record)
+            self.tui.call_from_thread(self.tui.update_history_strip)
             stamp = (
                 f"{result.tok_in_str} in · {result.tok_out_str} out · "
                 f"{result.tok_s:.1f} tok/s · TTFT {result.ttft:.2f}s"
@@ -110,9 +129,7 @@ class ChatPane(Vertical):
             )
         except (httpx.StreamClosed, httpx.ReadError, httpx.RemoteProtocolError):
             if self._cancel_requested:
-                self.tui.call_from_thread(
-                    self._write_system_line, "cancelled — request aborted", "dim"
-                )
+                self._record_cancelled(model_at_send, cold, ctx_len_estimate)
             else:
                 self.tui.call_from_thread(
                     self._write_system_line,
@@ -167,6 +184,26 @@ class ChatPane(Vertical):
             log.write("")
         for notice in notices:
             log.write(Text(notice, style="yellow"))
+
+    def _record_cancelled(
+        self, model_at_send: str, cold: bool, ctx_len_estimate: int
+    ) -> None:
+        record = TurnRecord(
+            ts=time.time(),
+            model=model_at_send,
+            prompt_tok=0,
+            out_tok=0,
+            ttft_s=0.0,
+            tok_s=0.0,
+            ctx_len=ctx_len_estimate,
+            cold=cold,
+            cancelled=True,
+        )
+        self.tui.call_from_thread(self.tui.history.add, record)
+        self.tui.call_from_thread(self.tui.update_history_strip)
+        self.tui.call_from_thread(
+            self._write_system_line, "cancelled — request aborted", "dim"
+        )
 
     def _write_system_line(self, message: str, style: str) -> None:
         self.query_one("#chat-log", RichLog).write(Text(message, style=style))

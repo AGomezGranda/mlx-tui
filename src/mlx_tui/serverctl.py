@@ -51,9 +51,7 @@ def run_command(cmd: str, *, on_line: Callable[[str], None]) -> int:
         return proc.wait()
 
 
-def spawn_command(
-    cmd: str, *, on_line: Callable[[str], None]
-) -> subprocess.Popen[str]:
+def spawn_command(cmd: str, *, on_line: Callable[[str], None]) -> subprocess.Popen[str]:
     """Start a long-lived command (a server) without waiting for its exit."""
     proc: subprocess.Popen[str] = subprocess.Popen(
         cmd,
@@ -132,7 +130,8 @@ def wait_healthy(
             except (httpx.HTTPError, ValueError):
                 pass
             matched = (
-                watch.target_model is None or watch.current_model() == watch.target_model
+                watch.target_model is None
+                or watch.current_model() == watch.target_model
             )
             if green and matched:
                 return True

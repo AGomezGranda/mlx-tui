@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 
 import pytest
 from textual.widgets import Input, Static
 
 from mlx_tui.app import MlxTuiApp
+from mlx_tui.history import TurnRecord
 from tests.conftest import AppHarness
 
 _STAMP_RE = re.compile(
@@ -47,7 +49,9 @@ async def test_status_green_and_chat_stamp_over_stub_http(harness: AppHarness) -
 async def test_chat_payload_carries_effective_model(
     harness: AppHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(harness.app, "effective_model", lambda: "mlx-community/stub-test")
+    monkeypatch.setattr(
+        harness.app, "effective_model", lambda: "mlx-community/stub-test"
+    )
     inp = harness.app.query_one("#chat-input", Input)
     inp.value = "hi"
     inp.focus()
@@ -237,3 +241,216 @@ async def test_truncated_stream_red_line_and_no_stale_pane(harness: AppHarness) 
         return not a.query_one("#chat-input", Input).disabled
 
     assert await harness.wait_for(input_enabled)
+
+
+async def test_history_strip_renders_and_switches_on_swap(harness: AppHarness) -> None:
+    def strip_text() -> str:
+        s = harness.app.query_one("#history-strip", Static)
+        # textual 8.2.8 Static stores content; render() returns Text/str
+        try:
+            return str(s.render())
+        except Exception:
+            return str(getattr(s, "content", ""))
+
+    strip = harness.app.query_one("#history-strip", Static)
+    # Also ensure app-log exists and strip is docked above log by DOM order
+    log = harness.app.query_one("#app-log")
+    assert strip is not None and log is not None
+
+    harness.app.history.clear()
+    harness.app._tracked_model = "model-a"
+    harness.app.update_history_strip()
+    await harness.pilot.pause()
+    assert "no history yet" in strip_text()
+
+    harness.app.history.add(
+        TurnRecord(
+            ts=time.time(),
+            model="model-a",
+            prompt_tok=10,
+            out_tok=5,
+            ttft_s=0.1,
+            tok_s=12.3,
+            ctx_len=100,
+            cold=False,
+        )
+    )
+    harness.app.update_history_strip()
+    await harness.pilot.pause()
+    rendered = strip_text()
+    assert "tok/s" in rendered
+    assert "no history yet" not in rendered
+
+    # Switch to new model — should show placeholder
+    harness.app._tracked_model = "other/model"
+    harness.app.update_history_strip()
+    await harness.pilot.pause()
+    assert "no history yet" in strip_text()
+
+    # Switch back restores sparkline
+    harness.app._tracked_model = "model-a"
+    harness.app.update_history_strip()
+    await harness.pilot.pause()
+    assert "tok/s" in strip_text()
+    assert "no history yet" not in strip_text()
+
+    # Cleanup
+    harness.app.history.clear()
+    harness.app._tracked_model = None
+
+
+def _strip_text(harness: AppHarness) -> str:
+    s = harness.app.query_one("#history-strip", Static)
+    try:
+        return str(s.render())
+    except Exception:
+        return str(getattr(s, "content", ""))
+
+
+async def test_history_records_one_turn_and_shows_strip(harness: AppHarness) -> None:
+    harness.app.history.clear()
+    harness.app._tracked_model = "history-model-a"
+    harness.server.mode = "ok"
+    await harness.app._poll()
+    harness.app.update_history_strip()
+    await harness.pilot.pause()
+    assert "no history yet" in _strip_text(harness)
+    inp = harness.app.query_one("#chat-input", Input)
+    inp.value = "hi"
+    inp.focus()
+    await harness.pilot.press("enter")
+
+    def history_has_one(a: MlxTuiApp) -> bool:
+        return len(a.history.series(a.effective_model() or "—")) == 1
+
+    assert await harness.wait_for(history_has_one), (
+        f"history not recorded; series={harness.app.history.series(harness.app.effective_model() or '—')}"
+    )
+    records = harness.app.history.series(harness.app.effective_model() or "—")
+    assert records[0].cold is False
+    assert records[0].tok_s > 0
+    assert records[0].model == (harness.app.effective_model() or "—")
+    await harness.pilot.pause()
+    assert "no history yet" not in _strip_text(harness)
+    assert "tok/s" in _strip_text(harness)
+    harness.app.history.clear()
+    harness.app._tracked_model = None
+
+
+async def test_history_cancelled_excluded_from_sparkline(harness: AppHarness) -> None:
+    harness.server.mode = "slow"
+    await harness.app._poll()
+    harness.app.history.clear()
+    harness.app._tracked_model = "history-cancel-model"
+    harness.app.update_history_strip()
+    await harness.pilot.pause()
+    inp = harness.app.query_one("#chat-input", Input)
+    inp.value = "hi"
+    inp.focus()
+    await harness.pilot.press("enter")
+
+    def submitted(a: MlxTuiApp) -> bool:
+        return any("you ›" in t for t in harness.log_lines())
+
+    assert await harness.wait_for(submitted)
+    await harness.pilot.press("escape")
+
+    def cancelled(a: MlxTuiApp) -> bool:
+        return any("cancelled — request aborted" in t for t in harness.log_lines())
+
+    assert await harness.wait_for(cancelled)
+
+    def history_cancelled(a: MlxTuiApp) -> bool:
+        recs = a.history.all_records()
+        return len(recs) == 1 and recs[0].cancelled is True
+
+    assert await harness.wait_for(history_cancelled), (
+        f"cancelled not recorded; all={harness.app.history.all_records()}"
+    )
+    harness.app.update_history_strip()
+    await harness.pilot.pause()
+    assert "no history yet" in _strip_text(harness)
+    harness.app.history.clear()
+    harness.app._tracked_model = None
+
+
+async def test_history_error_not_recorded(harness: AppHarness) -> None:
+    harness.server.mode = "error500"
+    await harness.app._poll()
+    harness.app.history.clear()
+    harness.app._tracked_model = "history-error-model"
+    harness.app.update_history_strip()
+    await harness.pilot.pause()
+    inp = harness.app.query_one("#chat-input", Input)
+    inp.value = "hi"
+    inp.focus()
+    await harness.pilot.press("enter")
+
+    def error_visible(a: MlxTuiApp) -> bool:
+        return any("server error" in t for t in harness.log_lines())
+
+    assert await harness.wait_for(error_visible)
+    await asyncio.sleep(0.3)
+    assert harness.app.history.all_records() == []
+    assert "no history yet" in _strip_text(harness)
+    harness.app.history.clear()
+    harness.app._tracked_model = None
+
+
+async def test_history_cold_excluded_and_per_model_isolation(
+    harness: AppHarness,
+) -> None:
+    harness.app.history.clear()
+    harness.app._tracked_model = "cold-model-a"
+    # Manually add cold record — should be filtered from sparkline
+    harness.app.history.add(
+        TurnRecord(
+            ts=time.time(),
+            model="cold-model-a",
+            prompt_tok=10,
+            out_tok=5,
+            ttft_s=0.1,
+            tok_s=12.3,
+            ctx_len=100,
+            cold=True,
+        )
+    )
+    harness.app.update_history_strip()
+    await harness.pilot.pause()
+    assert "no history yet" in _strip_text(harness)
+
+    # One normal turn
+    harness.server.mode = "ok"
+    await harness.app._poll()
+    inp = harness.app.query_one("#chat-input", Input)
+    inp.value = "hi"
+    inp.focus()
+    await harness.pilot.press("enter")
+
+    def history_len_two(a: MlxTuiApp) -> bool:
+        return len(a.history.series("cold-model-a")) == 2
+
+    assert await harness.wait_for(history_len_two), (
+        f"series len not 2; series={harness.app.history.series('cold-model-a')}"
+    )
+    await harness.pilot.pause()
+    # Sparkline should show 1 turn (cold filtered) but storage has 2
+    assert "1 turns" in _strip_text(harness)
+    assert len(harness.app.history.all_records()) == 2
+
+    # Isolation: other model empty
+    harness.app._tracked_model = "other/model"
+    harness.app.update_history_strip()
+    await harness.pilot.pause()
+    assert "no history yet" in _strip_text(harness)
+    assert harness.app.history.series("other/model") == []
+    assert len(harness.app.history.series("cold-model-a")) == 2
+
+    # Switch back
+    harness.app._tracked_model = "cold-model-a"
+    harness.app.update_history_strip()
+    await harness.pilot.pause()
+    assert "tok/s" in _strip_text(harness)
+
+    harness.app.history.clear()
+    harness.app._tracked_model = None

@@ -90,7 +90,10 @@ class DownloadProgress:
         with self._lock:
             self._disk_bytes += max(disk_delta, 0)
             self._expected = max(self._expected, expected)
-            if self.on_progress is None or now - self._last_flush < _PROGRESS_MIN_INTERVAL_S:
+            if (
+                self.on_progress is None
+                or now - self._last_flush < _PROGRESS_MIN_INTERVAL_S
+            ):
                 return None
             self._last_flush = now
             return (self._disk_bytes, self._expected)

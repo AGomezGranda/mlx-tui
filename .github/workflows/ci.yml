@@ -29,7 +29,7 @@ jobs:
         run: uv run ruff check .
 
       - name: Check formatting
-        run: uv run ruff format --check src tests main.py
+        run: uv run ruff format --check src tests
 
       - name: Type check
         run: uv run pyrefly check

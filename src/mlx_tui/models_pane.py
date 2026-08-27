@@ -141,10 +141,11 @@ class ModelsPane(Vertical):
             self.tui.call_from_thread(self.tui.log_app, f"load failed: {detail}", "red")
             self.tui.call_from_thread(self.tui.set_swap_ui, False)
             return
-        self.tui._tracked_model = row.repo_id
+        self.tui.call_from_thread(self.tui.set_tracked_model, row.repo_id)
         self.tui.swap_machine.transition(SwapState.IDLE)
         self.tui.call_from_thread(self.tui.log_app, f"✓ {row.repo_id} loaded")
         self.tui.call_from_thread(self.tui.refresh_models)
+        self.tui.call_from_thread(self.tui.update_history_strip)
         self.tui.call_from_thread(self.tui.set_swap_ui, False)
 
     def _fail_swap(self, message: str | None) -> None:
@@ -165,11 +166,9 @@ class ModelsPane(Vertical):
                 self._fail_swap("[swap] commands vanished from config")
                 return
             # Marker hygiene: clear tracked state the moment stop fires.
-            self.tui._tracked_model = None
+            self.tui.call_from_thread(self.tui.set_tracked_model, None)
             self.tui.call_from_thread(self.tui.refresh_models)
-            stop_rc = serverctl.run_command(
-                self.tui.config.stop_cmd, on_line=stream
-            )
+            stop_rc = serverctl.run_command(self.tui.config.stop_cmd, on_line=stream)
             if stop_rc != 0:
                 self._fail_swap(f"[swap] stop_cmd exited {stop_rc}")
                 return
@@ -211,10 +210,16 @@ class ModelsPane(Vertical):
             on_tick=tick,
         )
         if ok:
-            self.tui._tracked_model = plan.model_id or self.tui.effective_model()
+            if plan.model_id:
+                self.tui.call_from_thread(self.tui.set_tracked_model, plan.model_id)
+            else:
+                self.tui.call_from_thread(
+                    lambda: self.tui.set_tracked_model(self.tui.effective_model())
+                )
             self.tui.swap_machine.transition(SwapState.IDLE)
             self.tui.call_from_thread(self.tui.log_app, plan.success_line)
             self.tui.call_from_thread(self.tui.refresh_models)
+            self.tui.call_from_thread(self.tui.update_history_strip)
         elif monitor and proc.poll() is not None:
             self._fail_swap(f"[swap] start_cmd exited {proc.returncode}")
         else:
@@ -295,7 +300,7 @@ class ModelsPane(Vertical):
         # tracked marker so the next effective_model() does not keep pointing
         # at a deleted repo (which would re-trigger a download on chat).
         if row.repo_id == self.tui._tracked_model:
-            self.tui._tracked_model = None
+            self.tui.call_from_thread(self.tui.set_tracked_model, None)
             self.tui.call_from_thread(self.tui.refresh_models)
         self.tui.call_from_thread(
             self.tui.log_app, f"deleted {row.repo_id} — freed {freed / 2**30:.1f} GB"

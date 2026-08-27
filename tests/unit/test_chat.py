@@ -98,9 +98,7 @@ def test_estimate_fallback_without_usage(monkeypatch: pytest.MonkeyPatch) -> Non
     )
     install_transport(monkeypatch, lambda request: stream_response(body))
 
-    result = stream_turn(
-        URL, {"messages": []}, user_chars=70, on_flush=_noop_flush
-    )
+    result = stream_turn(URL, {"messages": []}, user_chars=70, on_flush=_noop_flush)
 
     assert result.full_text == "abcd"
     assert result.tok_in_str == "20 (est)"
@@ -140,9 +138,7 @@ def test_length_finish_reason_is_surfaced(monkeypatch: pytest.MonkeyPatch) -> No
     )
     install_transport(monkeypatch, lambda request: stream_response(body))
 
-    result = stream_turn(
-        URL, {"messages": []}, user_chars=2, on_flush=_noop_flush
-    )
+    result = stream_turn(URL, {"messages": []}, user_chars=2, on_flush=_noop_flush)
 
     assert result.full_text == "Partial ans"
     assert result.finish_reason == "length"
