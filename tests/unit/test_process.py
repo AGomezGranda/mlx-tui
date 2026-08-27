@@ -10,7 +10,8 @@ from typing import cast
 import psutil
 import pytest
 
-from mlx_tui.process import ServerProcessFinder, memory_snapshot, model_from_cmdline
+import mlx_tui.process as proc_mod
+from mlx_tui.process import find_server_pid, memory_snapshot, model_from_cmdline
 
 MATCHING_CMDLINE = ["python", "-m", "mlx_lm.server", "--model", "m"]
 _PID_CACHED = 100
@@ -64,20 +65,18 @@ def fake_process_ctor(
     return _ctor
 
 
-@pytest.fixture(name="finder")
-def _finder() -> ServerProcessFinder:
-    return ServerProcessFinder()
+@pytest.fixture(autouse=True)
+def _clear_cache() -> None:
+    proc_mod._pid_cache = None  # type: ignore[attr-defined]
 
 
-def test_find_scans_then_caches(
-    finder: ServerProcessFinder, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_find_scans_then_caches(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         psutil,
         "process_iter",
         fake_process_iter([FakeProcess(_PID_CACHED, MATCHING_CMDLINE)]),
     )
-    assert finder.find() == _PID_CACHED
+    assert find_server_pid() == _PID_CACHED
 
     scans = 0
 
@@ -90,7 +89,7 @@ def test_find_scans_then_caches(
     monkeypatch.setattr(
         psutil, "Process", fake_process_ctor(running=True, cmdline=MATCHING_CMDLINE)
     )
-    assert finder.find() == _PID_CACHED
+    assert find_server_pid() == _PID_CACHED
     assert scans == 0
 
 
@@ -103,7 +102,6 @@ def test_find_scans_then_caches(
     ],
 )
 def test_find_suffix_matching(
-    finder: ServerProcessFinder,
     monkeypatch: pytest.MonkeyPatch,
     token: str,
     expected_pid: int | None,
@@ -112,36 +110,32 @@ def test_find_suffix_matching(
         [FakeProcess(expected_pid, ["python", token])] if expected_pid else []
     )
     monkeypatch.setattr(psutil, "process_iter", fake_process_iter(procs))
-    assert finder.find() == expected_pid
+    assert find_server_pid() == expected_pid
 
 
-def test_cache_dead_rescans(
-    finder: ServerProcessFinder, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_cache_dead_rescans(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         psutil,
         "process_iter",
         fake_process_iter([FakeProcess(_PID_CACHED, MATCHING_CMDLINE)]),
     )
-    assert finder.find() == _PID_CACHED
+    assert find_server_pid() == _PID_CACHED
     monkeypatch.setattr(psutil, "Process", fake_process_ctor(running=False))
     monkeypatch.setattr(
         psutil,
         "process_iter",
         fake_process_iter([FakeProcess(_PID_RESCAN, MATCHING_CMDLINE)]),
     )
-    assert finder.find() == _PID_RESCAN
+    assert find_server_pid() == _PID_RESCAN
 
 
-def test_cache_recycled_pid_rescans(
-    finder: ServerProcessFinder, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_cache_recycled_pid_rescans(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         psutil,
         "process_iter",
         fake_process_iter([FakeProcess(_PID_CACHED, MATCHING_CMDLINE)]),
     )
-    assert finder.find() == _PID_CACHED
+    assert find_server_pid() == _PID_CACHED
 
     # The OS recycles the pid onto an unrelated process: alive but wrong cmdline.
     monkeypatch.setattr(
@@ -154,12 +148,10 @@ def test_cache_recycled_pid_rescans(
         "process_iter",
         fake_process_iter([FakeProcess(_PID_RESCAN, MATCHING_CMDLINE)]),
     )
-    assert finder.find() == _PID_RESCAN
+    assert find_server_pid() == _PID_RESCAN
 
 
-def test_cache_access_denied_rescans(
-    finder: ServerProcessFinder, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_cache_access_denied_rescans(monkeypatch: pytest.MonkeyPatch) -> None:
     class DeniedProcess:
         def cmdline(self) -> list[str]:
             raise psutil.AccessDenied(pid=_PID_CACHED)
@@ -167,31 +159,30 @@ def test_cache_access_denied_rescans(
     def denied_ctor(pid: int) -> DeniedProcess:
         return DeniedProcess()
 
-    finder.pid_cache = _PID_CACHED
+    proc_mod._pid_cache = _PID_CACHED  # type: ignore[attr-defined]
     monkeypatch.setattr(psutil, "Process", denied_ctor)
     monkeypatch.setattr(
         psutil,
         "process_iter",
         fake_process_iter([FakeProcess(_PID_LATE, MATCHING_CMDLINE)]),
     )
-    assert finder.find() == _PID_LATE
+    assert find_server_pid() == _PID_LATE
 
 
 def test_no_match_returns_none_and_keeps_scanning(
-    finder: ServerProcessFinder, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(psutil, "process_iter", fake_process_iter([]))
-    assert finder.find() is None
+    assert find_server_pid() is None
     monkeypatch.setattr(
         psutil,
         "process_iter",
         fake_process_iter([FakeProcess(_PID_LATE, MATCHING_CMDLINE)]),
     )
-    assert finder.find() == _PID_LATE
+    assert find_server_pid() == _PID_LATE
 
 
 def test_pidfile_valid_and_cached(
-    finder: ServerProcessFinder,
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -209,17 +200,16 @@ def test_pidfile_valid_and_cached(
 
     monkeypatch.setattr(psutil, "process_iter", counting_iter)
 
-    assert finder.find(pidfile=str(pidfile)) == _PID_CACHED
-    assert finder.pid_cache == _PID_CACHED
+    assert find_server_pid(pidfile=str(pidfile)) == _PID_CACHED
+    assert proc_mod._pid_cache == _PID_CACHED  # type: ignore[attr-defined]
 
     # A later poll with no pidfile rides the cache the pidfile seeded.
     monkeypatch.setattr(psutil, "process_iter", counting_iter)
-    assert finder.find() == _PID_CACHED
+    assert find_server_pid() == _PID_CACHED
     assert scans == 0
 
 
 def test_pidfile_garbage_falls_through_to_scan(
-    finder: ServerProcessFinder,
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -230,11 +220,10 @@ def test_pidfile_garbage_falls_through_to_scan(
         "process_iter",
         fake_process_iter([FakeProcess(_PID_RESCAN, MATCHING_CMDLINE)]),
     )
-    assert finder.find(pidfile=str(pidfile)) == _PID_RESCAN
+    assert find_server_pid(pidfile=str(pidfile)) == _PID_RESCAN
 
 
 def test_pidfile_unrelated_cmdline_falls_through_to_scan(
-    finder: ServerProcessFinder,
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -250,11 +239,10 @@ def test_pidfile_unrelated_cmdline_falls_through_to_scan(
         "process_iter",
         fake_process_iter([FakeProcess(_PID_RESCAN, MATCHING_CMDLINE)]),
     )
-    assert finder.find(pidfile=str(pidfile)) == _PID_RESCAN
+    assert find_server_pid(pidfile=str(pidfile)) == _PID_RESCAN
 
 
 def test_pidfile_missing_file_falls_through_to_scan(
-    finder: ServerProcessFinder,
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -263,7 +251,7 @@ def test_pidfile_missing_file_falls_through_to_scan(
         "process_iter",
         fake_process_iter([FakeProcess(_PID_RESCAN, MATCHING_CMDLINE)]),
     )
-    assert finder.find(pidfile=str(tmp_path / "absent.pid")) == _PID_RESCAN
+    assert find_server_pid(pidfile=str(tmp_path / "absent.pid")) == _PID_RESCAN
 
 
 @pytest.mark.parametrize(

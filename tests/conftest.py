@@ -18,7 +18,7 @@ from textual.widgets import RichLog
 from mlx_tui.app import MlxTuiApp
 from mlx_tui.chat_pane import ChatPane
 from mlx_tui.models_pane import ModelsPane
-from tests.builders import SseStreamBuilder
+from tests.builders import sse_frames
 
 
 class StubServer(HTTPServer):
@@ -106,7 +106,7 @@ class StubHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
-            frame = SseStreamBuilder().role_frame().delta("Hel").build()
+            frame = sse_frames(deltas=["Hel"], finish=None, done=False)
             self.wfile.write(f"{len(frame):X}\r\n".encode() + frame)
             self.wfile.flush()
             time.sleep(0.15)
@@ -119,31 +119,14 @@ class StubHandler(BaseHTTPRequestHandler):
         if self._mode() == "length_cap":
             # finish_reason "length" with no [DONE]-adjacent stop frame: what
             # mlx-lm emits when the reply hits the max-tokens cap.
-            body = (
-                SseStreamBuilder()
-                .role_frame()
-                .delta("Partial ans")
-                .finish_frame(reason="length")
-                .usage(9, 3)
-                .done()
-                .build()
-            )
+            body = sse_frames(deltas=["Partial ans"], finish="length", usage=(9, 3))
         elif self._mode() == "empty":
             # 200 OK but zero content deltas — the silent-no-answer shape.
-            body = SseStreamBuilder().role_frame().usage(12, 0).done().build()
+            body = sse_frames(finish=None, usage=(12, 0))
         else:
-            body = (
-                SseStreamBuilder()
-                .role_frame()
-                .delta("Hello")
-                .delta(" world")
-                .delta(" this")
-                .delta(" is")
-                .delta(" MLX.")
-                .finish_frame()
-                .usage(12, 6)
-                .done()
-                .build()
+            body = sse_frames(
+                deltas=["Hello", " world", " this", " is", " MLX."],
+                usage=(12, 6),
             )
         if self._mode() == "slow":
             # Hold back everything after the role frame so the client has an
@@ -195,11 +178,11 @@ class AppHarness:
 
     def log_lines(self) -> list[str]:
         log = self.app.query_one("#chat-log", RichLog)
-        return [strip.text for strip in log.lines]
+        return [strip.text.rstrip() for strip in log.lines]
 
     def app_log_lines(self) -> list[str]:
         log = self.app.query_one("#app-log", RichLog)
-        return [strip.text for strip in log.lines]
+        return [strip.text.rstrip() for strip in log.lines]
 
     async def wait_for(
         self, predicate: Callable[[MlxTuiApp], bool], attempts: int = 200

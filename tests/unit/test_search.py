@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -14,12 +15,11 @@ import mlx_tui.search as search_mod
 from mlx_tui.search import (
     ALLOW_PATTERNS,
     CancelledDownload,
-    DownloadProgress,
+    _throttled_tqdm,
     filtered_download_size,
     fits_disk,
     free_disk_bytes,
     list_results,
-    make_progress_tqdm,
     repo_files_with_sizes,
 )
 
@@ -152,12 +152,18 @@ def test_fits_disk_parametrized(
 
 
 # ---------------------------------------------------------------------------
-# DownloadProgress + make_progress_tqdm
+# _throttled_tqdm (replaces DownloadProgress + make_progress_tqdm)
 # ---------------------------------------------------------------------------
 
 
-def _make_bar(progress: DownloadProgress, desc: str, bar_format: str, total: int = 0):  # type: ignore[no-untyped-def]
-    TqdmClass = make_progress_tqdm(progress)
+def _make_bar(
+    on_progress: Callable[[int, int], None] | None,
+    cancel_event: threading.Event | None,
+    desc: str,
+    bar_format: str,
+    total: int = 0,
+) -> Any:  # type: ignore[no-untyped-def]
+    TqdmClass = _throttled_tqdm(on_progress, cancel_event)
     bar = TqdmClass(
         desc=desc,
         total=total,
@@ -177,9 +183,10 @@ def test_progress_forwards_throttled_snapshots() -> None:
     def on_progress(done: int, expected: int) -> None:
         snapshots.append((done, expected))
 
-    progress = DownloadProgress(on_progress=on_progress)
-    bar, _T = _make_bar(
-        progress,
+    cancel = threading.Event()
+    bar, TqdmClass = _make_bar(
+        on_progress,
+        cancel,
         desc="Reconstructing (incomplete total...)",
         bar_format="{l_bar}{bar}| {n_fmt:>5}B / {total_fmt:>5}B",
         total=0,
@@ -190,14 +197,14 @@ def test_progress_forwards_throttled_snapshots() -> None:
     assert snapshots == [(400, 1000)]
 
     # immediate second update should be throttled (no new snapshot)
-    progress._last_flush = time.monotonic()
+    TqdmClass._mlx_state["last_flush"] = time.monotonic()  # type: ignore[attr-defined]
     bar.update(100)
     assert len(snapshots) == 1
     # totals still advanced despite throttling
-    assert progress.totals()[0] == 500
+    assert TqdmClass._mlx_state["disk_bytes"] == 500  # type: ignore[attr-defined]
 
     # after resetting throttle window, next update flushes again
-    progress._last_flush = 0.0
+    TqdmClass._mlx_state["last_flush"] = 0.0  # type: ignore[attr-defined]
     bar.update(100)
     assert len(snapshots) == 2
     # disk_bytes = 400 + 100 + 100 = 600; expected remains 1000
@@ -211,57 +218,67 @@ def test_progress_ignores_xet_network_bar() -> None:
     def on_progress(done: int, expected: int) -> None:
         snapshots.append((done, expected))
 
-    progress = DownloadProgress(on_progress=on_progress)
-    # reconstruction bar
-    recon_bar, _ = _make_bar(
-        progress,
+    cancel = threading.Event()
+    # reconstruction bar and xet bar share same on_progress/cancel/state via same class
+    TqdmClass = _throttled_tqdm(on_progress, cancel)
+    recon_bar = TqdmClass(
         desc="Reconstructing (incomplete total...)",
-        bar_format="{l_bar}{bar}| {n_fmt:>5}B / {total_fmt:>5}B",
         total=1000,
+        initial=0,
+        unit="B",
+        unit_scale=True,
+        bar_format="{l_bar}{bar}| {n_fmt:>5}B / {total_fmt:>5}B",
+        name="x",
+        disable=True,
     )
-    # xet network bar — should be ignored for display but still cancel-checked
-    xet_bar, _ = _make_bar(
-        progress,
+    xet_bar = TqdmClass(
         desc="Downloading bytes",
-        bar_format="{desc}: {bar}| {n_fmt:>5}B{postfix:>12}",
         total=982,
+        initial=0,
+        unit="B",
+        unit_scale=True,
+        bar_format="{desc}: {bar}| {n_fmt:>5}B{postfix:>12}",
+        name="x",
+        disable=True,
     )
     # xet update must not affect disk totals or emit snapshot
     xet_bar.update(982)
-    assert progress.totals() == (0, 0)
+    assert TqdmClass._mlx_state["disk_bytes"] == 0  # type: ignore[attr-defined]
     assert snapshots == []
 
     recon_bar.update(500)
-    assert progress.totals()[0] == 500
+    assert TqdmClass._mlx_state["disk_bytes"] == 500  # type: ignore[attr-defined]
     assert len(snapshots) == 1
     recon_bar.close()
     xet_bar.close()
 
 
 def test_progress_negative_delta_never_reduces_display() -> None:
-    progress = DownloadProgress(on_progress=lambda _d, _e: None)
-    bar, _ = _make_bar(
-        progress,
+    cancel = threading.Event()
+    bar, TqdmClass = _make_bar(
+        lambda _d, _e: None,
+        cancel,
         desc="Reconstructing (incomplete total...)",
         bar_format="{l_bar}{bar}| {n_fmt:>5}B / {total_fmt:>5}B",
         total=1000,
     )
     bar.update(300)
-    assert progress.totals()[0] == 300
+    assert TqdmClass._mlx_state["disk_bytes"] == 300  # type: ignore[attr-defined]
     bar.update(-50)
-    assert progress.totals()[0] == 300
+    assert TqdmClass._mlx_state["disk_bytes"] == 300  # type: ignore[attr-defined]
     bar.close()
 
 
 def test_cancel_raises_and_is_shared_across_bars() -> None:
-    progress = DownloadProgress(on_progress=lambda _d, _e: None)
+    cancel = threading.Event()
     bar, TqdmClass = _make_bar(
-        progress,
+        lambda _d, _e: None,
+        cancel,
         desc="Reconstructing (incomplete total...)",
         bar_format="{l_bar}{bar}| {n_fmt:>5}B / {total_fmt:>5}B",
         total=100,
     )
-    progress.cancel_event.set()
+    cancel.set()
     with pytest.raises(CancelledDownload):
         bar.update(1)
 
@@ -288,16 +305,17 @@ def test_close_flushes_final_totals() -> None:
     def on_progress(done: int, expected: int) -> None:
         snapshots.append((done, expected))
 
-    progress = DownloadProgress(on_progress=on_progress)
-    bar, _ = _make_bar(
-        progress,
+    cancel = threading.Event()
+    bar, TqdmClass = _make_bar(
+        on_progress,
+        cancel,
         desc="Reconstructing (incomplete total...)",
         bar_format="{l_bar}{bar}| {n_fmt:>5}B / {total_fmt:>5}B",
         total=1000,
     )
     bar.total = 1000  # type: ignore[attr-defined]
     # throttle window blocks immediate second flush; keep last_flush recent
-    progress._last_flush = time.monotonic()
+    TqdmClass._mlx_state["last_flush"] = time.monotonic()  # type: ignore[attr-defined]
     bar.update(400)
     # suppressed due to throttle → only initial snapshot from earlier? Actually first
     # update after setting _last_flush recent should be suppressed → no snapshot yet
@@ -313,22 +331,24 @@ def test_close_flushes_final_totals() -> None:
 
 def test_close_does_not_flush_when_cancelled() -> None:
     snapshots: list[tuple[int, int]] = []
-    progress = DownloadProgress(on_progress=lambda d, e: snapshots.append((d, e)))
-    bar, _ = _make_bar(
-        progress,
+    cancel = threading.Event()
+    bar, TqdmClass = _make_bar(
+        lambda d, e: snapshots.append((d, e)),  # type: ignore[no-untyped-def]
+        cancel,
         desc="Reconstructing (incomplete total...)",
         bar_format="{l_bar}{bar}| {n_fmt:>5}B / {total_fmt:>5}B",
         total=100,
     )
     bar.update(50)
     snapshots.clear()
-    progress.cancel_event.set()
+    cancel.set()
     # close should not emit when cancelled
     bar.close()
     assert snapshots == []
     # xet bar close also should not emit
     xet_bar, _ = _make_bar(
-        progress,
+        lambda d, e: snapshots.append((d, e)),  # type: ignore[no-untyped-def]
+        cancel,
         desc="Downloading bytes",
         bar_format="{desc}: {bar}| {n_fmt:>5}B{postfix:>12}",
         total=100,

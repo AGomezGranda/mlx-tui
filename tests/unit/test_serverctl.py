@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from mlx_tui import serverctl
-from mlx_tui.serverctl import HealthWatch, build_start_command
+from mlx_tui.serverctl import build_start_command
 from tests.unit.test_chat import install_transport
 
 MODELS_URL = "http://stub/v1/models"
@@ -129,11 +129,9 @@ def test_wait_healthy_bails_when_spawned_command_dies(
     start = time.monotonic()
     ok = serverctl.wait_healthy(
         MODELS_URL,
-        HealthWatch(
-            target_model="m",
-            current_model=lambda: "other",  # never green-matches
-            is_running=lambda: False,
-        ),
+        target_model="m",
+        current_model=lambda: "other",  # never green-matches
+        is_running=lambda: False,
         timeout_s=30,
     )
 
@@ -218,7 +216,8 @@ def test_wait_healthy_green_first_poll_with_matching_model(
 
     ok = serverctl.wait_healthy(
         MODELS_URL,
-        HealthWatch(target_model="m", current_model=lambda: "m"),
+        target_model="m",
+        current_model=lambda: "m",
         timeout_s=5,
     )
 
@@ -241,7 +240,8 @@ def test_wait_healthy_wrong_model_then_right(
 
     ok = serverctl.wait_healthy(
         MODELS_URL,
-        HealthWatch(target_model="m", current_model=flipper),
+        target_model="m",
+        current_model=flipper,
         timeout_s=10,
     )
 
@@ -261,7 +261,8 @@ def test_wait_healthy_times_out_when_always_red(
 
     ok = serverctl.wait_healthy(
         MODELS_URL,
-        HealthWatch(target_model=None, current_model=lambda: "m"),
+        target_model=None,
+        current_model=lambda: "m",
         timeout_s=1,
         on_tick=ticks.append,
     )
@@ -281,7 +282,8 @@ def test_wait_healthy_target_none_accepts_any_green(
 
     ok = serverctl.wait_healthy(
         MODELS_URL,
-        HealthWatch(target_model=None, current_model=lambda: "never-matches"),
+        target_model=None,
+        current_model=lambda: "never-matches",
         timeout_s=5,
     )
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
 
-from mlx_tui.history import CHARS_PER_TOKEN_EST
+from mlx_tui.history.tokens import CHARS_PER_TOKEN_EST
 
 
 def iter_sse_data(lines: Iterable[str]) -> Iterator[str]:

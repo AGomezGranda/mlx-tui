@@ -19,6 +19,10 @@ class AppConfig:
     start_cmd: str | None = None
     stop_cmd: str | None = None
     pidfile: str | None = None
+    temperature: float | None = None
+    top_p: float | None = None
+    max_tokens: int | None = None
+    system: str | None = None
 
 
 def config_path() -> Path:
@@ -33,6 +37,10 @@ CONFIG_TEMPLATE = """\
 # start_cmd = "mlx_lm.server --port 8080"
 # stop_cmd = "pkill -f mlx_lm.server"
 # pidfile = "/tmp/mlx-server.pid"
+# temperature = 0.7
+# top_p = 1.0
+# max_tokens = 1024
+# system = "You are a helpful assistant."
 """
 
 
@@ -49,6 +57,10 @@ _KEY_TYPES: dict[str, type] = {
     "start_cmd": str,
     "stop_cmd": str,
     "pidfile": str,
+    "temperature": float,
+    "top_p": float,
+    "max_tokens": int,
+    "system": str,
 }
 
 
@@ -62,8 +74,20 @@ def _from_mapping(data: dict[str, object]) -> AppConfig:
         value = data.get(key)
         if type(value) is expected_type:
             found[key] = value
+        elif expected_type is float and type(value) is int:
+            # TOML may emit 1 not 1.0 for temperature/top_p; coerce int->float but reject bool
+            found[key] = float(value)
     host = found.get("host")
     port = found.get("port")
+    temp = cast("float | None", found.get("temperature"))
+    if temp is not None:
+        temp = max(0.0, min(2.0, temp))
+    tp = cast("float | None", found.get("top_p"))
+    if tp is not None:
+        tp = max(0.0, min(1.0, tp))
+    mt = cast("int | None", found.get("max_tokens"))
+    if mt is not None:
+        mt = max(1, min(16384, mt))
     return AppConfig(
         model=cast("str | None", found.get("model")),
         host=cast("str", host if host is not None else "127.0.0.1"),
@@ -71,6 +95,10 @@ def _from_mapping(data: dict[str, object]) -> AppConfig:
         start_cmd=cast("str | None", found.get("start_cmd")),
         stop_cmd=cast("str | None", found.get("stop_cmd")),
         pidfile=cast("str | None", found.get("pidfile")),
+        temperature=temp,
+        top_p=tp,
+        max_tokens=mt,
+        system=cast("str | None", found.get("system")),
     )
 
 

@@ -30,9 +30,12 @@ async def open_search(
     def _stub_free() -> int:
         return 10 * 2**30
 
-    monkeypatch.setattr("mlx_tui.search_screen.list_results", _stub_list)
-    monkeypatch.setattr("mlx_tui.search_screen.repo_files_with_sizes", _stub_files)
-    monkeypatch.setattr("mlx_tui.search_screen.free_disk_bytes", _stub_free)
+    monkeypatch.setattr("mlx_tui.search_screen.query.list_results", _stub_list)
+    monkeypatch.setattr(
+        "mlx_tui.search_screen.query.repo_files_with_sizes", _stub_files
+    )
+    monkeypatch.setattr("mlx_tui.search_screen.query.free_disk_bytes", _stub_free)
+    monkeypatch.setattr("mlx_tui.search_screen.download.free_disk_bytes", _stub_free)
     # Focus the models table so slash binding fires deterministically.
     try:
         harness.app.query_one("#models-table", ModelsTable).focus()
@@ -149,7 +152,9 @@ async def test_enter_downloads_hands_off_and_dismisses(
             captured["allow_patterns"] = _kw["allow_patterns"]
         # simulate successful download
 
-    monkeypatch.setattr("mlx_tui.search_screen.download_snapshot", _recording_download)
+    monkeypatch.setattr(
+        "mlx_tui.search_screen.download.download_snapshot", _recording_download
+    )
 
     calls: list[int] = []
 
@@ -205,7 +210,9 @@ async def test_escape_mid_download_cancels(
             time.sleep(0.01)
         raise CancelledDownload("cancelled by user")  # noqa: PLC0415  # type: ignore[no-untyped-call]
 
-    monkeypatch.setattr("mlx_tui.search_screen.download_snapshot", _blocking_download)
+    monkeypatch.setattr(
+        "mlx_tui.search_screen.download.download_snapshot", _blocking_download
+    )
 
     screen = await open_search(harness, monkeypatch)
     await harness.pilot.press(*"qwen", "enter")
@@ -247,7 +254,9 @@ async def test_download_failure_keeps_modal_usable(
     ) -> None:
         raise RuntimeError("disk full")
 
-    monkeypatch.setattr("mlx_tui.search_screen.download_snapshot", _failing_download)
+    monkeypatch.setattr(
+        "mlx_tui.search_screen.download.download_snapshot", _failing_download
+    )
 
     screen = await open_search(harness, monkeypatch)
     await harness.pilot.press(*"qwen", "enter")
@@ -304,11 +313,16 @@ async def test_low_disk_warns_then_proceeds(
         # before the success log + dismiss.
         time.sleep(0.35)
 
-    monkeypatch.setattr("mlx_tui.search_screen.list_results", _stub_list_low)
-    monkeypatch.setattr("mlx_tui.search_screen.repo_files_with_sizes", _stub_files_low)
-    monkeypatch.setattr("mlx_tui.search_screen.free_disk_bytes", _stub_free_low)
+    monkeypatch.setattr("mlx_tui.search_screen.query.list_results", _stub_list_low)
     monkeypatch.setattr(
-        "mlx_tui.search_screen.download_snapshot", _recording_download_low
+        "mlx_tui.search_screen.query.repo_files_with_sizes", _stub_files_low
+    )
+    monkeypatch.setattr("mlx_tui.search_screen.query.free_disk_bytes", _stub_free_low)
+    monkeypatch.setattr(
+        "mlx_tui.search_screen.download.free_disk_bytes", _stub_free_low
+    )
+    monkeypatch.setattr(
+        "mlx_tui.search_screen.download.download_snapshot", _recording_download_low
     )
 
     # open manually (cannot use helper which patches free to 10GB)

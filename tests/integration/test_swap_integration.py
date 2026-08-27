@@ -5,7 +5,6 @@ from __future__ import annotations
 import subprocess
 import sys
 from collections.abc import AsyncIterator, Callable
-from typing import override
 
 import pytest
 from textual.widgets import Input, TabbedContent
@@ -15,8 +14,6 @@ from mlx_tui.app import MlxTuiApp
 from mlx_tui.config import AppConfig
 from mlx_tui.models import ModelRow
 from mlx_tui.models_pane import ModelsPane
-from mlx_tui.process import ServerProcessFinder
-from mlx_tui.serverctl import HealthWatch
 from mlx_tui.swap import SwapState, health_timeout
 from mlx_tui.table import ModelsTable
 from tests.conftest import AppHarness, StubServer
@@ -28,28 +25,22 @@ def _stub_rows(avail_gib: float | None) -> list[ModelRow]:
     return [ROW]
 
 
-class _StaticFinder(ServerProcessFinder):
-    """Process discovery pinned to a fixed answer (or none)."""
-
-    def __init__(self, pid: int | None) -> None:
-        super().__init__()
-        self._pid = pid
-
-    @override
-    def find(self, pidfile: str | None = None) -> int | None:
-        return self._pid
-
-
 @pytest.fixture
 async def stub_harness(
     stub_server_factory: Callable[[str], StubServer],
     monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncIterator[AppHarness]:
     """Harness whose cache always scans to ROW."""
-    monkeypatch.setattr("mlx_tui.models_pane.scan_models", _stub_rows)
+    monkeypatch.setattr("mlx_tui.models_pane.table_ops.scan_models", _stub_rows)
+    monkeypatch.setattr(
+        "mlx_tui.app.state.process.find_server_pid", lambda pidfile=None: None
+    )
+    monkeypatch.setattr(
+        "mlx_tui.app.polling.process.find_server_pid", lambda pidfile=None: None
+    )
+    monkeypatch.setattr("mlx_tui.process.find_server_pid", lambda pidfile=None: None)
     server = stub_server_factory("ok")
     app = MlxTuiApp(host="127.0.0.1", port=int(server.server_address[1]))
-    app._process_finder = _StaticFinder(None)
     async with app.run_test() as pilot:
         yield AppHarness(app=app, pilot=pilot, server=server)
 
@@ -214,7 +205,13 @@ async def test_cold_start_with_unhealthy_process_restarts_it(
     harness = stub_harness
     harness.server.mode = "html"
     await harness.app._poll()
-    harness.app._process_finder = _StaticFinder(4242)
+    monkeypatch.setattr(
+        "mlx_tui.app.state.process.find_server_pid", lambda pidfile=None: 4242
+    )
+    monkeypatch.setattr(
+        "mlx_tui.app.polling.process.find_server_pid", lambda pidfile=None: 4242
+    )
+    monkeypatch.setattr("mlx_tui.process.find_server_pid", lambda pidfile=None: 4242)
     harness.app.config = AppConfig(
         model=ROW.repo_id,
         start_cmd=f"{sys.executable} -c \"print('booting')\"",
@@ -252,7 +249,13 @@ async def test_cold_start_with_process_but_no_stop_cmd_guides(
     harness = stub_harness
     harness.server.mode = "html"
     await harness.app._poll()
-    harness.app._process_finder = _StaticFinder(4242)
+    monkeypatch.setattr(
+        "mlx_tui.app.state.process.find_server_pid", lambda pidfile=None: 4242
+    )
+    monkeypatch.setattr(
+        "mlx_tui.app.polling.process.find_server_pid", lambda pidfile=None: 4242
+    )
+    monkeypatch.setattr("mlx_tui.process.find_server_pid", lambda pidfile=None: 4242)
     harness.app.config = AppConfig(start_cmd="true")
     procs: list[subprocess.Popen[str]] = []
     orig_spawn = serverctl.spawn_command
@@ -389,10 +392,12 @@ async def test_cold_start_timeout_scales_with_model_size(
     harness.app.config = AppConfig(model=big_row.repo_id, start_cmd="true")
     timeouts: list[float] = []
 
-    def fake_wait(
+    def fake_wait(  # noqa: PLR0913
         url: str,
-        watch: HealthWatch,
         *,
+        target_model: str | None = None,
+        current_model: Callable[[], str | None] = lambda: None,
+        is_running: Callable[[], bool] | None = None,
         timeout_s: float,
         on_tick: Callable[[int], None] | None = None,
     ) -> bool:

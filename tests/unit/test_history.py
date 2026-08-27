@@ -6,13 +6,12 @@ import dataclasses
 
 import pytest
 
-from mlx_tui.history import (
+from mlx_tui.history.sparkline import render_sparkline
+from mlx_tui.history.store import HistoryStore, TurnRecord
+from mlx_tui.history.tokens import (
     CHARS_PER_TOKEN_EST,
-    HistoryStore,
-    TurnRecord,
     _tok_int,
     estimate_tokens,
-    render_sparkline,
     trim_for_context,
 )
 
@@ -399,7 +398,7 @@ def test_tok_int_parses_est_and_digit_guards_sentinel() -> None:
 
 
 def test_shade_for_ctx_quartiles() -> None:
-    from mlx_tui.app import _shade_for_ctx  # noqa: PLC0415
+    from mlx_tui.history.sparkline import _shade_for_ctx  # noqa: PLC0415
 
     styles = _shade_for_ctx([100, 200, 300, 400])
     assert styles[0] == "dim"
@@ -407,3 +406,130 @@ def test_shade_for_ctx_quartiles() -> None:
     assert styles[2] == ""
     # empty input returns empty
     assert _shade_for_ctx([]) == []
+
+
+def test_memory_record_is_frozen() -> None:
+    from mlx_tui.history.store import MemoryRecord  # noqa: PLC0415
+
+    r = MemoryRecord(ts=1.0, model="m", rss_gib=1.2, avail_gib=8.0, total_gib=16.0)
+    assert r.model == "m"
+    assert len(dataclasses.fields(MemoryRecord)) == 5
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        r.model = "other"  # type: ignore[misc]
+
+
+def test_memory_store_add_and_series_preserves_order() -> None:
+    from mlx_tui.history.store import MemoryRecord, MemoryStore  # noqa: PLC0415
+
+    store = MemoryStore()
+    for ts in (1, 2, 3):
+        store.add(
+            MemoryRecord(
+                ts=float(ts), model="m", rss_gib=1.0, avail_gib=8.0, total_gib=16.0
+            )
+        )
+    assert [r.ts for r in store.series()] == [1.0, 2.0, 3.0]
+
+
+def test_memory_store_clear() -> None:
+    from mlx_tui.history.store import MemoryRecord, MemoryStore  # noqa: PLC0415
+
+    store = MemoryStore()
+    store.add(MemoryRecord(ts=1, model="m", rss_gib=1.0, avail_gib=8.0, total_gib=16.0))
+    store.clear()
+    assert store.series() == []
+
+
+def test_memory_store_ring_eviction_at_256() -> None:
+    from mlx_tui.history.store import MemoryRecord, MemoryStore  # noqa: PLC0415
+
+    store = MemoryStore(maxlen=3)
+    for ts in (1, 2, 3, 4):
+        store.add(
+            MemoryRecord(
+                ts=float(ts), model="m", rss_gib=1.0, avail_gib=8.0, total_gib=16.0
+            )
+        )
+    assert [r.ts for r in store.series()] == [2.0, 3.0, 4.0]
+
+
+def test_memory_store_series_returns_copy() -> None:
+    from mlx_tui.history.store import MemoryRecord, MemoryStore  # noqa: PLC0415
+
+    store = MemoryStore()
+    store.add(MemoryRecord(ts=1, model="m", rss_gib=1.0, avail_gib=8.0, total_gib=16.0))
+    lst = store.series()
+    lst.clear()
+    assert len(store.series()) == 1
+
+
+def test_render_memory_empty_returns_placeholder() -> None:
+    from mlx_tui.history.sparkline import render_memory_sparkline  # noqa: PLC0415
+
+    assert render_memory_sparkline([]) == ("", "no memory samples yet")
+
+
+def test_render_memory_all_none_returns_placeholder() -> None:
+    from mlx_tui.history.sparkline import render_memory_sparkline  # noqa: PLC0415
+    from mlx_tui.history.store import MemoryRecord  # noqa: PLC0415
+
+    recs = [MemoryRecord(ts=1, model="m", rss_gib=None, avail_gib=8.0, total_gib=16.0)]
+    assert render_memory_sparkline(recs) == ("", "no memory samples yet")
+
+
+def test_render_memory_single_produces_braille_and_legend() -> None:
+    from mlx_tui.history.sparkline import render_memory_sparkline  # noqa: PLC0415
+    from mlx_tui.history.store import MemoryRecord  # noqa: PLC0415
+
+    rec = MemoryRecord(ts=1, model="m", rss_gib=2.5, avail_gib=8.0, total_gib=16.0)
+    braille, legend = render_memory_sparkline([rec], width=32, height_rows=2)
+    stripped = braille.replace("\n", "").strip()
+    assert len(stripped) == 1
+    assert 0x2800 <= ord(stripped) <= 0x28FF
+    assert "2.5 GB RSS" in legend
+    assert "avail 8.0/16.0" in legend
+    assert "1 samples" in legend
+
+
+def test_render_memory_flat_does_not_div0() -> None:
+    from mlx_tui.history.sparkline import render_memory_sparkline  # noqa: PLC0415
+    from mlx_tui.history.store import MemoryRecord  # noqa: PLC0415
+
+    recs = [
+        MemoryRecord(ts=float(i), model="m", rss_gib=1.0, avail_gib=8.0, total_gib=16.0)
+        for i in range(3)
+    ]
+    braille, legend = render_memory_sparkline(recs)
+    assert braille
+    assert "1.0 GB RSS" in legend
+
+
+def test_render_memory_width_clipping() -> None:
+    from mlx_tui.history.sparkline import render_memory_sparkline  # noqa: PLC0415
+    from mlx_tui.history.store import MemoryRecord  # noqa: PLC0415
+
+    recs = [
+        MemoryRecord(
+            ts=float(i), model="m", rss_gib=float(i), avail_gib=8.0, total_gib=16.0
+        )
+        for i in range(70)
+    ]
+    braille, _ = render_memory_sparkline(recs, width=32, height_rows=2)
+    lines = braille.split("\n")
+    assert len(lines) == 2
+    for line in lines:
+        assert len(line) == 32
+
+
+def test_render_memory_with_none_blank_column() -> None:
+    from mlx_tui.history.sparkline import render_memory_sparkline  # noqa: PLC0415
+    from mlx_tui.history.store import MemoryRecord  # noqa: PLC0415
+
+    recs = [
+        MemoryRecord(ts=1, model="m", rss_gib=None, avail_gib=8.0, total_gib=16.0),
+        MemoryRecord(ts=2, model="m", rss_gib=2.0, avail_gib=7.5, total_gib=16.0),
+    ]
+    braille, legend = render_memory_sparkline(recs, width=32, height_rows=1)
+    # should have 1 char (2 records -> 1 braille char) and not crash
+    assert braille
+    assert "2 samples" in legend

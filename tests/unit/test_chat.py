@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from mlx_tui.chat import error_detail, stream_turn
-from tests.builders import SseStreamBuilder
+from tests.builders import sse_frames
 
 Handler = Callable[[httpx.Request], httpx.Response]
 URL = "http://stub/v1/chat/completions"
@@ -52,17 +52,7 @@ def stream_response(body: bytes) -> httpx.Response:
 
 
 def test_happy_path_with_usage(monkeypatch: pytest.MonkeyPatch) -> None:
-    body = (
-        SseStreamBuilder()
-        .role_frame()
-        .delta("Hello")
-        .delta(" world")
-        .delta(" this")
-        .finish_frame()
-        .usage(12, 6)
-        .done()
-        .build()
-    )
+    body = sse_frames(deltas=["Hello", " world", " this"], usage=(12, 6))
     install_transport(monkeypatch, lambda request: stream_response(body))
     flushes: list[str] = []
 
@@ -86,16 +76,7 @@ def test_happy_path_with_usage(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_estimate_fallback_without_usage(monkeypatch: pytest.MonkeyPatch) -> None:
-    body = (
-        SseStreamBuilder()
-        .role_frame()
-        .delta("a")
-        .delta("b")
-        .delta("c")
-        .delta("d")
-        .done()
-        .build()
-    )
+    body = sse_frames(deltas=["a", "b", "c", "d"], finish=None)
     install_transport(monkeypatch, lambda request: stream_response(body))
 
     result = stream_turn(URL, {"messages": []}, user_chars=70, on_flush=_noop_flush)
@@ -108,16 +89,7 @@ def test_estimate_fallback_without_usage(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_skips_malformed_keepalive_and_stops_at_done(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    body = (
-        SseStreamBuilder()
-        .malformed()
-        .keepalive(3, 10)
-        .role_frame()
-        .delta("A")
-        .done()
-        .delta("LATE")
-        .build()
-    )
+    body = sse_frames(deltas=["A"], finish=None, malformed=True, keepalive=(3, 10))
     install_transport(monkeypatch, lambda request: stream_response(body))
 
     result = stream_turn(URL, {}, user_chars=1, on_flush=_noop_flush)
@@ -127,15 +99,7 @@ def test_skips_malformed_keepalive_and_stops_at_done(
 
 
 def test_length_finish_reason_is_surfaced(monkeypatch: pytest.MonkeyPatch) -> None:
-    body = (
-        SseStreamBuilder()
-        .role_frame()
-        .delta("Partial ans")
-        .finish_frame(reason="length")
-        .usage(9, 3)
-        .done()
-        .build()
-    )
+    body = sse_frames(deltas=["Partial ans"], finish="length", usage=(9, 3))
     install_transport(monkeypatch, lambda request: stream_response(body))
 
     result = stream_turn(URL, {"messages": []}, user_chars=2, on_flush=_noop_flush)
@@ -177,7 +141,7 @@ def test_remote_protocol_error_mid_stream_propagates(
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         def body() -> Iterator[bytes]:
-            yield SseStreamBuilder().role_frame().delta("Hel").build()
+            yield sse_frames(deltas=["Hel"], finish=None, done=False)
             raise httpx.RemoteProtocolError("peer died mid-stream")
 
         return httpx.Response(
@@ -194,9 +158,7 @@ def test_active_response_exposed_mid_stream(monkeypatch: pytest.MonkeyPatch) -> 
     responses: list[httpx.Response] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        response = stream_response(
-            SseStreamBuilder().role_frame().delta("A").done().build()
-        )
+        response = stream_response(sse_frames(deltas=["A"], finish=None))
         responses.append(response)
         return response
 

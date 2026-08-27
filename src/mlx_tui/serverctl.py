@@ -7,7 +7,6 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
 
 import httpx
 
@@ -25,13 +24,12 @@ def build_start_command(start_cmd: str, model_id: str | None) -> str:
     return f"{start_cmd} --model {shlex.quote(model_id)}"
 
 
-@dataclass(frozen=True)
-class HealthWatch:
-    """What counts as healthy, and whether the target can still get there."""
-
-    target_model: str | None = None
-    current_model: Callable[[], str | None] = lambda: None
-    is_running: Callable[[], bool] | None = None
+def _pump(proc: subprocess.Popen[str], on_line: Callable[[str], None]) -> None:
+    assert proc.stdout is not None  # guaranteed by stdout=PIPE
+    for line in proc.stdout:
+        stripped = line.rstrip("\n")
+        if stripped:
+            on_line(stripped)
 
 
 def run_command(cmd: str, *, on_line: Callable[[str], None]) -> int:
@@ -43,11 +41,7 @@ def run_command(cmd: str, *, on_line: Callable[[str], None]) -> int:
         stderr=subprocess.STDOUT,
         text=True,
     ) as proc:
-        assert proc.stdout is not None  # guaranteed by stdout=PIPE
-        for line in proc.stdout:
-            stripped = line.rstrip("\n")
-            if stripped:
-                on_line(stripped)
+        _pump(proc, on_line)
         return proc.wait()
 
 
@@ -60,15 +54,9 @@ def spawn_command(cmd: str, *, on_line: Callable[[str], None]) -> subprocess.Pop
         stderr=subprocess.STDOUT,
         text=True,
     )
-
-    def pump() -> None:
-        assert proc.stdout is not None  # guaranteed by stdout=PIPE
-        for line in proc.stdout:
-            stripped = line.rstrip("\n")
-            if stripped:
-                on_line(stripped)
-
-    threading.Thread(target=pump, daemon=True, name="spawned-cmd-output").start()
+    threading.Thread(
+        target=lambda: _pump(proc, on_line), daemon=True, name="spawned-cmd-output"
+    ).start()
     return proc
 
 
@@ -108,10 +96,12 @@ def warm_load(url: str, repo_id: str, *, timeout_s: float) -> None:
         raise RuntimeError("unexpected probe response")
 
 
-def wait_healthy(
+def wait_healthy(  # noqa: PLR0913
     url: str,
-    watch: HealthWatch,
     *,
+    target_model: str | None = None,
+    current_model: Callable[[], str | None] = lambda: None,
+    is_running: Callable[[], bool] | None = None,
     timeout_s: float,
     on_tick: Callable[[int], None] | None = None,
 ) -> bool:
@@ -129,13 +119,10 @@ def wait_healthy(
                 green = classify_liveness(resp.status_code, body) == "green"
             except (httpx.HTTPError, ValueError):
                 pass
-            matched = (
-                watch.target_model is None
-                or watch.current_model() == watch.target_model
-            )
+            matched = target_model is None or current_model() == target_model
             if green and matched:
                 return True
-            if watch.is_running is not None and not watch.is_running():
+            if is_running is not None and not is_running():
                 return False
             if time.monotonic() >= deadline:
                 return False

@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from pathlib import Path
 
 import pytest
 from textual.widgets import Input, Static
 
 from mlx_tui.app import MlxTuiApp
-from mlx_tui.history import TurnRecord
+from mlx_tui.history.store import TurnRecord
 from tests.conftest import AppHarness
 
 _STAMP_RE = re.compile(
@@ -243,30 +244,34 @@ async def test_truncated_stream_red_line_and_no_stale_pane(harness: AppHarness) 
     assert await harness.wait_for(input_enabled)
 
 
-async def test_history_strip_renders_and_switches_on_swap(harness: AppHarness) -> None:
-    def strip_text() -> str:
-        s = harness.app.query_one("#history-strip", Static)
-        # textual 8.2.8 Static stores content; render() returns Text/str
+async def test_metrics_tab_renders_and_refreshes(harness: AppHarness) -> None:
+    from textual.widgets import DataTable  # noqa: PLC0415
+
+    from mlx_tui.history.store import MemoryRecord  # noqa: PLC0415
+    from mlx_tui.metrics_pane import MetricsPane  # noqa: PLC0415
+
+    def spark_text(wid_id: str) -> str:
+        s = harness.app.query_one(wid_id, Static)
         try:
             return str(s.render())
         except Exception:
             return str(getattr(s, "content", ""))
 
-    strip = harness.app.query_one("#history-strip", Static)
-    # Also ensure app-log exists and strip is docked above log by DOM order
-    log = harness.app.query_one("#app-log")
-    assert strip is not None and log is not None
-
+    table = harness.app.query_one("#metrics-table", DataTable)
+    assert table is not None
+    # initial placeholders
     harness.app.history.clear()
-    harness.app._tracked_model = "model-a"
-    harness.app.update_history_strip()
+    harness.app.memory_store.clear()
+    harness.app.query_one(MetricsPane).refresh_metrics()
     await harness.pilot.pause()
-    assert "no history yet" in strip_text()
+    assert "no history yet" in spark_text("#metrics-sparkline")
+    assert "no memory samples" in spark_text("#metrics-memory-sparkline")
 
+    # add one turn + one memory sample
     harness.app.history.add(
         TurnRecord(
             ts=time.time(),
-            model="model-a",
+            model="metrics-model",
             prompt_tok=10,
             out_tok=5,
             ttft_s=0.1,
@@ -275,182 +280,180 @@ async def test_history_strip_renders_and_switches_on_swap(harness: AppHarness) -
             cold=False,
         )
     )
-    harness.app.update_history_strip()
-    await harness.pilot.pause()
-    rendered = strip_text()
-    assert "tok/s" in rendered
-    assert "no history yet" not in rendered
-
-    # Switch to new model — should show placeholder
-    harness.app._tracked_model = "other/model"
-    harness.app.update_history_strip()
-    await harness.pilot.pause()
-    assert "no history yet" in strip_text()
-
-    # Switch back restores sparkline
-    harness.app._tracked_model = "model-a"
-    harness.app.update_history_strip()
-    await harness.pilot.pause()
-    assert "tok/s" in strip_text()
-    assert "no history yet" not in strip_text()
-
-    # Cleanup
-    harness.app.history.clear()
-    harness.app._tracked_model = None
-
-
-def _strip_text(harness: AppHarness) -> str:
-    s = harness.app.query_one("#history-strip", Static)
-    try:
-        return str(s.render())
-    except Exception:
-        return str(getattr(s, "content", ""))
-
-
-async def test_history_records_one_turn_and_shows_strip(harness: AppHarness) -> None:
-    harness.app.history.clear()
-    harness.app._tracked_model = "history-model-a"
-    harness.server.mode = "ok"
-    await harness.app._poll()
-    harness.app.update_history_strip()
-    await harness.pilot.pause()
-    assert "no history yet" in _strip_text(harness)
-    inp = harness.app.query_one("#chat-input", Input)
-    inp.value = "hi"
-    inp.focus()
-    await harness.pilot.press("enter")
-
-    def history_has_one(a: MlxTuiApp) -> bool:
-        return len(a.history.series(a.effective_model() or "—")) == 1
-
-    assert await harness.wait_for(history_has_one), (
-        f"history not recorded; series={harness.app.history.series(harness.app.effective_model() or '—')}"
-    )
-    records = harness.app.history.series(harness.app.effective_model() or "—")
-    assert records[0].cold is False
-    assert records[0].tok_s > 0
-    assert records[0].model == (harness.app.effective_model() or "—")
-    await harness.pilot.pause()
-    assert "no history yet" not in _strip_text(harness)
-    assert "tok/s" in _strip_text(harness)
-    harness.app.history.clear()
-    harness.app._tracked_model = None
-
-
-async def test_history_cancelled_excluded_from_sparkline(harness: AppHarness) -> None:
-    harness.server.mode = "slow"
-    await harness.app._poll()
-    harness.app.history.clear()
-    harness.app._tracked_model = "history-cancel-model"
-    harness.app.update_history_strip()
-    await harness.pilot.pause()
-    inp = harness.app.query_one("#chat-input", Input)
-    inp.value = "hi"
-    inp.focus()
-    await harness.pilot.press("enter")
-
-    def submitted(a: MlxTuiApp) -> bool:
-        return any("you ›" in t for t in harness.log_lines())
-
-    assert await harness.wait_for(submitted)
-    await harness.pilot.press("escape")
-
-    def cancelled(a: MlxTuiApp) -> bool:
-        return any("cancelled — request aborted" in t for t in harness.log_lines())
-
-    assert await harness.wait_for(cancelled)
-
-    def history_cancelled(a: MlxTuiApp) -> bool:
-        recs = a.history.all_records()
-        return len(recs) == 1 and recs[0].cancelled is True
-
-    assert await harness.wait_for(history_cancelled), (
-        f"cancelled not recorded; all={harness.app.history.all_records()}"
-    )
-    harness.app.update_history_strip()
-    await harness.pilot.pause()
-    assert "no history yet" in _strip_text(harness)
-    harness.app.history.clear()
-    harness.app._tracked_model = None
-
-
-async def test_history_error_not_recorded(harness: AppHarness) -> None:
-    harness.server.mode = "error500"
-    await harness.app._poll()
-    harness.app.history.clear()
-    harness.app._tracked_model = "history-error-model"
-    harness.app.update_history_strip()
-    await harness.pilot.pause()
-    inp = harness.app.query_one("#chat-input", Input)
-    inp.value = "hi"
-    inp.focus()
-    await harness.pilot.press("enter")
-
-    def error_visible(a: MlxTuiApp) -> bool:
-        return any("server error" in t for t in harness.log_lines())
-
-    assert await harness.wait_for(error_visible)
-    await asyncio.sleep(0.3)
-    assert harness.app.history.all_records() == []
-    assert "no history yet" in _strip_text(harness)
-    harness.app.history.clear()
-    harness.app._tracked_model = None
-
-
-async def test_history_cold_excluded_and_per_model_isolation(
-    harness: AppHarness,
-) -> None:
-    harness.app.history.clear()
-    harness.app._tracked_model = "cold-model-a"
-    # Manually add cold record — should be filtered from sparkline
-    harness.app.history.add(
-        TurnRecord(
+    harness.app.memory_store.add(
+        MemoryRecord(
             ts=time.time(),
-            model="cold-model-a",
-            prompt_tok=10,
-            out_tok=5,
-            ttft_s=0.1,
-            tok_s=12.3,
-            ctx_len=100,
-            cold=True,
+            model="metrics-model",
+            rss_gib=1.2,
+            avail_gib=8.0,
+            total_gib=16.0,
         )
     )
-    harness.app.update_history_strip()
+    harness.app.query_one(MetricsPane).refresh_metrics()
     await harness.pilot.pause()
-    assert "no history yet" in _strip_text(harness)
+    # table capped at 64
+    assert table.row_count == 1
+    assert "tok/s" in spark_text("#metrics-sparkline")
+    assert "avail" in spark_text("#metrics-memory-sparkline")
+    assert "no history yet" not in spark_text("#metrics-sparkline")
 
-    # One normal turn
-    harness.server.mode = "ok"
-    await harness.app._poll()
+    # cleanup
+    harness.app.history.clear()
+    harness.app.memory_store.clear()
+    harness.app.query_one(MetricsPane).refresh_metrics()
+    await harness.pilot.pause()
+
+
+async def test_chat_renders_markdown(harness: AppHarness) -> None:
+    from textual.widgets import RichLog, TabbedContent  # noqa: PLC0415
+
+    from mlx_tui.chat_pane import ChatPane  # noqa: PLC0415
+
+    harness.app.query_one(TabbedContent).active = "chat"
+    await harness.pilot.pause()
+    # Directly invoke completion UI with markdown to avoid stub coupling
+    pane = harness.app.query_one(ChatPane)
+    pane._complete_turn_ui(
+        "# hi\n\n**bold**", "12 in · 6 out · 10.0 tok/s · TTFT 0.10s", False, []
+    )
+    await harness.pilot.pause()
+    # markdown rendered: raw "# hi" should not appear, but heading text should
+    lines = harness.log_lines()
+    assert not any(line.strip() == "# hi" for line in lines)
+    assert any("hi" in line for line in lines)
+    assert any("bold" in line for line in lines)
+    # stamp still present and dim style is via Text but line contains tok/s
+    assert any("tok/s" in line for line in lines)
+    # stream cleared
+    assert harness.app.query_one("#chat-stream", Static).content == ""
+    # check RichLog contains markdown rendering (fallback substring check already covers)
+    log = harness.app.query_one("#chat-log", RichLog)
+    # ensure log has at least the heading and bold lines
+    assert len(log.lines) >= 2
+    # Also verify through a full turn that stream clears after real HTTP round-trip
     inp = harness.app.query_one("#chat-input", Input)
     inp.value = "hi"
     inp.focus()
     await harness.pilot.press("enter")
 
-    def history_len_two(a: MlxTuiApp) -> bool:
-        return len(a.history.series("cold-model-a")) == 2
+    def done(a: MlxTuiApp) -> bool:
+        return len(a.query_one(ChatPane).messages) >= 3
 
-    assert await harness.wait_for(history_len_two), (
-        f"series len not 2; series={harness.app.history.series('cold-model-a')}"
+    assert await harness.wait_for(done)
+    assert harness.app.query_one("#chat-stream", Static).content == ""
+
+
+async def test_params_sidebar_sends_payload(harness: AppHarness) -> None:
+    from textual.widgets import TabbedContent  # noqa: PLC0415
+
+    from mlx_tui.chat_pane import ChatPane  # noqa: PLC0415
+
+    harness.app.query_one(TabbedContent).active = "chat"
+    await harness.pilot.pause()
+    pane = harness.app.query_one(ChatPane)
+    # set valid params
+    harness.app.query_one("#param-temp", Input).value = "0.3"
+    harness.app.query_one("#param-top-p", Input).value = "0.9"
+    harness.app.query_one("#param-max-tokens", Input).value = "256"
+    await harness.pilot.pause()
+    inp = harness.app.query_one("#chat-input", Input)
+    inp.value = "hi"
+    inp.focus()
+    await harness.pilot.press("enter")
+
+    def has_history(a: MlxTuiApp) -> bool:
+        return len(a.history.series(a.effective_model() or "—")) >= 1
+
+    assert await harness.wait_for(has_history), (
+        f"history not recorded; series={harness.app.history.series(harness.app.effective_model() or '\u2014')}"
     )
+    # check payload
+    posts = [r for r in harness.server.requests if "messages" in r]
+    assert posts, f"no chat POST captured; requests={harness.server.requests}"
+    last = posts[-1]
+    assert last.get("temperature") == 0.3, last
+    assert last.get("top_p") == 0.9, last
+    assert last.get("max_tokens") == 256, last
+    # invalid values should fallback to defaults
     await harness.pilot.pause()
-    # Sparkline should show 1 turn (cold filtered) but storage has 2
-    assert "1 turns" in _strip_text(harness)
-    assert len(harness.app.history.all_records()) == 2
-
-    # Isolation: other model empty
-    harness.app._tracked_model = "other/model"
-    harness.app.update_history_strip()
+    harness.app.query_one("#param-temp", Input).value = "bad"
+    harness.app.query_one("#param-top-p", Input).value = "bad"
+    harness.app.query_one("#param-max-tokens", Input).value = "bad"
     await harness.pilot.pause()
-    assert "no history yet" in _strip_text(harness)
-    assert harness.app.history.series("other/model") == []
-    assert len(harness.app.history.series("cold-model-a")) == 2
-
-    # Switch back
-    harness.app._tracked_model = "cold-model-a"
-    harness.app.update_history_strip()
-    await harness.pilot.pause()
-    assert "tok/s" in _strip_text(harness)
-
+    # clear history to detect next turn
     harness.app.history.clear()
-    harness.app._tracked_model = None
+    pane.messages.clear()
+    inp.value = "hi2"
+    inp.focus()
+    await harness.pilot.press("enter")
+    assert await harness.wait_for(has_history)
+    posts2 = [r for r in harness.server.requests if "messages" in r]
+    last2 = posts2[-1]
+    assert last2.get("temperature") == 0.7, last2
+    assert last2.get("top_p") == 1.0, last2
+    assert last2.get("max_tokens") == 1024, last2
+
+
+async def test_preset_cycle_drives_params_and_system(
+    harness: AppHarness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from textual.widgets import Input as _Input  # noqa: PLC0415
+    from textual.widgets import TabbedContent  # noqa: PLC0415
+
+    from mlx_tui.chat_pane import ChatPane  # noqa: PLC0415
+    from mlx_tui.presets import load_presets  # noqa: PLC0415
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    presets_file = tmp_path / "mlx-tui" / "presets.toml"
+    presets_file.parent.mkdir(parents=True, exist_ok=True)
+    presets_file.write_text(
+        '[[preset]]\nname = "a"\nsystem = "You are A"\ntemperature = 0.2\n'
+        '[[preset]]\nname = "b"\nsystem = "You are B"\ntop_p = 0.5\nmax_tokens = 512\n'
+    )
+    harness.app.presets = load_presets(presets_file)
+    harness.app.preset_idx = -1
+    harness.app.query_one(TabbedContent).active = "chat"
+    await harness.pilot.pause()
+    pane = harness.app.query_one(ChatPane)
+    # direct action kept: pilot.press for ctrl+p was unreliable in textual 8.2.8; ctrl+n forward is now reliable but direct keeps test stable
+    harness.app.action_cycle_preset()
+    await harness.pilot.pause()
+    assert pane._system_prompt == "You are A"
+    assert harness.app.query_one("#param-temp", _Input).value == "0.2"
+    assert any("preset: a" in line for line in harness.app_log_lines())
+    harness.app.action_cycle_preset()
+    await harness.pilot.pause()
+    assert pane._system_prompt == "You are B"
+    assert harness.app.query_one("#param-top-p", _Input).value == "0.5"
+    assert harness.app.query_one("#param-max-tokens", _Input).value == "512"
+    assert any("preset: b" in line for line in harness.app_log_lines())
+    harness.app.action_cycle_preset_back()
+    await harness.pilot.pause()
+    assert pane._system_prompt == "You are A"
+
+    bindings: dict[str, str] = {}
+    for b in harness.app.BINDINGS:
+        k = getattr(b, "key", None)
+        a = getattr(b, "action", None)
+        if k is None and isinstance(b, tuple):
+            k, a = b[0], b[1]  # type: ignore[misc]
+        if isinstance(k, str) and isinstance(a, str):
+            bindings[k] = a
+    assert bindings.get("ctrl+n") == "cycle_preset"
+    assert bindings.get("ctrl+o") == "cycle_preset_back"
+    harness.server.requests.clear()
+    inp = harness.app.query_one("#chat-input", _Input)
+    inp.value = "hi preset"
+    inp.focus()
+    await harness.pilot.press("enter")
+
+    def reply_done(a: MlxTuiApp) -> bool:
+        return len(a.query_one(ChatPane).messages) >= 2
+
+    assert await harness.wait_for(reply_done)
+    posts = [r for r in harness.server.requests if "messages" in r]
+    assert posts, f"no POST; {harness.server.requests}"
+    last = posts[-1]
+    msgs = last.get("messages", [])
+    assert isinstance(msgs, list) and len(msgs) >= 2
+    assert msgs[0] == {"role": "system", "content": "You are A"}

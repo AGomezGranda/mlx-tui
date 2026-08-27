@@ -29,11 +29,9 @@ def error_detail(response: httpx.Response) -> str:
     if not isinstance(body, dict):
         return ""
     detail: object = body.get("detail")
-    error = body.get("error")
-    if detail is None and isinstance(error, dict):
-        detail = error.get("message")
+    err = body.get("error")
     if detail is None:
-        detail = error
+        detail = err.get("message") if isinstance(err, dict) else err
     if not isinstance(detail, str) or not detail.strip():
         return ""
     return f": {detail.strip()}"
