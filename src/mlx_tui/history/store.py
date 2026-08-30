@@ -5,84 +5,60 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 
+_MAX_TURNS = 64
 
-class _Ring[T]:
-    """Single deque(maxlen) wrapper — HistoryStore + MemoryStore both delegate here."""
 
-    def __init__(self, maxlen: int) -> None:
-        self._dq: deque[T] = deque(maxlen=maxlen)
+@dataclass(frozen=True)
+class MemoryRecord:
+    ts: float
+    model: str | None
+    rss_gib: float | None
+    avail_gib: float
+    total_gib: float
 
-    def add(self, item: T) -> None:
+
+class MemoryStore:
+    """Ring buffer for memory samples; deque(maxlen=256)."""
+
+    def __init__(self, maxlen: int = 256) -> None:
+        self._dq: deque[MemoryRecord] = deque(maxlen=maxlen)
+
+    def add(self, item: MemoryRecord) -> None:
         self._dq.append(item)
 
-    def series(self) -> list[T]:
+    def series(self) -> list[MemoryRecord]:
         return list(self._dq)
 
     def clear(self) -> None:
         self._dq.clear()
 
 
-_MAX_TURNS = 64
-
-
-@dataclass(frozen=True)
-class MemoryRecord:
-    """One memory poll sample, frozen so the future JSONL path is mechanical."""
-
-    ts: float  # time.time()
-    model: str | None  # effective_model() at poll time, None→"—"
-    rss_gib: float | None  # None when no pid
-    avail_gib: float  # always from memory_snapshot()
-    total_gib: float
-
-
-class MemoryStore(_Ring[MemoryRecord]):
-    """Ring buffer for memory samples; deque(maxlen=256).
-
-    Not thread-safe — all mutations from the poll loop are on the event
-    loop thread; chat workers must hop via App.call_from_thread if they
-    ever add memory. No internal lock; single owner keeps stdlib-only.
-    """
-
-    def __init__(self, maxlen: int = 256) -> None:
-        super().__init__(maxlen=maxlen)
-
-
 @dataclass(frozen=True)
 class TurnRecord:
-    """One chat turn, frozen so the future JSONL path is mechanical."""
-
-    ts: float  # time.time(), wall clock
-    model: str  # effective_model() at record time, or "—" when unknown
+    ts: float
+    model: str
     prompt_tok: int
     out_tok: int
     ttft_s: float
     tok_s: float
-    ctx_len: int  # prompt-side context length (usage or estimate of trimmed payload)
+    ctx_len: int
     cold: bool
     cancelled: bool = False
 
 
 class HistoryStore:
-    """Per-model ring buffers; each model gets deque(maxlen=_MAX_TURNS).
-
-    Not thread-safe — all mutations from ChatPane's thread=True worker
-    must be hopped via App.call_from_thread (see Phase 3b). No internal lock;
-    single UI-thread owner keeps the implementation stdlib-only and trivial.
-    If a second writer ever appears, add a threading.Lock around
-    add/series/models/all_records/clear.
-    """
+    """Per-model ring buffers; each model gets deque(maxlen=_MAX_TURNS)."""
 
     def __init__(self, max_turns: int = _MAX_TURNS) -> None:
         self._max: int = max_turns
-        self._by_model: dict[str, _Ring[TurnRecord]] = {}
+        self._by_model: dict[str, deque[TurnRecord]] = {}
 
     def add(self, record: TurnRecord) -> None:
-        self._by_model.setdefault(record.model, _Ring(self._max)).add(record)
+        self._by_model.setdefault(record.model, deque(maxlen=self._max)).append(record)
 
     def series(self, model: str) -> list[TurnRecord]:
         ring = self._by_model.get(model)
-        return ring.series() if ring is not None else []
+        return list(ring) if ring is not None else []
 
     def models(self) -> list[str]:
         return sorted(self._by_model)
@@ -90,7 +66,7 @@ class HistoryStore:
     def all_records(self) -> list[TurnRecord]:
         flat: list[TurnRecord] = []
         for ring in self._by_model.values():
-            flat.extend(ring.series())
+            flat.extend(ring)
 
         def _ts(r: TurnRecord) -> float:
             return r.ts

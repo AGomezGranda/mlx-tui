@@ -2,22 +2,20 @@
 
 from __future__ import annotations
 
+import statistics
+
 from mlx_tui.history.store import MemoryRecord, TurnRecord
 
 SPARKLINE_WIDTH = 32
 SPARKLINE_HEIGHT_ROWS = 2
 
 
-def _bit(col: int, row_local: int) -> int:
-    if col == 0:
-        return (0x01, 0x02, 0x04, 0x40)[row_local]
-    return (0x08, 0x10, 0x20, 0x80)[row_local]
+_BRAILLE_LEFT = (0x01, 0x02, 0x04, 0x40)
+_BRAILLE_RIGHT = (0x08, 0x10, 0x20, 0x80)
 
 
 def _braille_char(bits: int) -> str:
-    if bits == 0:
-        return " "
-    return chr(0x2800 + bits)
+    return chr(0x2800 + bits) if bits else " "
 
 
 def sparkline_visible(
@@ -29,38 +27,28 @@ def sparkline_visible(
 
 
 def _braille_levels(values: list[float | None], dot_rows: int) -> list[int | None]:
-    """Map values to dot-row levels 0..dot_rows-1; None stays None for blank columns.
-
-    ``values`` may contain ``None`` (memory RSS gaps). ``lo``/``hi`` are taken
-    from the non-None subset; flat series (hi==lo) is nudged to avoid div0.
-    """
-    filtered: list[float] = [v for v in values if v is not None]
-    if not filtered:
+    """Map values to 0..dot_rows-1; None stays None for blank columns."""
+    vals = [v for v in values if v is not None]
+    if not vals:
         return [None] * len(values)
-    lo = min(filtered)
-    hi = max(filtered)
+    lo, hi = min(vals), max(vals)
     if hi == lo:
         hi = lo + 1.0
+    span = hi - lo
     out: list[int | None] = []
     for v in values:
         if v is None:
             out.append(None)
         else:
-            lv = int((v - lo) / (hi - lo) * (dot_rows - 1))
-            if lv < 0:
-                lv = 0
-            elif lv >= dot_rows:
-                lv = dot_rows - 1
-            out.append(lv)
+            lv = int((v - lo) / span * (dot_rows - 1))
+            out.append(max(0, min(dot_rows - 1, lv)))
     return out
 
 
 def _render_braille(levels: list[int | None], height_rows: int) -> str:
     """Pack per-turn levels (or None for blank) into braille chars."""
     dot_rows = height_rows * 4
-    row_globals: list[int | None] = [
-        (dot_rows - 1 - lv) if lv is not None else None for lv in levels
-    ]
+    row_globals = [(dot_rows - 1 - lv) if lv is not None else None for lv in levels]
     n = len(levels)
     chars = (n + 1) // 2
     lines: list[str] = []
@@ -70,16 +58,13 @@ def _render_braille(levels: list[int | None], height_rows: int) -> str:
         chars_in_row: list[str] = []
         for k in range(chars):
             bits = 0
-            idx_left = 2 * k
-            if idx_left < n:
-                rg = row_globals[idx_left]
-                if rg is not None and row_start <= rg <= row_end:
-                    bits |= _bit(0, rg - row_start)
-            idx_right = 2 * k + 1
-            if idx_right < n:
-                rg = row_globals[idx_right]
-                if rg is not None and row_start <= rg <= row_end:
-                    bits |= _bit(1, rg - row_start)
+            for col, idx in enumerate((2 * k, 2 * k + 1)):
+                if idx < n:
+                    rg = row_globals[idx]
+                    if rg is not None and row_start <= rg <= row_end:
+                        bits |= (_BRAILLE_LEFT if col == 0 else _BRAILLE_RIGHT)[
+                            rg - row_start
+                        ]
             chars_in_row.append(_braille_char(bits))
         lines.append("".join(chars_in_row))
     return "\n".join(lines)
@@ -150,19 +135,12 @@ def render_memory_sparkline(  # noqa: PLR0912
 
 
 def _shade_for_ctx(ctx_lens: list[int]) -> list[str]:
-    """Map ctx lengths to Rich styles via quartiles: dim / "" / bold."""
+    """Map ctx lengths to Rich styles via quartiles: dim / \"\" / bold."""
     if not ctx_lens:
         return []
-    sorted_lens = sorted(ctx_lens)
-    n = len(sorted_lens)
-    q1 = sorted_lens[n // 4]
-    q3 = sorted_lens[3 * n // 4]
-    styles: list[str] = []
-    for ctx in ctx_lens:
-        if ctx <= q1:
-            styles.append("dim")
-        elif ctx >= q3:
-            styles.append("bold")
-        else:
-            styles.append("")
-    return styles
+    try:
+        q1, _, q3 = statistics.quantiles(sorted(ctx_lens), n=4)
+    except statistics.StatisticsError:
+        s = sorted(ctx_lens)
+        q1, q3 = s[len(s) // 4], s[3 * len(s) // 4]
+    return ["dim" if c <= q1 else "bold" if c >= q3 else "" for c in ctx_lens]

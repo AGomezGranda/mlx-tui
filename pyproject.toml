@@ -3,6 +3,8 @@ name = "mlx-tui"
 version = "0.1.0"
 description = "mlx tui"
 readme = "README.md"
+license = "MIT"
+authors = [{name = "Alvaro Gomez", email = "alvarogomezgranda@gmail.com"}]
 requires-python = ">=3.13"
 dependencies = [
     "httpx>=0.28",

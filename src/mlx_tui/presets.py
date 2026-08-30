@@ -6,7 +6,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from mlx_tui.config import config_path
+from mlx_tui.config import _clamp, _clamp_int, _coerce_float_strict, config_path
 
 
 @dataclass(frozen=True)
@@ -53,20 +53,12 @@ def _preset_from_mapping(d: dict[str, object]) -> Preset | None:  # noqa: PLR091
     top_p: float | None = None
     max_tok: int | None = None
     if "temperature" in d:
-        v = d["temperature"]
-        if type(v) is float:
-            temp = v
-        elif type(v) is int:
-            temp = float(v)
-        else:
+        temp = _coerce_float_strict(d["temperature"])
+        if temp is None:
             return None
     if "top_p" in d:
-        v = d["top_p"]
-        if type(v) is float:
-            top_p = v
-        elif type(v) is int:
-            top_p = float(v)
-        else:
+        top_p = _coerce_float_strict(d["top_p"])
+        if top_p is None:
             return None
     if "max_tokens" in d:
         v = d["max_tokens"]
@@ -75,11 +67,11 @@ def _preset_from_mapping(d: dict[str, object]) -> Preset | None:  # noqa: PLR091
         else:
             return None
     if temp is not None:
-        temp = max(0.0, min(2.0, temp))
+        temp = _clamp(temp, 0.0, 2.0)
     if top_p is not None:
-        top_p = max(0.0, min(1.0, top_p))
+        top_p = _clamp(top_p, 0.0, 1.0)
     if max_tok is not None:
-        max_tok = max(1, min(16384, max_tok))
+        max_tok = _clamp_int(max_tok, 1, 16384)
     return Preset(
         name=name, system=system, temperature=temp, top_p=top_p, max_tokens=max_tok
     )

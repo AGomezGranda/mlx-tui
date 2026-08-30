@@ -11,6 +11,8 @@ from mlx_tui.history.store import HistoryStore, TurnRecord
 from mlx_tui.history.tokens import (
     CHARS_PER_TOKEN_EST,
     _tok_int,
+    ctx_bar_style,
+    ctx_bar_text,
     estimate_tokens,
     trim_for_context,
 )
@@ -533,3 +535,19 @@ def test_render_memory_with_none_blank_column() -> None:
     # should have 1 char (2 records -> 1 braille char) and not crash
     assert braille
     assert "2 samples" in legend
+
+
+def test_ctx_bar_text_formats_k() -> None:
+    assert ctx_bar_text(9200, 32000) == "ctx 9.2k/32k"
+    assert ctx_bar_text(800, 8000) == "ctx 800/8k"
+    assert ctx_bar_text(0, 8000) == "ctx 0/8k"
+    assert ctx_bar_text(1000, 1000) == "ctx 1k/1k"
+
+
+def test_ctx_bar_style_thresholds() -> None:
+    assert ctx_bar_style(0, 8000) == ""
+    assert ctx_bar_style(6400, 8000) == ""  # 80% exact not amber
+    assert ctx_bar_style(6401, 8000) == "yellow"  # >80% amber
+    assert ctx_bar_style(7600, 8000) == "yellow"  # 95% still yellow
+    assert ctx_bar_style(7601, 8000) == "red"  # >95% red
+    assert ctx_bar_style(8000, 8000) == "red"

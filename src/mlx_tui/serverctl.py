@@ -32,28 +32,22 @@ def _pump(proc: subprocess.Popen[str], on_line: Callable[[str], None]) -> None:
             on_line(stripped)
 
 
+def _popen(cmd: str, *, on_line: Callable[[str], None]) -> subprocess.Popen[str]:
+    return subprocess.Popen(
+        cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+    )
+
+
 def run_command(cmd: str, *, on_line: Callable[[str], None]) -> int:
     """Stream a free-form shell command's combined output line by line."""
-    with subprocess.Popen(
-        cmd,
-        shell=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    ) as proc:
+    with _popen(cmd, on_line=on_line) as proc:
         _pump(proc, on_line)
         return proc.wait()
 
 
 def spawn_command(cmd: str, *, on_line: Callable[[str], None]) -> subprocess.Popen[str]:
     """Start a long-lived command (a server) without waiting for its exit."""
-    proc: subprocess.Popen[str] = subprocess.Popen(
-        cmd,
-        shell=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
+    proc = _popen(cmd, on_line=on_line)
     threading.Thread(
         target=lambda: _pump(proc, on_line), daemon=True, name="spawned-cmd-output"
     ).start()

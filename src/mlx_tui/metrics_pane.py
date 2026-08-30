@@ -27,15 +27,12 @@ _MAX_RECENT = 64
 
 def _per_col_styles(styles: list[str]) -> list[str]:
     """Collapse per-turn dim/\"\"/bold into per-braille-col styles (bold wins)."""
-    n = len(styles)
     out: list[str] = []
-    for k in range((n + 1) // 2):
-        s_left: str | None = styles[2 * k] if 2 * k < n else None
-        s_right: str | None = styles[2 * k + 1] if 2 * k + 1 < n else None
-        present = [s for s in (s_left, s_right) if s is not None]
-        if "bold" in present:
+    for k in range((len(styles) + 1) // 2):
+        pair = styles[2 * k : 2 * k + 2]
+        if "bold" in pair:
             out.append("bold")
-        elif "" in present:
+        elif "" in pair:
             out.append("")
         else:
             out.append("dim")

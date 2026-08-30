@@ -23,6 +23,7 @@ class AppConfig:
     top_p: float | None = None
     max_tokens: int | None = None
     system: str | None = None
+    max_ctx: int = 8000
 
 
 def config_path() -> Path:
@@ -41,6 +42,7 @@ CONFIG_TEMPLATE = """\
 # top_p = 1.0
 # max_tokens = 1024
 # system = "You are a helpful assistant."
+# max_ctx = 8000
 """
 
 
@@ -61,11 +63,28 @@ _KEY_TYPES: dict[str, type] = {
     "top_p": float,
     "max_tokens": int,
     "system": str,
+    "max_ctx": int,
 }
 
 
 class ConfigParseError(Exception):
     """Raised by :func:`parse_config` when the file is unreadable or invalid."""
+
+
+def _clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
+
+
+def _clamp_int(v: int, lo: int, hi: int) -> int:
+    return max(lo, min(hi, v))
+
+
+def _coerce_float_strict(v: object) -> float | None:
+    if type(v) is float:
+        return v
+    if type(v) is int:
+        return float(v)
+    return None
 
 
 def _from_mapping(data: dict[str, object]) -> AppConfig:
@@ -81,13 +100,16 @@ def _from_mapping(data: dict[str, object]) -> AppConfig:
     port = found.get("port")
     temp = cast("float | None", found.get("temperature"))
     if temp is not None:
-        temp = max(0.0, min(2.0, temp))
+        temp = _clamp(temp, 0.0, 2.0)
     tp = cast("float | None", found.get("top_p"))
     if tp is not None:
-        tp = max(0.0, min(1.0, tp))
+        tp = _clamp(tp, 0.0, 1.0)
     mt = cast("int | None", found.get("max_tokens"))
     if mt is not None:
-        mt = max(1, min(16384, mt))
+        mt = _clamp_int(mt, 1, 16384)
+    mc = cast("int | None", found.get("max_ctx"))
+    if mc is not None:
+        mc = _clamp_int(mc, 1024, 131072)
     return AppConfig(
         model=cast("str | None", found.get("model")),
         host=cast("str", host if host is not None else "127.0.0.1"),
@@ -99,6 +121,7 @@ def _from_mapping(data: dict[str, object]) -> AppConfig:
         top_p=tp,
         max_tokens=mt,
         system=cast("str | None", found.get("system")),
+        max_ctx=mc if mc is not None else 8000,
     )
 
 

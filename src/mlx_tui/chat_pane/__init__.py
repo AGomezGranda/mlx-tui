@@ -67,6 +67,13 @@ class ChatPane(Vertical):
         yield Static("", id="chat-stream")
         yield RichLog(id="chat-log", markup=False, wrap=True)
         yield Input(placeholder="message…", id="chat-input")
+        yield Static("ctx 0/8k", id="ctx-bar")
+
+    def on_mount(self) -> None:
+        try:
+            self.update_ctx_bar(0)
+        except Exception:
+            pass
 
     @on(Input.Submitted, "#chat-input")
     def _on_input_submitted(self, event: Input.Submitted) -> None:
@@ -80,6 +87,19 @@ class ChatPane(Vertical):
         self.messages.append({"role": "user", "content": text})
         log = self.query_one("#chat-log", RichLog)
         log.write(Text(f"you › {text}"))
+        # refresh ctx bar immediately on user message (estimate, trimmed to max_ctx)
+        try:
+            from mlx_tui.history.tokens import (  # noqa: PLC0415
+                estimate_tokens,
+                trim_for_context,
+            )
+
+            max_ctx = int(getattr(self.tui.config, "max_ctx", 8000))
+            trimmed = trim_for_context(self.messages, max_ctx)
+            ctx_est = sum(estimate_tokens(m["content"]) for m in trimmed)
+            self.update_ctx_bar(ctx_est)
+        except Exception:
+            pass
         cold = self.tui.cold_tracker.consume_cold()
         self._cancel_requested = False
         event.input.disabled = True
@@ -98,6 +118,26 @@ class ChatPane(Vertical):
 
     def apply_config_params(self, cfg: AppConfig) -> None:
         return params.apply_config_params(self, cfg)  # type: ignore[arg-type]
+
+    def update_ctx_bar(self, ctx_len: int) -> None:
+        from mlx_tui.history.tokens import ctx_bar_style, ctx_bar_text  # noqa: PLC0415
+
+        try:
+            max_ctx = int(getattr(self.tui.config, "max_ctx", 8000))
+        except Exception:
+            max_ctx = 8000
+        try:
+            bar = self.query_one("#ctx-bar", Static)
+        except Exception:
+            return
+        bar.update(ctx_bar_text(ctx_len, max_ctx))
+        style = ctx_bar_style(ctx_len, max_ctx)
+        bar.remove_class("ctx-bar-amber")
+        bar.remove_class("ctx-bar-red")
+        if style == "yellow":
+            bar.add_class("ctx-bar-amber")
+        elif style == "red":
+            bar.add_class("ctx-bar-red")
 
     def set_system_prompt(self, text: str) -> None:
         self._system_prompt = text.strip()

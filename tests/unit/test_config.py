@@ -134,3 +134,12 @@ def test_config_path_falls_back_to_home_config(
 ) -> None:
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     assert config_path() == Path.home() / ".config" / "mlx-tui" / "config.toml"
+
+
+def test_default_max_ctx_is_8000() -> None:
+    assert AppConfig().max_ctx == 8000
+
+
+def test_max_ctx_round_trip(tmp_path: Path) -> None:
+    cfg = load_config(_write(tmp_path, "max_ctx = 32000\n"))
+    assert cfg.max_ctx == 32000

@@ -48,8 +48,8 @@ class ModelsTable(DataTable[str]):
                 row.repo_id,
                 row.quant,
                 f"{row.size_on_disk / 2**30:.1f} GB",
-                _FITS_GLYPHS.get(fits_headroom(row.size_on_disk, avail_gib), "—"),
-                "●" if effective_model == row.repo_id else "",
+                fits_cell(row.size_on_disk, avail_gib),
+                loaded_cell(row.repo_id, effective_model),
                 key=row.repo_id,
             )
 
@@ -62,8 +62,8 @@ class ModelsTable(DataTable[str]):
     ) -> None:
         """Update fits/loaded cells whose rendered value changed."""
         for index, row in enumerate(rows):
-            new_loaded = "●" if effective_model == row.repo_id else ""
-            new_fits = _FITS_GLYPHS.get(fits_headroom(row.size_on_disk, avail_gib), "—")
+            new_loaded = loaded_cell(row.repo_id, effective_model)
+            new_fits = fits_cell(row.size_on_disk, avail_gib)
             if self.get_cell_at(Coordinate(index, 4)) != new_loaded:
                 self.update_cell(row.repo_id, "loaded", new_loaded)
             if self.get_cell_at(Coordinate(index, 3)) != new_fits:

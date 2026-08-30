@@ -394,6 +394,67 @@ async def test_params_sidebar_sends_payload(harness: AppHarness) -> None:
     assert last2.get("max_tokens") == 1024, last2
 
 
+async def test_ctx_bar_shows_usage_and_amber(harness: AppHarness) -> None:
+    from textual.widgets import Static  # noqa: PLC0415
+
+    bar = harness.app.query_one("#ctx-bar", Static)
+    text = str(bar.render())
+    assert "ctx" in text.lower() and "8k" in text, f"initial bar {text!r} missing ctx/8k"
+    # at 0/8k style is default (not amber/red)
+    assert bar.has_class("ctx-bar-amber") is False
+    assert bar.has_class("ctx-bar-red") is False
+
+
+async def test_ctx_bar_amber_and_red_thresholds(harness: AppHarness) -> None:
+    from textual.widgets import Static  # noqa: PLC0415
+
+    pane = harness.chat_pane()
+    bar = harness.app.query_one("#ctx-bar", Static)
+
+    # 7000/8000 -> amber (>80%)
+    pane.update_ctx_bar(7000)
+    await harness.pilot.pause()
+    text = str(bar.render())
+    assert "7k" in text and "8k" in text, f"7000 text {text!r}"
+    assert bar.has_class("ctx-bar-amber") is True
+    assert bar.has_class("ctx-bar-red") is False
+
+    # 7700/8000 -> red (>95%)
+    pane.update_ctx_bar(7700)
+    await harness.pilot.pause()
+    text = str(bar.render())
+    assert "7.7k" in text
+    assert bar.has_class("ctx-bar-red") is True
+
+    # back to low -> not amber/red
+    pane.update_ctx_bar(100)
+    await harness.pilot.pause()
+    assert bar.has_class("ctx-bar-amber") is False
+    assert bar.has_class("ctx-bar-red") is False
+
+
+async def test_ctx_bar_updates_after_turn(harness: AppHarness) -> None:
+    from textual.widgets import Input, Static  # noqa: PLC0415
+
+    bar = harness.app.query_one("#ctx-bar", Static)
+    initial = str(bar.render())
+    assert "0/8k" in initial or "0 / 8k" in initial or "ctx 0" in initial.lower()
+    inp = harness.app.query_one("#chat-input", Input)
+    inp.value = "hello world, this is a test of context bar"
+    inp.focus()
+    await harness.pilot.press("enter")
+
+    def bar_updated(a: MlxTuiApp) -> bool:
+        t = str(a.query_one("#ctx-bar", Static).render())
+        return "0/8k" not in t and "ctx" in t.lower()
+
+    assert await harness.wait_for(bar_updated), f"bar never updated: {str(bar.render())}"
+    # after turn, bar should show non-zero ctx and still 8k max
+    text = str(bar.render())
+    assert "8k" in text
+    assert "0/8k" not in text
+
+
 async def test_preset_cycle_drives_params_and_system(
     harness: AppHarness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

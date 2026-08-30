@@ -34,23 +34,16 @@ class _SwapShim:
 
 
 def effective_model(app: MlxTuiApp) -> str | None:
-    """The union view: tracked warm-swaps are authoritative, cmdline is fallback.
-
-    Warm in-server loads never update the server's argv, so a successful
-    probe-load's ``_tracked_model`` is more truthful than ``--model``.
-    Restart/cold paths keep both values in sync, so priority is moot there.
-    """
+    """Tracked warm-swaps win over --model cmdline; gated on live pid."""
     if app._tracked_model is not None:
         return app._tracked_model
     pid = process.find_server_pid(app.config.pidfile)
-    if pid is not None:
-        try:
-            cmdline_model = model_from_cmdline(psutil.Process(pid))
-        except psutil.NoSuchProcess:
-            cmdline_model = None
-        if cmdline_model is not None:
-            return cmdline_model
-    return None
+    if pid is None:
+        return None
+    try:
+        return model_from_cmdline(psutil.Process(pid))
+    except psutil.NoSuchProcess:
+        return None
 
 
 def set_tracked_model(app: MlxTuiApp, model: str | None) -> None:

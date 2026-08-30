@@ -35,3 +35,27 @@ def trim_for_context(
         if messages[i]["role"] == "user" and total <= max_est_tokens:
             keep_from = i
     return list(messages[keep_from:])
+
+
+def _format_k(n: int) -> str:  # noqa: PLR2004
+    if n < 1000:  # noqa: PLR2004
+        return str(n)
+    s = f"{n / 1000:.1f}"
+    if s.endswith(".0"):
+        s = s[:-2]
+    return f"{s}k"
+
+
+def ctx_bar_text(ctx_len: int, max_ctx: int) -> str:
+    return f"ctx {_format_k(ctx_len)}/{_format_k(max_ctx)}"
+
+
+def ctx_bar_style(ctx_len: int, max_ctx: int) -> str:  # noqa: PLR2004
+    if max_ctx <= 0:
+        return ""
+    ratio = ctx_len / max_ctx
+    if ratio > 0.95:  # noqa: PLR2004
+        return "red"
+    if ratio > 0.8:  # noqa: PLR2004
+        return "yellow"
+    return ""

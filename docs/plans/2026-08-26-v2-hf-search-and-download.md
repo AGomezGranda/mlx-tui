@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-26
 **Work Item:** n/a (implements §v2 of `docs/idea.md`)
-**Status:** Draft
+**Status:** Complete
 
 ## Overview
 Build v2 on top of the completed v0/v1/pane-split codebase: a `/`-opened modal over the Models tab ("a search box and a download key") that searches `mlx-community` via `HfApi().list_models`, lists repo id / quant / exact post-`allow_patterns` download size vs free disk, and downloads the selected repo through `snapshot_download(allow_patterns=…)` in a cancellable thread worker with throttled byte progress — handing off on completion to the existing rescan so the new model is one `enter` away from loading. Feature set is held exactly to the idea doc's §v2 enumeration; nothing more.

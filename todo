@@ -1,0 +1,30 @@
+Research:
+- research quantization runner and in general the ability to tweak model with mlx and mlx-lm
+- research advance inference of mlx-lm techniques and how to use them in mlx-tui
+- research how to conect harness eg Pi to 
+- research benchmarks
+
+Improvements:
+- add server-log tailing
+- separate docs/plan to its own repo
+- general UX UI improvements
+- stats improvements
+
+License:
+- mit, apache license -> MIT license, easy as textual is mit too
+- build and serve package via brew, pypi...
+- hold making it public
+
+More things:
+improve apple sillicon telemtry and context awareness
+ -> visual feedback around memory and prompt space gives users inmediate clarity on system headroom
+ - unified memory bar: show live ram usage allocated to GPU vs total unified memory - warn about swap memory
+ - context limit visualizer: progress bar showing current tokens used in prompt vs models maximun context length
+ - prefill vs decode breakdown: splot metricts into ttft, prefill speed (tok/s) and decode speed (tok/s)
+    prefill is compute heavy while decode is memory-bandwith bound
+
+power user tui uv and local workflows
+- vim style keybindings
+- file and code context injection
+- session persistence & export: save chats locally as md or json and allow resuming old conversation with their full kv cache state reserved (if possible)
+- multimodal / vision support: optional integration to drag and drop for images and vision language models (mlx-vlm)

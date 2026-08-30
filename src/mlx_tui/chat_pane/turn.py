@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import socket
 import time
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import httpx
@@ -12,7 +13,6 @@ from rich.text import Text
 from textual.widgets import Input, RichLog, Static
 
 from mlx_tui.chat import error_detail, stream_turn
-from mlx_tui.config import AppConfig
 from mlx_tui.history.store import TurnRecord
 from mlx_tui.history.tokens import _tok_int, estimate_tokens, trim_for_context
 
@@ -22,12 +22,19 @@ if TYPE_CHECKING:
 _MAX_CONTEXT_TOKENS_EST = 8_000
 
 
-def run_turn_impl(pane: ChatPane, messages: list[dict[str, str]], cold: bool) -> None:  # noqa: PLR0912
+def _get_max_ctx(pane: ChatPane) -> int:
+    try:
+        v = getattr(pane.tui.config, "max_ctx", _MAX_CONTEXT_TOKENS_EST)
+        return int(v) if isinstance(v, int) and v > 0 else _MAX_CONTEXT_TOKENS_EST
+    except Exception:
+        return _MAX_CONTEXT_TOKENS_EST
+
+
+def run_turn_impl(pane: ChatPane, messages: list[dict[str, str]], cold: bool) -> None:  # noqa: PLR0912, PLR0915
     temp, top_p, max_tok = pane._parse_params()
     # persist to AppConfig snapshot (no file write)
     try:
         cfg = pane.tui.config
-        # only update if differs to avoid churn; always sync system
         if (
             cfg.temperature != temp
             or cfg.top_p != top_p
@@ -38,13 +45,8 @@ def run_turn_impl(pane: ChatPane, messages: list[dict[str, str]], cold: bool) ->
                 setattr,
                 pane.tui,
                 "config",
-                AppConfig(
-                    model=cfg.model,
-                    host=cfg.host,
-                    port=cfg.port,
-                    start_cmd=cfg.start_cmd,
-                    stop_cmd=cfg.stop_cmd,
-                    pidfile=cfg.pidfile,
+                replace(
+                    cfg,
                     temperature=temp,
                     top_p=top_p,
                     max_tokens=max_tok,
@@ -54,7 +56,8 @@ def run_turn_impl(pane: ChatPane, messages: list[dict[str, str]], cold: bool) ->
     except (AttributeError, Exception):
         pass
     model_at_send = pane.tui.effective_model() or "—"
-    trimmed = trim_for_context(messages, _MAX_CONTEXT_TOKENS_EST)
+    max_ctx = _get_max_ctx(pane)
+    trimmed = trim_for_context(messages, max_ctx)
     trimmed_with_system = (
         [{"role": "system", "content": pane._system_prompt}]
         if pane._system_prompt
@@ -102,6 +105,11 @@ def run_turn_impl(pane: ChatPane, messages: list[dict[str, str]], cold: bool) ->
         )
         pane.tui.call_from_thread(pane.tui.history.add, record)
         pane.tui.call_from_thread(pane.tui._refresh_metrics)
+        # refresh ctx bar with final ctx_len (usage-corrected if available)
+        try:
+            pane.tui.call_from_thread(pane.update_ctx_bar, ctx_len)
+        except Exception:
+            pass
         stamp = (
             f"{result.tok_in_str} in · {result.tok_out_str} out · "
             f"{result.tok_s:.1f} tok/s · TTFT {result.ttft:.2f}s"
@@ -194,6 +202,10 @@ def record_cancelled(
     )
     pane.tui.call_from_thread(pane.tui.history.add, record)
     pane.tui.call_from_thread(pane.tui._refresh_metrics)
+    try:
+        pane.tui.call_from_thread(pane.update_ctx_bar, ctx_len_estimate)
+    except Exception:
+        pass
     pane.tui.call_from_thread(
         pane._write_system_line, "cancelled — request aborted", "dim"
     )

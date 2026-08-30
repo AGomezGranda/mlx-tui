@@ -86,6 +86,9 @@ def _throttled_tqdm(
         "last_flush": float("-inf"),
     }
 
+    def _desc(obj: object) -> str:
+        return str(getattr(obj, "desc", getattr(obj, "_mlx_desc", "")) or "")  # type: ignore[attr-defined]
+
     class _Tqdm(hf_tqdm):
         @override
         def __init__(self, *args: object, **kwargs: object) -> None:
@@ -100,9 +103,7 @@ def _throttled_tqdm(
         def update(self, n: float | None = 1) -> bool | None:
             if cancel_event is not None and cancel_event.is_set():
                 raise CancelledDownload("cancelled by user")
-            raw = getattr(self, "desc", getattr(self, "_mlx_desc", ""))  # type: ignore[attr-defined]
-            desc = str(raw or "")
-            if desc.startswith("Downloading"):
+            if _desc(self).startswith("Downloading"):
                 return super().update(n)
             now = time.monotonic()
             state["disk_bytes"] = int(state["disk_bytes"]) + max(int(n or 0), 0)
@@ -120,17 +121,14 @@ def _throttled_tqdm(
 
         @override
         def close(self) -> None:
-            raw = getattr(self, "desc", getattr(self, "_mlx_desc", ""))  # type: ignore[attr-defined]
-            desc = str(raw or "")
             if (
-                not desc.startswith("Downloading")
+                not _desc(self).startswith("Downloading")
                 and on_progress is not None
                 and not (cancel_event is not None and cancel_event.is_set())
             ):
                 on_progress(int(state["disk_bytes"]), int(state["expected"]))
             super().close()
 
-    # expose state for tests (dict mutable)
     _Tqdm._mlx_state = state  # type: ignore[attr-defined]
     return _Tqdm
 
