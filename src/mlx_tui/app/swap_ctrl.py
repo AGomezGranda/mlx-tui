@@ -1,4 +1,4 @@
-"""Cold-start / restart orchestration + swap UI."""
+"""Cold-start / restart orchestration + operation UI."""
 
 from __future__ import annotations
 
@@ -8,58 +8,57 @@ from textual.css.query import NoMatches
 from textual.widgets import Input, Static
 
 from mlx_tui import process
+from mlx_tui.app.operations import OperationKind
 from mlx_tui.models_pane import ModelsPane
-from mlx_tui.swap import BootPlan, SwapState
+from mlx_tui.swap import BootPlan
 from mlx_tui.table import ModelsTable
 
 if TYPE_CHECKING:
     from mlx_tui.app import MlxTuiApp
 
 
-def set_swap_ui(app: MlxTuiApp, busy: bool) -> None:
-    """Disable/restore table+input around a swap; False clears progress."""
+def set_operation_ui(app: MlxTuiApp, busy: bool) -> None:
+    """Disable or restore controls for a model lifecycle operation."""
     try:
         app.query_one("#models-table", ModelsTable).disabled = busy
-        # A warm swap finishing under a live chat turn must not hand the
-        # input back mid-turn: the turn owns it until end_turn.
-        live_turn = app.chat_has_live_turn()
-        app.query_one("#chat-input", Input).disabled = busy or live_turn
+        app.query_one("#chat-input", Input).disabled = (
+            busy or app.operations.current is OperationKind.CHATTING
+        )
         if not busy:
             app.query_one("#swap-progress", Static).update("")
     except NoMatches:
         return
 
 
-async def cold_start(app: MlxTuiApp) -> None:
-    # Same busy guard as the pane's load action: a second ctrl+s inside a
-    # running boot would raise InvalidTransition (starting -> starting)
-    # and crash the app. The in-flight flag covers the window before the
-    # machine leaves IDLE (the action awaits below).
-    if app._cold_start_in_flight or app.swap_busy:
-        app.log_app("swap already in progress", "yellow")
-        return
+async def cold_start(app: MlxTuiApp) -> None:  # noqa: PLR0911
+    """Check the endpoint, then own a complete cold-start worker lifetime."""
     if not app.config.start_cmd:
         app.log_app("set start_cmd in the config to enable cold start", "yellow")
         return
-    app._cold_start_in_flight = True
+    if app.operations.current is OperationKind.CHATTING:
+        app.cancel_chat_for_swap()
+        return
+    if not app.operations.try_acquire(OperationKind.RESTARTING):
+        app.log_app("operation already in progress", "yellow")
+        return
+
+    worker_started = False
     try:
-        # The 2s poll leaves startup windows where status_state still
-        # carries its initial "red" against an already-running server;
-        # decide on a fresh classification, not the last render.
-        state = await app._classify_liveness()
-        if state == "green":
-            app.status_state = state
+        # The 2s poll leaves startup windows where status_state still carries
+        # its initial red against an already-running server.
+        live_state = await app._classify_liveness()
+        if live_state == "green":
+            app.status_state = live_state
             app.log_app("server is already up", "dim")
             return
-        # A server process may exist without answering health yet (still
-        # loading, or wedged): blind-spawning a second instance cannot
-        # bind the port and dies with an OSError traceback. Restart it
-        # through the configured commands instead.
-        pid = process.find_server_pid(app.config.pidfile)
-        if pid is not None:
-            restart_config_model(app, pid)
+
+        # A process may exist without answering health yet. Restart it through
+        # configured commands instead of racing a second instance onto the port.
+        proc_ident = process.find_server_process(app.host, app.port, app.config.pidfile)
+        if proc_ident is not None:
+            worker_started = restart_config_model(app, proc_ident.pid)
             return
-        if state == "amber":
+        if live_state == "amber":
             app.log_app(
                 "something else is answering on this port — not starting the server",
                 "yellow",
@@ -69,8 +68,7 @@ async def cold_start(app: MlxTuiApp) -> None:
             pane = app.query_one(ModelsPane)
         except NoMatches:
             return
-        app.swap_machine.transition(SwapState.STARTING)
-        set_swap_ui(app, True)
+        set_operation_ui(app, True)
         pane.run_boot(
             BootPlan(
                 model_id=app.config.model,
@@ -79,32 +77,54 @@ async def cold_start(app: MlxTuiApp) -> None:
                 success_line="✓ server is up",
             )
         )
+        worker_started = True
     finally:
-        app._cold_start_in_flight = False
+        if not worker_started:
+            app.operations.release(OperationKind.RESTARTING)
+            set_operation_ui(app, False)
 
 
-def restart_config_model(app: MlxTuiApp, pid: int) -> None:
-    """Restart path for ctrl+s over an existing-but-unhealthy process."""
+def restart_config_model(app: MlxTuiApp, pid: int) -> bool:
+    """Launch the restart worker for an existing unhealthy server process."""
     try:
         pane = app.query_one(ModelsPane)
     except NoMatches:
-        return
+        return False
+    if app.config.swap_policy == "warm":
+        app.log_app(
+            'cannot restart: swap_policy is "warm" (requires green, no restarts)',
+            "red",
+        )
+        return False
     if not (app.config.start_cmd and app.config.stop_cmd):
         app.log_app(
             f"a server process (pid {pid}) is running but not healthy — "
             "set stop_cmd/start_cmd to let mlx-tui restart it",
             "red",
         )
-        return
-    if app.chat_has_live_turn():
+        return False
+    if app.operations.current is OperationKind.CHATTING:
         app.cancel_chat_for_swap()
-    app.swap_machine.transition(SwapState.STOPPING)
-    set_swap_ui(app, True)
-    pane.run_boot(
-        BootPlan(
-            model_id=app.config.model,
-            size_on_disk=pane.row_size(app.config.model),
-            stop_first=True,
-            success_line="✓ server is up",
+        return False
+    acquired_here = False
+    if app.operations.current is not OperationKind.RESTARTING:
+        if not app.operations.try_acquire(OperationKind.RESTARTING):
+            app.log_app("operation already in progress", "yellow")
+            return False
+        acquired_here = True
+    try:
+        set_operation_ui(app, True)
+        pane.run_boot(
+            BootPlan(
+                model_id=app.config.model,
+                size_on_disk=pane.row_size(app.config.model),
+                stop_first=True,
+                success_line="✓ server is up",
+            )
         )
-    )
+    except Exception:
+        if acquired_here:
+            app.operations.release(OperationKind.RESTARTING)
+            set_operation_ui(app, False)
+        raise
+    return True

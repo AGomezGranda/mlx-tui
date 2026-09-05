@@ -49,17 +49,26 @@ def start_download(screen: SearchScreen) -> None:
     screen._cancel_logged = False
     screen.query_one("#search-input", Input).disabled = True
     table.disabled = True
-    screen._run_download(repo_id, screen._cancel_event)
+    revision = screen._revisions.get(repo_id)
+    screen._run_download(repo_id, screen._cancel_event, revision)
 
 
 def run_download_impl(
-    screen: SearchScreen, repo_id: str, cancel_event: threading.Event
+    screen: SearchScreen,
+    repo_id: str,
+    cancel_event: threading.Event,
+    revision: str | None = None,
 ) -> None:
     def on_progress(done: int, expected: int) -> None:
         screen.app.call_from_thread(progress_line, screen, repo_id, done, expected)
 
     try:
-        download_snapshot(repo_id, on_progress=on_progress, cancel_event=cancel_event)
+        download_snapshot(
+            repo_id,
+            on_progress=on_progress,
+            cancel_event=cancel_event,
+            revision=revision,
+        )
     except CancelledDownload:
         if not screen._cancel_logged:
             screen.app.call_from_thread(

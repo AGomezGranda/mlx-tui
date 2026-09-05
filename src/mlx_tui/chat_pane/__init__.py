@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast, override
 
 import httpx
@@ -9,9 +10,11 @@ from rich.text import Text
 from textual import on, work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Collapsible, Input, Label, RichLog, Static
+from textual.widgets import Collapsible, Input, Label, ProgressBar, RichLog, Static
 
+from mlx_tui.app.operations import OperationKind
 from mlx_tui.config import AppConfig
+from mlx_tui.history.tokens import ContextLimitError, prepare_context
 
 from . import params, turn
 
@@ -27,6 +30,7 @@ class ChatPane(Vertical):
         self.messages: list[dict[str, str]] = []
         self._system_prompt: str = ""
         self._cancel_requested: bool = False
+        self._turn_active: bool = False
         self._active_response: httpx.Response | None = None
 
     @property
@@ -35,7 +39,7 @@ class ChatPane(Vertical):
 
     @property
     def has_live_turn(self) -> bool:
-        return self._active_response is not None
+        return self._turn_active
 
     @override
     def compose(self) -> ComposeResult:
@@ -67,6 +71,9 @@ class ChatPane(Vertical):
         yield Static("", id="chat-stream")
         yield RichLog(id="chat-log", markup=False, wrap=True)
         yield Input(placeholder="message…", id="chat-input")
+        yield ProgressBar(
+            total=8192, show_percentage=False, show_eta=False, id="ctx-progress"
+        )
         yield Static("ctx 0/8k", id="ctx-bar")
 
     def on_mount(self) -> None:
@@ -80,30 +87,40 @@ class ChatPane(Vertical):
         text = event.value.strip()
         if not text:
             return
-        if self.tui.swap_busy:
-            self.tui.log_app("model swapping — chat paused", "yellow")
+        if not self.tui.operations.try_acquire(OperationKind.CHATTING):
+            if self.tui.swap_busy:
+                self.tui.log_app("model operation in progress — chat paused", "yellow")
+            else:
+                self.tui.log_app("operation already in progress", "yellow")
             return
         event.input.clear()
-        self.messages.append({"role": "user", "content": text})
+        submitted_message = {"role": "user", "content": text}
+        self.messages.append(submitted_message)
         log = self.query_one("#chat-log", RichLog)
-        log.write(Text(f"you › {text}"))
-        # refresh ctx bar immediately on user message (estimate, trimmed to max_ctx)
+        log.write(Text(f"▎ you › {text}", style="bold"))
+        # Refresh the bar from the same bounded request contract used by send.
         try:
-            from mlx_tui.history.tokens import (  # noqa: PLC0415
-                estimate_tokens,
-                trim_for_context,
+            max_ctx = int(getattr(self.tui.config, "max_ctx", 8192))
+        except (TypeError, ValueError):
+            max_ctx = 8192
+        try:
+            _temperature, _top_p, max_tokens = self._parse_params()
+            window = prepare_context(
+                self.messages,
+                self.tui.config.system,
+                max_ctx,
+                max_tokens,
             )
-
-            max_ctx = int(getattr(self.tui.config, "max_ctx", 8000))
-            trimmed = trim_for_context(self.messages, max_ctx)
-            ctx_est = sum(estimate_tokens(m["content"]) for m in trimmed)
-            self.update_ctx_bar(ctx_est)
-        except Exception:
+            self.update_ctx_bar(window.reserved_tokens)
+        except ContextLimitError:
+            self.update_ctx_bar(max_ctx)
+        except ValueError:
             pass
         cold = self.tui.cold_tracker.consume_cold()
         self._cancel_requested = False
+        self._turn_active = True
         event.input.disabled = True
-        self._run_turn(list(self.messages), cold)
+        self._run_turn(list(self.messages), cold, submitted_message)
 
     def _parse_params(self) -> tuple[float, float, int]:
         return params.parse_params(self)  # type: ignore[arg-type]
@@ -119,36 +136,68 @@ class ChatPane(Vertical):
     def apply_config_params(self, cfg: AppConfig) -> None:
         return params.apply_config_params(self, cfg)  # type: ignore[arg-type]
 
+    def _rollback_message(self, message: dict[str, str]) -> None:
+        """Remove a rejected submitted message by object identity on the UI thread."""
+        for index, candidate in enumerate(self.messages):
+            if candidate is message:
+                del self.messages[index]
+                return
+
     def update_ctx_bar(self, ctx_len: int) -> None:
         from mlx_tui.history.tokens import ctx_bar_style, ctx_bar_text  # noqa: PLC0415
 
         try:
-            max_ctx = int(getattr(self.tui.config, "max_ctx", 8000))
+            max_ctx = int(getattr(self.tui.config, "max_ctx", 8192))
         except Exception:
-            max_ctx = 8000
+            max_ctx = 8192
+        style = ctx_bar_style(ctx_len, max_ctx)
         try:
-            bar = self.query_one("#ctx-bar", Static)
+            bar = self.query_one("#ctx-progress", ProgressBar)
+            bar.update(
+                total=max_ctx if max_ctx > 0 else 8192,
+                progress=max(0, min(ctx_len, max_ctx)),
+            )
+            bar.remove_class("ctx-bar-amber")
+            bar.remove_class("ctx-bar-red")
+            if style == "yellow":
+                bar.add_class("ctx-bar-amber")
+            elif style == "red":
+                bar.add_class("ctx-bar-red")
+        except Exception:
+            pass
+        try:
+            label = self.query_one("#ctx-bar", Static)
         except Exception:
             return
-        bar.update(ctx_bar_text(ctx_len, max_ctx))
-        style = ctx_bar_style(ctx_len, max_ctx)
-        bar.remove_class("ctx-bar-amber")
-        bar.remove_class("ctx-bar-red")
+        label.update(ctx_bar_text(ctx_len, max_ctx))
+        label.remove_class("ctx-bar-amber")
+        label.remove_class("ctx-bar-red")
         if style == "yellow":
-            bar.add_class("ctx-bar-amber")
+            label.add_class("ctx-bar-amber")
         elif style == "red":
-            bar.add_class("ctx-bar-red")
+            label.add_class("ctx-bar-red")
 
     def set_system_prompt(self, text: str) -> None:
-        self._system_prompt = text.strip()
+        self.tui.config = replace(self.tui.config, system=text.strip() or None)
+        self.apply_config_params(self.tui.config)
 
     @on(Input.Submitted, "#param-temp, #param-top-p, #param-max-tokens")
     def _on_param_submitted(self, event: Input.Submitted) -> None:
         return params.on_param_submitted(self, event)  # type: ignore[arg-type]
 
     @work(exclusive=True, group="chat", thread=True)
-    def _run_turn(self, messages: list[dict[str, str]], cold: bool) -> None:
-        return turn.run_turn_impl(self, messages, cold)  # type: ignore[arg-type]
+    def _run_turn(
+        self,
+        messages: list[dict[str, str]],
+        cold: bool,
+        submitted_message: dict[str, str],
+    ) -> None:
+        return turn.run_turn_impl(
+            self,  # type: ignore[arg-type]
+            messages,
+            cold,
+            submitted_message,
+        )
 
     def abort(self) -> None:
         return turn.abort(self)  # type: ignore[arg-type]
@@ -162,9 +211,19 @@ class ChatPane(Vertical):
         return turn.complete_turn_ui(self, full_text, stamp, cold, notices)  # type: ignore[arg-type]
 
     def _record_cancelled(
-        self, model_at_send: str, cold: bool, ctx_len_estimate: int
+        self,
+        model_at_send: str,
+        cold: bool,
+        ctx_len_estimate: int,
+        reserved_ctx_len: int,
     ) -> None:
-        return turn.record_cancelled(self, model_at_send, cold, ctx_len_estimate)  # type: ignore[arg-type]
+        return turn.record_cancelled(
+            self,  # type: ignore[arg-type]
+            model_at_send,
+            cold,
+            ctx_len_estimate,
+            reserved_ctx_len,
+        )
 
     def _write_system_line(self, message: str, style: str) -> None:
         return turn.write_system_line(self, message, style)  # type: ignore[arg-type]

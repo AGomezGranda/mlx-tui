@@ -10,8 +10,9 @@ import httpx
 from rich.text import Text
 from textual import on
 from textual.app import App, ComposeResult
+from textual.containers import Horizontal
 from textual.css.query import NoMatches
-from textual.widgets import RichLog, Static, TabbedContent, TabPane
+from textual.widgets import ProgressBar, RichLog, Static, TabbedContent, TabPane
 
 from mlx_tui.chat_pane import ChatPane
 from mlx_tui.config import AppConfig, load_config
@@ -19,11 +20,10 @@ from mlx_tui.history.store import HistoryStore, MemoryStore
 from mlx_tui.metrics_pane import MetricsPane
 from mlx_tui.models_pane import ModelsPane
 from mlx_tui.presets import Preset, load_presets
-from mlx_tui.status import ColdTracker, MemorySnapshot
-from mlx_tui.swap import SwapState
+from mlx_tui.status import ColdTracker, MemorySnapshot, ServerIdentity
 
 from . import config_edit, polling, presets_ctrl, state, status_bar, swap_ctrl
-from .state import _SwapShim
+from .operations import OperationCoordinator
 
 
 class MlxTuiApp(App[None]):
@@ -40,7 +40,24 @@ class MlxTuiApp(App[None]):
     #status-bar {
         dock: top;
         width: 100%;
+        height: 3;
+        layout: horizontal;
+        background: $surface;
+        padding: 1 1;
     }
+    #status-dot { width: auto; margin-right: 1; }
+    #status-model { width: 1fr; }
+    #status-port { width: auto; }
+    #memory-bar {
+        width: 16;
+        height: 1;
+        margin: 0 1;
+    }
+    #memory-label {
+        width: auto;
+        content-align: left middle;
+    }
+    TabbedContent { padding-top: 1; }
     #app-log {
         dock: bottom;
         height: 6;
@@ -75,6 +92,28 @@ class MlxTuiApp(App[None]):
     .param-row Input {
         width: 16;
     }
+    #ctx-progress {
+        height: 1;
+        width: 100%;
+        margin: 0 1;
+    }
+    #ctx-bar {
+        height: 1;
+        padding: 0 1;
+        content-align: left middle;
+    }
+    #ctx-progress.ctx-bar-amber Bar > .bar--bar {
+        color: $warning;
+    }
+    #ctx-progress.ctx-bar-red Bar > .bar--bar {
+        color: $error;
+    }
+    .ctx-bar-amber {
+        color: $warning;
+    }
+    .ctx-bar-red {
+        color: $error;
+    }
     """
 
     _http: httpx.AsyncClient
@@ -92,27 +131,28 @@ class MlxTuiApp(App[None]):
         self._poll_in_flight: bool = False
         self.status_state: str = "red"
         self.cold_tracker = ColdTracker()
-        self._tracked_model: str | None = None
+        self.server_identity = ServerIdentity(host, port)
         self.latest_avail_gib: float | None = None
-        self.swap_machine = _SwapShim()
+        self.operations = OperationCoordinator()
         self.history = HistoryStore()
         self.memory_store = MemoryStore()
         self.presets: list[Preset] = load_presets()
         self.preset_idx: int = -1
-        # sync guard: second ctrl+s cannot slip through during await
-        self._cold_start_in_flight = False
 
     @property
     def swap_busy(self) -> bool:
-        return self.swap_machine.busy
-
-    @swap_busy.setter
-    def swap_busy(self, value: bool) -> None:
-        self.swap_machine.state = SwapState.WAITING_HEALTH if value else SwapState.IDLE
+        return self.operations.is_swap_busy
 
     @override
     def compose(self) -> ComposeResult:
-        yield Static(f"● :{self.port}", id="status-bar")
+        with Horizontal(id="status-bar"):
+            yield Static("●", id="status-dot")
+            yield Static("—", id="status-model")
+            yield ProgressBar(
+                total=16, show_percentage=False, show_eta=False, id="memory-bar"
+            )
+            yield Static("avail —/— GB · RSS — GB", id="memory-label")
+            yield Static(f":{self.port}", id="status-port")
         with TabbedContent(initial="models"):
             with TabPane("Models", id="models"):
                 yield ModelsPane(id="models-pane")
@@ -166,9 +206,6 @@ class MlxTuiApp(App[None]):
     def effective_model(self) -> str | None:
         return state.effective_model(self)  # pyrefly: ignore[bad-argument-type]
 
-    def set_tracked_model(self, model: str | None) -> None:
-        return state.set_tracked_model(self, model)  # pyrefly: ignore[bad-argument-type]
-
     def refresh_models(self) -> None:
         """Update fits/loaded markers via the pane; a missing pane is fine."""
         try:
@@ -205,13 +242,13 @@ class MlxTuiApp(App[None]):
             snapshot=snapshot,
         )
 
-    def set_swap_ui(self, busy: bool) -> None:
-        return swap_ctrl.set_swap_ui(self, busy)  # pyrefly: ignore[bad-argument-type]
+    def set_operation_ui(self, busy: bool) -> None:
+        swap_ctrl.set_operation_ui(self, busy)  # pyrefly: ignore[bad-argument-type]
 
     async def action_cold_start(self) -> None:
         return await swap_ctrl.cold_start(self)  # pyrefly: ignore[bad-argument-type]
 
-    def _restart_config_model(self, pid: int) -> None:
+    def _restart_config_model(self, pid: int) -> bool:
         return swap_ctrl.restart_config_model(self, pid)  # pyrefly: ignore[bad-argument-type]
 
     def _chat_pane_or_none(self) -> ChatPane | None:

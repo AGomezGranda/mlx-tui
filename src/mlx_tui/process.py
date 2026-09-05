@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import psutil
@@ -10,7 +11,17 @@ from mlx_tui.status import MemorySnapshot
 
 _SERVER_TOKEN_SUFFIXES = ("mlx_lm.server", "mlx_vlm.server")
 
-_pid_cache: int | None = None
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+@dataclass(frozen=True)
+class ProcessIdentity:
+    pid: int
+    create_time: float
+
+
+_cached_identity: ProcessIdentity | None = None
+_net_denied: bool = False
 
 
 def _pid_from_file(pidfile: str) -> int | None:
@@ -24,42 +35,102 @@ def _matches_server_tokens(cmdline: list[str]) -> bool:
     return any(token.endswith(_SERVER_TOKEN_SUFFIXES) for token in cmdline)
 
 
-def _cmdline_matches(pid: int) -> bool:
+def _conn_port(conn: object) -> int | None:
+    laddr = getattr(conn, "laddr", None)
+    if laddr is None:
+        return None
+    if isinstance(laddr, (tuple, list)) and len(laddr) >= 2:  # noqa: PLR2004
+        port = laddr[1]
+        return port if isinstance(port, int) else None
+    port = getattr(laddr, "port", None)
+    return port if isinstance(port, int) else None
+
+
+def _conn_status(conn: object) -> str | None:
+    status = getattr(conn, "status", None)
+    return status if isinstance(status, str) else None
+
+
+def _listening_pids(port: int, conns: object) -> set[int]:
+    pids: set[int] = set()
+    assert isinstance(conns, list)
+    for conn in conns:
+        pid = getattr(conn, "pid", None)
+        if not isinstance(pid, int):
+            continue
+        if _conn_status(conn) != "LISTEN":
+            continue
+        if _conn_port(conn) != port:
+            continue
+        pids.add(pid)
+    return pids
+
+
+def _validated_identity(pid: int) -> ProcessIdentity | None:
     try:
-        cmdline: list[str] = psutil.Process(pid).cmdline()
+        proc = psutil.Process(pid)
+        cmdline: list[str] = proc.cmdline()
+        ctime = proc.create_time()
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-        return False
-    return _matches_server_tokens(cmdline)
+        return None
+    if not _matches_server_tokens(cmdline):
+        return None
+    return ProcessIdentity(pid=pid, create_time=ctime)
 
 
-def find_server_pid(pidfile: str | None = None) -> int | None:  # noqa: PLW0603
-    """Find mlx server pid; pidfile fastpath, then cache, then scan."""
-    global _pid_cache  # noqa: PLW0603
+def _fetch_listening_pids(port: int) -> set[int] | None:
+    global _net_denied  # noqa: PLW0603
+    if _net_denied:
+        return None
+    try:
+        conns = psutil.net_connections(kind="tcp")
+    except (psutil.AccessDenied, PermissionError, RuntimeError):
+        _net_denied = True
+        return None
+    return _listening_pids(port, conns)
+
+
+def find_server_process(
+    host: str, port: int, pidfile: str | None = None
+) -> ProcessIdentity | None:
+    """Find the mlx server process serving the configured loopback endpoint.
+
+    Returns None for non-loopback hosts, missing permissions, stale/recycled
+    PIDs, and unmatched listeners.
+    """
+    global _cached_identity  # noqa: PLW0603
+    if host not in LOOPBACK_HOSTS:
+        return None
+    if _cached_identity is not None:
+        try:
+            proc = psutil.Process(_cached_identity.pid)
+            cmdline: list[str] = proc.cmdline()
+            ctime = proc.create_time()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            _cached_identity = None
+        else:
+            if ctime == _cached_identity.create_time and _matches_server_tokens(
+                cmdline
+            ):
+                return _cached_identity
+            _cached_identity = None
     if pidfile is not None:
         pid = _pid_from_file(pidfile)
-        if pid is not None and _cmdline_matches(pid):
-            _pid_cache = pid
-            return pid
-    if _pid_cache is not None and _cmdline_matches(_pid_cache):
-        return _pid_cache
-    _pid_cache = None
-    for proc in psutil.process_iter(["pid", "cmdline"]):
-        cmdline = proc.info.get("cmdline") or []
-        if _matches_server_tokens(cmdline):
-            _pid_cache = proc.pid
-            return _pid_cache
-    return None
-
-
-def model_from_cmdline(proc: psutil.Process) -> str | None:
-    """Extract the ``--model`` argv value; NoSuchProcess/AccessDenied degrade to None."""
-    try:
-        cmdline = proc.cmdline()
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        if pid is not None:
+            ident = _validated_identity(pid)
+            if ident is not None:
+                listening = _fetch_listening_pids(port)
+                if listening is not None and pid in listening:
+                    _cached_identity = ident
+                    return ident
+    listening = _fetch_listening_pids(port)
+    if listening is None:
         return None
-    for i, token in enumerate(cmdline):
-        if token == "--model" and i + 1 < len(cmdline):
-            return cmdline[i + 1]
+    for pid in sorted(listening):
+        ident = _validated_identity(pid)
+        if ident is not None:
+            _cached_identity = ident
+            return ident
     return None
 
 

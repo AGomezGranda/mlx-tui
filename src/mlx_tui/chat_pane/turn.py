@@ -12,14 +12,18 @@ from rich.markdown import Markdown
 from rich.text import Text
 from textual.widgets import Input, RichLog, Static
 
+from mlx_tui.app.operations import OperationKind
 from mlx_tui.chat import error_detail, stream_turn
 from mlx_tui.history.store import TurnRecord
-from mlx_tui.history.tokens import _tok_int, estimate_tokens, trim_for_context
+from mlx_tui.history.tokens import ContextLimitError, prepare_context
 
 if TYPE_CHECKING:
     from mlx_tui.chat_pane import ChatPane
 
-_MAX_CONTEXT_TOKENS_EST = 8_000
+_MAX_CONTEXT_TOKENS_EST = 8_192
+
+_PREFIX = "▎ "
+_SEPARATOR = "─" * 40
 
 
 def _get_max_ctx(pane: ChatPane) -> int:
@@ -30,17 +34,19 @@ def _get_max_ctx(pane: ChatPane) -> int:
         return _MAX_CONTEXT_TOKENS_EST
 
 
-def run_turn_impl(pane: ChatPane, messages: list[dict[str, str]], cold: bool) -> None:  # noqa: PLR0912, PLR0915
+def run_turn_impl(  # noqa: PLR0912, PLR0915
+    pane: ChatPane,
+    messages: list[dict[str, str]],
+    cold: bool,
+    submitted_message: dict[str, str] | None = None,
+) -> None:
     temp, top_p, max_tok = pane._parse_params()
     # persist to AppConfig snapshot (no file write)
+    system_prompt: str | None = None
     try:
         cfg = pane.tui.config
-        if (
-            cfg.temperature != temp
-            or cfg.top_p != top_p
-            or cfg.max_tokens != max_tok
-            or cfg.system != (pane._system_prompt or None)
-        ):
+        system_prompt = cfg.system
+        if cfg.temperature != temp or cfg.top_p != top_p or cfg.max_tokens != max_tok:
             pane.tui.call_from_thread(
                 setattr,
                 pane.tui,
@@ -50,70 +56,87 @@ def run_turn_impl(pane: ChatPane, messages: list[dict[str, str]], cold: bool) ->
                     temperature=temp,
                     top_p=top_p,
                     max_tokens=max_tok,
-                    system=pane._system_prompt or None,
+                    system=system_prompt,
                 ),
             )
     except (AttributeError, Exception):
         pass
     model_at_send = pane.tui.effective_model() or "—"
     max_ctx = _get_max_ctx(pane)
-    trimmed = trim_for_context(messages, max_ctx)
-    trimmed_with_system = (
-        [{"role": "system", "content": pane._system_prompt}]
-        if pane._system_prompt
-        else []
-    ) + trimmed
-    ctx_len_estimate = sum(estimate_tokens(m["content"]) for m in trimmed)
-    payload: dict[str, object] = {
-        "messages": trimmed_with_system,
-        "stream": True,
-        "max_tokens": max_tok,
-        "stream_options": {"include_usage": True},
-        "temperature": temp,
-        "top_p": top_p,
-    }
-    if model_at_send != "—":
-        payload["model"] = model_at_send
     url = f"http://{pane.tui.host}:{pane.tui.port}/v1/chat/completions"
-    user_chars = len(messages[-1]["content"]) if messages else 0
+    ctx_len_estimate = 0
+    reserved_ctx_len = 0
     try:
+        window = prepare_context(messages, system_prompt, max_ctx, max_tok)
+        ctx_len_estimate = window.input_tokens
+        reserved_ctx_len = window.reserved_tokens
+        pane.tui.call_from_thread(pane.update_ctx_bar, window.reserved_tokens)
+        payload: dict[str, object] = {
+            "messages": list(window.messages),
+            "stream": True,
+            "max_tokens": max_tok,
+            "stream_options": {"include_usage": True},
+            "temperature": temp,
+            "top_p": top_p,
+        }
+        if model_at_send != "—":
+            payload["model"] = model_at_send
         result = stream_turn(
             url,
             payload,
-            user_chars=user_chars,
+            prompt_estimate=window.input_tokens,
             on_flush=lambda text: pane.tui.call_from_thread(pane._update_stream, text),
             on_active=lambda r: setattr(pane, "_active_response", r),
         )
         if pane._cancel_requested:
-            record_cancelled(pane, model_at_send, cold, ctx_len_estimate)
+            record_cancelled(
+                pane,
+                model_at_send,
+                cold,
+                ctx_len_estimate,
+                reserved_ctx_len,
+            )
             return
-        ctx_len = (
-            _tok_int(result.tok_in_str)
-            if " (est)" not in result.tok_in_str
-            else ctx_len_estimate
-        )
+        acct = result.accounting
+        prompt_tok = acct.prompt_tokens
+        out_tok = acct.completion_tokens
+        prefill_tok_s: float | None = None
+        if not acct.prompt_estimated and prompt_tok > 0 and result.ttft > 0:
+            prefill_tok_s = prompt_tok / result.ttft
+        ctx_len = prompt_tok if not acct.prompt_estimated else ctx_len_estimate
         record = TurnRecord(
             ts=time.time(),
             model=model_at_send,
-            prompt_tok=_tok_int(result.tok_in_str),
-            out_tok=_tok_int(result.tok_out_str),
+            prompt_tok=prompt_tok,
+            out_tok=out_tok,
             ttft_s=result.ttft,
-            tok_s=result.tok_s,
+            tok_s=acct.tok_s,
             ctx_len=ctx_len,
             cold=cold,
             cancelled=False,
+            prefill_tok_s=prefill_tok_s,
+            prompt_estimated=acct.prompt_estimated,
+            out_estimated=acct.completion_estimated,
         )
         pane.tui.call_from_thread(pane.tui.history.add, record)
         pane.tui.call_from_thread(pane.tui._refresh_metrics)
-        # refresh ctx bar with final ctx_len (usage-corrected if available)
+        # Keep the bar on the request reservation; history ctx_len stays prompt depth.
         try:
-            pane.tui.call_from_thread(pane.update_ctx_bar, ctx_len)
+            pane.tui.call_from_thread(pane.update_ctx_bar, reserved_ctx_len)
         except Exception:
             pass
-        stamp = (
-            f"{result.tok_in_str} in · {result.tok_out_str} out · "
-            f"{result.tok_s:.1f} tok/s · TTFT {result.ttft:.2f}s"
-        )
+        in_label = f"{prompt_tok} (est)" if acct.prompt_estimated else str(prompt_tok)
+        out_label = f"{out_tok} (est)" if acct.completion_estimated else str(out_tok)
+        if prefill_tok_s is not None:
+            stamp = (
+                f"{in_label} in · {out_label} out · "
+                f"{prefill_tok_s:.0f} prefill tok/s · {acct.tok_s:.1f} decode tok/s · TTFT {result.ttft:.2f}s"
+            )
+        else:
+            stamp = (
+                f"{in_label} in · {out_label} out · "
+                f"{acct.tok_s:.1f} tok/s · TTFT {result.ttft:.2f}s"
+            )
         notices: list[str] = []
         if result.skipped_frames:
             notices.append(f"{result.skipped_frames} malformed stream frame(s) skipped")
@@ -124,9 +147,19 @@ def run_turn_impl(pane: ChatPane, messages: list[dict[str, str]], cold: bool) ->
         pane.tui.call_from_thread(
             pane._complete_turn_ui, result.full_text, stamp, cold, notices
         )
+    except ContextLimitError as exc:
+        if submitted_message is not None:
+            pane.tui.call_from_thread(pane._rollback_message, submitted_message)
+        pane.tui.call_from_thread(pane._write_system_line, exc.reason, "yellow")
     except (httpx.StreamClosed, httpx.ReadError, httpx.RemoteProtocolError):
         if pane._cancel_requested:
-            record_cancelled(pane, model_at_send, cold, ctx_len_estimate)
+            record_cancelled(
+                pane,
+                model_at_send,
+                cold,
+                ctx_len_estimate,
+                reserved_ctx_len,
+            )
         else:
             pane.tui.call_from_thread(
                 pane._write_system_line,
@@ -147,7 +180,9 @@ def run_turn_impl(pane: ChatPane, messages: list[dict[str, str]], cold: bool) ->
             "red",
         )
     finally:
-        pane._active_response = None
+        # Release only after the stream worker has stopped. The UI callback
+        # then clears the response and restores controls in one place.
+        pane.tui.call_from_thread(pane.tui.operations.release, OperationKind.CHATTING)
         pane.tui.call_from_thread(pane.end_turn)
 
 
@@ -177,17 +212,22 @@ def complete_turn_ui(
 ) -> None:
     stamp_text = f"{stamp} · cold" if cold else stamp
     log = pane.query_one("#chat-log", RichLog)
-    log.write(Text(stamp_text, style="dim"))
+    log.write(Text(f"{_PREFIX}{stamp_text}", style="dim"))
     if full_text:
         pane.messages.append({"role": "assistant", "content": full_text})
         log.write(Markdown(full_text))
-        log.write("")
     for notice in notices:
-        log.write(Text(notice, style="yellow"))
+        log.write(Text(f"{_PREFIX}{notice}", style="yellow"))
+    log.write(Text(_SEPARATOR, style="dim"))
+    log.write(Text(""))
 
 
 def record_cancelled(
-    pane: ChatPane, model_at_send: str, cold: bool, ctx_len_estimate: int
+    pane: ChatPane,
+    model_at_send: str,
+    cold: bool,
+    ctx_len_estimate: int,
+    reserved_ctx_len: int,
 ) -> None:
     record = TurnRecord(
         ts=time.time(),
@@ -203,7 +243,7 @@ def record_cancelled(
     pane.tui.call_from_thread(pane.tui.history.add, record)
     pane.tui.call_from_thread(pane.tui._refresh_metrics)
     try:
-        pane.tui.call_from_thread(pane.update_ctx_bar, ctx_len_estimate)
+        pane.tui.call_from_thread(pane.update_ctx_bar, reserved_ctx_len)
     except Exception:
         pass
     pane.tui.call_from_thread(
@@ -212,12 +252,15 @@ def record_cancelled(
 
 
 def write_system_line(pane: ChatPane, message: str, style: str) -> None:
-    pane.query_one("#chat-log", RichLog).write(Text(message, style=style))
+    text = f"{_PREFIX}{message}" if style == "dim" else message
+    pane.query_one("#chat-log", RichLog).write(Text(text, style=style))
 
 
 def end_turn(pane: ChatPane) -> None:
     update_stream(pane, "")
+    pane._active_response = None
+    pane._turn_active = False
     inp = pane.query_one("#chat-input", Input)
-    if not pane.tui.swap_busy:
+    if pane.tui.operations.current in (OperationKind.IDLE, OperationKind.CHATTING):
         inp.disabled = False
         inp.focus()

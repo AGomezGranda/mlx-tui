@@ -10,10 +10,13 @@ from mlx_tui.history.sparkline import render_sparkline
 from mlx_tui.history.store import HistoryStore, TurnRecord
 from mlx_tui.history.tokens import (
     CHARS_PER_TOKEN_EST,
-    _tok_int,
+    ContextLimitError,
     ctx_bar_style,
     ctx_bar_text,
+    estimate_message_tokens,
+    estimate_prompt_tokens,
     estimate_tokens,
+    prepare_context,
     trim_for_context,
 )
 
@@ -50,7 +53,9 @@ def test_trim_drops_oldest_turns_first() -> None:
     messages = [u("one"), a("reply-one"), u("two"), a("reply-two"), u("three")]
     # Budget fits "two"/"reply-two"/"three" but not turn one.
     budget = (
-        estimate_tokens("two") + estimate_tokens("reply-two") + estimate_tokens("three")
+        estimate_message_tokens(u("two"))
+        + estimate_message_tokens(a("reply-two"))
+        + estimate_message_tokens(u("three"))
     )
     trimmed = trim_for_context(messages, budget)
     assert trimmed == [u("two"), a("reply-two"), u("three")]
@@ -60,23 +65,60 @@ def test_trim_boundary_lands_on_user_message() -> None:
     messages = [u("old prompt"), a("old reply"), u("new")]
     # Budget fits only from the assistant reply onward — an illegal boundary —
     # so the window must fall forward to the next user message.
-    budget = estimate_tokens("old reply") + estimate_tokens("new")
+    budget = estimate_message_tokens(a("old reply")) + estimate_message_tokens(u("new"))
     trimmed = trim_for_context(messages, budget)
     assert trimmed[0]["role"] == "user"
     assert trimmed == [u("new")]
 
 
-def test_trim_never_drops_the_newest_message() -> None:
-    huge = "x" * 100_000
-    messages = [u(huge), u("latest")]
-    trimmed = trim_for_context(messages, 1)
-    assert trimmed == [u("latest")]
+def test_trim_rejects_newest_message_that_cannot_fit() -> None:
+    newest = u("latest")
+    with pytest.raises(ContextLimitError, match="newest message"):
+        trim_for_context([newest], estimate_message_tokens(newest) - 1)
 
 
-def test_trim_single_huge_message_still_sent() -> None:
+def test_prepare_context_rejects_oversize_newest() -> None:
     huge = "y" * 100_000
-    trimmed = trim_for_context([u(huge)], 1)
-    assert trimmed == [u(huge)]
+    with pytest.raises(ContextLimitError) as exc_info:
+        prepare_context([u(huge)], None, max_ctx=1024, max_tokens=256)
+    assert "newest message" in exc_info.value.reason
+    assert "max_ctx=1024" in exc_info.value.reason
+
+
+def test_estimate_prompt_includes_system_and_framing_overhead() -> None:
+    messages = [u("hello")]
+    system = "You are concise."
+    assert estimate_prompt_tokens(messages, system) == (
+        estimate_prompt_tokens(messages)
+        + estimate_message_tokens({"role": "system", "content": system})
+    )
+
+
+def test_prepare_context_reserves_max_tokens() -> None:
+    messages = [u("hello"), a("reply")]
+    input_tokens = estimate_prompt_tokens(messages)
+    window = prepare_context(
+        messages,
+        None,
+        max_ctx=input_tokens + 128,
+        max_tokens=128,
+    )
+    assert window.input_tokens == input_tokens
+    assert window.reserved_tokens == input_tokens + 128
+    assert window.reserved_tokens <= input_tokens + 128
+
+
+def test_prepare_context_trims_complete_turns_and_honors_boundary() -> None:
+    messages = [u("old"), a("old reply"), u("new")]
+    retained = [u("new")]
+    input_tokens = estimate_prompt_tokens(retained)
+    window = prepare_context(
+        messages,
+        None,
+        max_ctx=input_tokens + 1,
+        max_tokens=1,
+    )
+    assert window.messages == tuple(retained)
 
 
 def test_turn_record_is_frozen_and_has_nine_fields() -> None:
@@ -91,9 +133,69 @@ def test_turn_record_is_frozen_and_has_nine_fields() -> None:
         cold=False,
     )
     assert r.model == "m"
-    assert len(dataclasses.fields(TurnRecord)) == 9
+    assert len(dataclasses.fields(TurnRecord)) == 12
+    assert r.prefill_tok_s is None
     with pytest.raises(dataclasses.FrozenInstanceError):
         r.model = "other"  # type: ignore[misc]
+
+
+def test_turn_record_is_frozen_and_has_ten_fields() -> None:
+    r = TurnRecord(
+        ts=1.0,
+        model="m",
+        prompt_tok=10,
+        out_tok=5,
+        ttft_s=0.1,
+        tok_s=12.3,
+        ctx_len=10,
+        cold=False,
+    )
+    assert len(dataclasses.fields(TurnRecord)) == 12
+    assert r.prefill_tok_s is None
+
+
+def test_turn_record_prefill_default_none_and_set() -> None:
+    r = TurnRecord(
+        ts=1.0,
+        model="m",
+        prompt_tok=10,
+        out_tok=5,
+        ttft_s=0.1,
+        tok_s=12.3,
+        ctx_len=10,
+        cold=False,
+        prefill_tok_s=84.2,
+    )
+    assert r.prefill_tok_s == 84.2
+    # default still None when omitted
+    r2 = TurnRecord(
+        ts=1.0,
+        model="m",
+        prompt_tok=10,
+        out_tok=5,
+        ttft_s=0.1,
+        tok_s=12.3,
+        ctx_len=10,
+        cold=False,
+    )
+    assert r2.prefill_tok_s is None
+
+
+def test_prefill_in_all_records() -> None:
+    store = HistoryStore()
+    rec = TurnRecord(
+        ts=1.0,
+        model="m",
+        prompt_tok=10,
+        out_tok=5,
+        ttft_s=0.1,
+        tok_s=12.3,
+        ctx_len=10,
+        cold=False,
+        prefill_tok_s=84.2,
+    )
+    store.add(rec)
+    assert store.all_records()[0].prefill_tok_s == 84.2
 
 
 def test_store_add_and_series_preserves_order() -> None:
@@ -392,11 +494,52 @@ def test_render_height_rows_two_produces_two_lines() -> None:
     assert "\n" not in braille1
 
 
-def test_tok_int_parses_est_and_digit_guards_sentinel() -> None:
-    assert _tok_int("20 (est)") == 20
-    assert _tok_int("12") == 12
-    assert _tok_int("—") == 0
-    assert _tok_int("") == 0
+def test_estimated_flags_default_false_and_survive() -> None:
+    store = HistoryStore()
+    rec = TurnRecord(
+        ts=1.0,
+        model="m",
+        prompt_tok=10,
+        out_tok=5,
+        ttft_s=0.1,
+        tok_s=12.3,
+        ctx_len=10,
+        cold=False,
+        prompt_estimated=True,
+        out_estimated=True,
+    )
+    store.add(rec)
+    got = store.all_records()[0]
+    assert got.prompt_estimated is True
+    assert got.out_estimated is True
+    defaulted = TurnRecord(
+        ts=2.0,
+        model="m",
+        prompt_tok=10,
+        out_tok=5,
+        ttft_s=0.1,
+        tok_s=12.3,
+        ctx_len=10,
+        cold=False,
+    )
+    assert defaulted.prompt_estimated is False
+    assert defaulted.out_estimated is False
+
+
+def test_fallback_output_scales_with_response_length() -> None:
+    from mlx_tui.sse import token_accounting  # noqa: PLC0415
+
+    long_text = "x" * 350
+    acct = token_accounting(
+        prompt_tokens=None,
+        completion_tokens=None,
+        prompt_estimate=10,
+        full_text=long_text,
+        elapsed=1.0,
+    )
+    assert acct.completion_tokens == estimate_tokens(long_text)
+    assert acct.completion_tokens > 1
+    assert acct.completion_estimated is True
 
 
 def test_shade_for_ctx_quartiles() -> None:

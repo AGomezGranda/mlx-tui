@@ -56,7 +56,8 @@ class MetricsPane(Vertical):
         table = self.query_one("#metrics-table", DataTable)
         table.add_column("time", key="time")
         table.add_column("model", key="model")
-        table.add_column("tok/s", key="toks")
+        table.add_column("prefill", key="prefill")
+        table.add_column("decode", key="toks")
         table.add_column("TTFT", key="ttft")
         table.add_column("ctx", key="ctx")
         table.add_column("prompt", key="prompt")
@@ -120,11 +121,12 @@ class MetricsPane(Vertical):
         for r in recent:
             t_str = time.strftime("%H:%M:%S", time.localtime(r.ts))
             model_str = r.model or "—"
+            prefill = f"{r.prefill_tok_s:.0f}" if r.prefill_tok_s is not None else "—"
             toks = f"{r.tok_s:.1f}"
             ttft = f"{r.ttft_s:.2f}"
             ctx = str(r.ctx_len)
-            prompt = str(r.prompt_tok)
-            out = str(r.out_tok)
+            prompt = f"{r.prompt_tok}~" if r.prompt_estimated else str(r.prompt_tok)
+            out = f"{r.out_tok}~" if r.out_estimated else str(r.out_tok)
             suffix = ""
             style: str | None = None
             if r.cancelled:
@@ -136,4 +138,4 @@ class MetricsPane(Vertical):
             out_cell = (
                 Text(f"{out}{suffix}", style=style) if style else f"{out}{suffix}"
             )
-            table.add_row(t_str, model_str, toks, ttft, ctx, prompt, out_cell)
+            table.add_row(t_str, model_str, prefill, toks, ttft, ctx, prompt, out_cell)

@@ -78,9 +78,10 @@ temperature = 0.7
 top_p = 1.0
 max_tokens = 1024
 system = "You are a helpful assistant."
+swap_policy = "auto"  # "auto" | "warm" | "restart"
 ```
 
-With `start_cmd` **and** `stop_cmd` configured, model swaps restart the server and stream output; otherwise the TUI probes the running server in place. `ctrl+g` creates a commented template if missing and reloads on save — host/port changes need a TUI restart.
+With `swap_policy = "auto"` (the default), model swaps restart the server and stream output when both `start_cmd` **and** `stop_cmd` are configured — even when the endpoint is green — otherwise `auto` uses a warm in-server load against a healthy endpoint. `swap_policy = "warm"` always uses warm load and requires a green endpoint; `swap_policy = "restart"` always restarts and requires both `start_cmd` and `stop_cmd`. A warm load is confirmed against `/v1/models` before the loaded marker changes. `ctrl+g` creates a commented template if missing and reloads on save — host/port changes need a TUI restart.
 
 **Params** — Chat tab has a collapsed `Params` panel with three inputs (Temperature 0–2, Top-p 0–1, Max tokens 1–16384). Values apply to the next turn.
 

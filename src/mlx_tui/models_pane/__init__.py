@@ -83,6 +83,9 @@ class ModelsPane(Vertical):
     def _on_delete_confirmed(self, confirmed: bool | None) -> None:
         return delete.on_delete_confirmed(self, confirmed)  # type: ignore[arg-type]
 
+    def start_delete(self, row: ModelRow) -> None:
+        return delete.start_delete(self, row)  # type: ignore[arg-type]
+
     @work(exclusive=True, group="delete", thread=True)
     def _run_delete(self, row: ModelRow) -> None:
         return delete._run_delete_impl(self, row)  # type: ignore[arg-type]

@@ -9,11 +9,13 @@ import pytest
 from textual.widgets import Input, Static
 
 from mlx_tui.app import MlxTuiApp
+from mlx_tui.app.operations import OperationKind
 from mlx_tui.history.store import TurnRecord
+from mlx_tui.models import ModelRow
 from tests.conftest import AppHarness
 
 _STAMP_RE = re.compile(
-    r"\d+( \(est\))? in · \d+( \(est\))? out · [\d.]+ tok/s · TTFT [\d.]+s( · cold)?"
+    r"(?:▎ )?\d+( \(est\))? in · \d+( \(est\))? out · (?:\d+ prefill tok/s · [\d.]+ decode tok/s|[\d.]+ tok/s) · TTFT [\d.]+s( · cold)?"
 )
 _REPLY = "Hello world this is MLX."
 
@@ -169,7 +171,7 @@ async def test_cancel_closes_stream(harness: AppHarness) -> None:
     await harness.pilot.press("enter")
 
     def submitted(a: MlxTuiApp) -> bool:
-        return any(t.startswith("you ›") for t in harness.log_lines())
+        return any(t.lstrip("▎ ").startswith("you ›") for t in harness.log_lines())
 
     assert await harness.wait_for(submitted)
     await harness.pilot.press("escape")
@@ -183,6 +185,56 @@ async def test_cancel_closes_stream(harness: AppHarness) -> None:
         return not a.query_one("#chat-input", Input).disabled
 
     assert await harness.wait_for(input_enabled)
+
+
+async def test_chat_lease_blocks_swap_and_delete_until_cleanup(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness.server.mode = "slow"
+    await harness.app._poll()
+    models = harness.models_pane()
+    models._populate(
+        [ModelRow("mlx-community/other-model", 1_000_000_000, "4bit", True, ("x",))]
+    )
+    table = harness.app.query_one("#models-table")
+    table.focus()
+
+    inp = harness.app.query_one("#chat-input", Input)
+    inp.value = "hi"
+    inp.focus()
+    await harness.pilot.press("enter")
+    assert await harness.wait_for(lambda _a: harness.chat_pane().has_live_turn)
+    assert harness.app.operations.current is OperationKind.CHATTING
+
+    started: list[str] = []
+
+    def record_load(_row: ModelRow) -> None:
+        started.append("load")
+
+    monkeypatch.setattr(
+        models,
+        "run_warm_swap",
+        record_load,
+    )
+    models.request_load_swap()
+    models.request_delete_model()
+
+    assert started == []
+    assert harness.app.operations.current is OperationKind.CHATTING
+    assert inp.disabled
+    assert any("operation already in progress" in t for t in harness.app_log_lines())
+
+    await harness.pilot.press("escape")
+
+    def cleanup_complete(_a: MlxTuiApp) -> bool:
+        return (
+            harness.app.operations.current is OperationKind.IDLE
+            and not harness.chat_pane().has_live_turn
+        )
+
+    assert await harness.wait_for(cleanup_complete)
+    assert not inp.disabled
+    assert not harness.app.query_one("#models-table").disabled
 
 
 async def test_server_error_status_shows_red_line_not_fake_stamp(
@@ -397,10 +449,16 @@ async def test_params_sidebar_sends_payload(harness: AppHarness) -> None:
 async def test_ctx_bar_shows_usage_and_amber(harness: AppHarness) -> None:
     from textual.widgets import Static  # noqa: PLC0415
 
+    from mlx_tui.history.tokens import ctx_bar_text  # noqa: PLC0415
+
     bar = harness.app.query_one("#ctx-bar", Static)
     text = str(bar.render())
-    assert "ctx" in text.lower() and "8k" in text, f"initial bar {text!r} missing ctx/8k"
-    # at 0/8k style is default (not amber/red)
+    expected = ctx_bar_text(0, harness.app.config.max_ctx)
+    # expected like "ctx 0/8.2k" for default 8192
+    assert "ctx" in text.lower() and expected.split("/")[1] in text, (
+        f"initial bar {text!r} missing {expected}"
+    )
+    # at 0/max style is default (not amber/red)
     assert bar.has_class("ctx-bar-amber") is False
     assert bar.has_class("ctx-bar-red") is False
 
@@ -408,22 +466,29 @@ async def test_ctx_bar_shows_usage_and_amber(harness: AppHarness) -> None:
 async def test_ctx_bar_amber_and_red_thresholds(harness: AppHarness) -> None:
     from textual.widgets import Static  # noqa: PLC0415
 
+    from mlx_tui.history.tokens import _format_k  # noqa: PLC0415
+
     pane = harness.chat_pane()
     bar = harness.app.query_one("#ctx-bar", Static)
+    max_ctx = harness.app.config.max_ctx
 
-    # 7000/8000 -> amber (>80%)
-    pane.update_ctx_bar(7000)
+    # >80% -> amber
+    amber_len = int(max_ctx * 0.85)
+    pane.update_ctx_bar(amber_len)
     await harness.pilot.pause()
     text = str(bar.render())
-    assert "7k" in text and "8k" in text, f"7000 text {text!r}"
+    assert _format_k(amber_len) in text and _format_k(max_ctx) in text, (
+        f"{amber_len} text {text!r}"
+    )
     assert bar.has_class("ctx-bar-amber") is True
     assert bar.has_class("ctx-bar-red") is False
 
-    # 7700/8000 -> red (>95%)
-    pane.update_ctx_bar(7700)
+    # >95% -> red
+    red_len = int(max_ctx * 0.96)
+    pane.update_ctx_bar(red_len)
     await harness.pilot.pause()
     text = str(bar.render())
-    assert "7.7k" in text
+    assert _format_k(red_len) in text
     assert bar.has_class("ctx-bar-red") is True
 
     # back to low -> not amber/red
@@ -436,9 +501,13 @@ async def test_ctx_bar_amber_and_red_thresholds(harness: AppHarness) -> None:
 async def test_ctx_bar_updates_after_turn(harness: AppHarness) -> None:
     from textual.widgets import Input, Static  # noqa: PLC0415
 
+    from mlx_tui.history.tokens import _format_k, ctx_bar_text  # noqa: PLC0415
+
     bar = harness.app.query_one("#ctx-bar", Static)
+    max_ctx = harness.app.config.max_ctx
     initial = str(bar.render())
-    assert "0/8k" in initial or "0 / 8k" in initial or "ctx 0" in initial.lower()
+    expected_initial = ctx_bar_text(0, max_ctx)
+    assert expected_initial in initial or "ctx 0" in initial.lower()
     inp = harness.app.query_one("#chat-input", Input)
     inp.value = "hello world, this is a test of context bar"
     inp.focus()
@@ -446,18 +515,219 @@ async def test_ctx_bar_updates_after_turn(harness: AppHarness) -> None:
 
     def bar_updated(a: MlxTuiApp) -> bool:
         t = str(a.query_one("#ctx-bar", Static).render())
-        return "0/8k" not in t and "ctx" in t.lower()
+        return expected_initial not in t and "ctx" in t.lower()
 
-    assert await harness.wait_for(bar_updated), f"bar never updated: {str(bar.render())}"
-    # after turn, bar should show non-zero ctx and still 8k max
+    assert await harness.wait_for(bar_updated), (
+        f"bar never updated: {str(bar.render())}"
+    )
+    # after turn, bar should show non-zero ctx and still max
     text = str(bar.render())
-    assert "8k" in text
-    assert "0/8k" not in text
+    assert _format_k(max_ctx) in text
+    assert expected_initial not in text
 
 
-async def test_preset_cycle_drives_params_and_system(
+async def test_context_reservation_bounds_outgoing_payload(harness: AppHarness) -> None:
+    from dataclasses import replace  # noqa: PLC0415
+    from typing import cast  # noqa: PLC0415
+
+    from mlx_tui.history.tokens import estimate_prompt_tokens  # noqa: PLC0415
+
+    harness.app.config = replace(
+        harness.app.config,
+        max_ctx=2048,
+        max_tokens=320,
+        system="You are a concise assistant for this test.",
+    )
+    pane = harness.chat_pane()
+    pane.apply_config_params(harness.app.config)
+    inp = harness.app.query_one("#chat-input", Input)
+    inp.value = "hello"
+    inp.focus()
+    await harness.pilot.press("enter")
+
+    def request_recorded(a: MlxTuiApp) -> bool:
+        return any("messages" in request for request in harness.server.requests)
+
+    assert await harness.wait_for(request_recorded)
+    payload = [r for r in harness.server.requests if "messages" in r][-1]
+    messages = cast(list[dict[str, str]], payload["messages"])
+    max_tokens = cast(int, payload["max_tokens"])
+    assert messages[0] == {
+        "role": "system",
+        "content": "You are a concise assistant for this test.",
+    }
+    assert estimate_prompt_tokens(messages) + max_tokens <= harness.app.config.max_ctx
+
+
+async def test_over_limit_chat_rolls_back_without_post(harness: AppHarness) -> None:
+    from dataclasses import replace  # noqa: PLC0415
+
+    harness.app.config = replace(
+        harness.app.config,
+        max_ctx=1024,
+        max_tokens=1024,
+        system="x" * 4_000,
+    )
+    pane = harness.chat_pane()
+    pane.apply_config_params(harness.app.config)
+    inp = harness.app.query_one("#chat-input", Input)
+    inp.value = "this cannot fit"
+    inp.focus()
+    await harness.pilot.press("enter")
+
+    def rejected(a: MlxTuiApp) -> bool:
+        return not inp.disabled and pane.messages == []
+
+    assert await harness.wait_for(rejected), (
+        f"over-limit turn did not recover: messages={pane.messages}, "
+        f"log={harness.log_lines()}"
+    )
+    assert not any("messages" in request for request in harness.server.requests)
+    assert any("context limit" in line for line in harness.log_lines())
+
+
+async def test_ctx_bar_progress_updates(harness: AppHarness) -> None:
+    from dataclasses import replace  # noqa: PLC0415
+
+    from textual.widgets import ProgressBar, TabbedContent  # noqa: PLC0415
+
+    harness.app.query_one(TabbedContent).active = "chat"
+    await harness.pilot.pause()
+    bar = harness.app.query_one("#ctx-progress", ProgressBar)
+    assert bar.total == 8192
+    pane = harness.chat_pane()
+    pane.update_ctx_bar(0)
+    await harness.pilot.pause()
+    assert bar.progress == 0
+    assert bar.has_class("ctx-bar-amber") is False
+    assert bar.has_class("ctx-bar-red") is False
+    pane.update_ctx_bar(int(0.81 * 8192))
+    await harness.pilot.pause()
+    assert bar.has_class("ctx-bar-amber") is True
+    pane.update_ctx_bar(int(0.96 * 8192))
+    await harness.pilot.pause()
+    assert bar.has_class("ctx-bar-red") is True
+    # alias test: config max_ctx 4096
+    harness.app.config = replace(harness.app.config, max_ctx=4096)
+    pane.update_ctx_bar(4096)
+    await harness.pilot.pause()
+    assert bar.progress == bar.total
+    # reset to default for other tests isolation
+    harness.app.config = replace(harness.app.config, max_ctx=8192)
+    pane.update_ctx_bar(0)
+    await harness.pilot.pause()
+
+
+async def test_memory_bar_renders(harness: AppHarness) -> None:
+    from textual.widgets import ProgressBar  # noqa: PLC0415
+
+    await harness.pilot.pause()
+    await harness.app._poll()
+    await harness.pilot.pause()
+    bar = harness.app.query_one("#memory-bar", ProgressBar)
+    label = harness.app.query_one("#memory-label", Static)
+    assert bar is not None
+    assert bar.total is not None and bar.total > 0
+    # progress should be 0 or rss_gib when stub green (rss None → 0)
+    assert bar.progress is not None and bar.progress >= 0
+    text = str(label.render())
+    assert "avail" in text.lower()
+    assert "RSS" in text
+    # total should be around snapshot total (or default 16 when unknown)
+    # we don't assert exact since psutil virtual_memory varies per CI host
+    assert bar.total is not None and bar.total > 0
+
+
+async def test_prefill_vs_decode_stamp_and_table(harness: AppHarness) -> None:  # noqa: PLR0915
+    from textual.widgets import DataTable, Input, TabbedContent  # noqa: PLC0415
+
+    from mlx_tui.metrics_pane import MetricsPane  # noqa: PLC0415
+
+    # ok mode -> usage present -> prefill computed
+    harness.server.mode = "ok"
+    harness.app.history.clear()
+    harness.app.query_one(TabbedContent).active = "chat"
+    await harness.pilot.pause()
+    inp = harness.app.query_one("#chat-input", Input)
+    inp.value = "hi"
+    inp.focus()
+    await harness.pilot.press("enter")
+
+    def has_one(a: MlxTuiApp) -> bool:
+        return len(a.history.all_records()) == 1
+
+    assert await harness.wait_for(has_one), f"no record; log={harness.log_lines()}"
+    rec = harness.app.history.all_records()[0]
+    assert rec.prompt_tok == 12
+    assert rec.out_tok == 6
+    assert rec.prompt_estimated is False
+    assert rec.out_estimated is False
+    assert rec.prefill_tok_s is not None and rec.prefill_tok_s > 0
+    assert rec.tok_s > 0
+    texts = harness.log_lines()
+    assert any("prefill" in t for t in texts)
+    assert any("decode" in t for t in texts)
+    assert any("TTFT" in t for t in texts)
+    assert "(est)" not in [t for t in texts if "tok/s" in t][-1]
+    # metrics table shows prefill not —
+    harness.app.query_one(TabbedContent).active = "metrics"
+    await harness.pilot.pause()
+    harness.app.query_one(MetricsPane).refresh_metrics()
+    await harness.pilot.pause()
+    table = harness.app.query_one("#metrics-table", DataTable)
+    assert table.row_count == 1
+    # check prefill column (key prefill) not —
+    # DataTable get_cell_at not stable across textual versions; check via row data string rendering
+    # We can inspect that the table's rendered rows contain prefill value; simpler assert via history record
+    assert rec.prefill_tok_s is not None
+    from textual.coordinate import Coordinate  # noqa: PLC0415
+
+    assert "~" not in str(table.get_cell_at(Coordinate(0, 6)))
+    assert "~" not in str(table.get_cell_at(Coordinate(0, 7)))
+
+    # no_usage mode -> no prefill
+    harness.server.mode = "no_usage"
+    harness.app.history.clear()
+    harness.app.query_one(TabbedContent).active = "chat"
+    await harness.pilot.pause()
+    inp = harness.app.query_one("#chat-input", Input)
+    inp.value = "hi2"
+    inp.focus()
+    await harness.pilot.press("enter")
+    assert await harness.wait_for(has_one)
+    rec2 = harness.app.history.all_records()[0]
+    assert rec2.prefill_tok_s is None
+    assert rec2.prompt_estimated is True
+    assert rec2.out_estimated is True
+    texts2 = harness.log_lines()
+    # last stamp should contain tok/s but not prefill (single rate)
+    # find the last stamp line
+    stamps = [t for t in texts2 if "tok/s" in t]
+    assert stamps, f"no stamp {texts2}"
+    last = stamps[-1]
+    assert "prefill" not in last
+    assert "tok/s" in last
+    assert "(est)" in last
+    # metrics prefill cell should be —
+    harness.app.query_one(TabbedContent).active = "metrics"
+    await harness.pilot.pause()
+    harness.app.query_one(MetricsPane).refresh_metrics()
+    await harness.pilot.pause()
+    table2 = harness.app.query_one("#metrics-table", DataTable)
+    assert table2.row_count == 1
+    assert "~" in str(table2.get_cell_at(Coordinate(0, 6)))
+    assert "~" in str(table2.get_cell_at(Coordinate(0, 7)))
+    # cleanup
+    harness.app.history.clear()
+    harness.server.mode = "ok"
+
+
+async def test_preset_cycle_drives_params_and_system(  # noqa: PLR0915
     harness: AppHarness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+
+    from dataclasses import replace  # noqa: PLC0415
+
     from textual.widgets import Input as _Input  # noqa: PLC0415
     from textual.widgets import TabbedContent  # noqa: PLC0415
 
@@ -473,23 +743,27 @@ async def test_preset_cycle_drives_params_and_system(
     )
     harness.app.presets = load_presets(presets_file)
     harness.app.preset_idx = -1
+    harness.app.config = replace(harness.app.config, max_ctx=32768)
     harness.app.query_one(TabbedContent).active = "chat"
     await harness.pilot.pause()
     pane = harness.app.query_one(ChatPane)
     # direct action kept: pilot.press for ctrl+p was unreliable in textual 8.2.8; ctrl+n forward is now reliable but direct keeps test stable
     harness.app.action_cycle_preset()
     await harness.pilot.pause()
+    assert harness.app.config.max_ctx == 32768
     assert pane._system_prompt == "You are A"
     assert harness.app.query_one("#param-temp", _Input).value == "0.2"
     assert any("preset: a" in line for line in harness.app_log_lines())
     harness.app.action_cycle_preset()
     await harness.pilot.pause()
+    assert harness.app.config.max_ctx == 32768
     assert pane._system_prompt == "You are B"
     assert harness.app.query_one("#param-top-p", _Input).value == "0.5"
     assert harness.app.query_one("#param-max-tokens", _Input).value == "512"
     assert any("preset: b" in line for line in harness.app_log_lines())
     harness.app.action_cycle_preset_back()
     await harness.pilot.pause()
+    assert harness.app.config.max_ctx == 32768
     assert pane._system_prompt == "You are A"
 
     bindings: dict[str, str] = {}
@@ -518,3 +792,133 @@ async def test_preset_cycle_drives_params_and_system(
     msgs = last.get("messages", [])
     assert isinstance(msgs, list) and len(msgs) >= 2
     assert msgs[0] == {"role": "system", "content": "You are A"}
+
+
+async def test_config_reload_clears_removed_system_prompt(
+    harness: AppHarness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import nullcontext  # noqa: PLC0415
+    from dataclasses import replace  # noqa: PLC0415
+
+    from mlx_tui.app import config_edit  # noqa: PLC0415
+    from mlx_tui.chat_pane import ChatPane  # noqa: PLC0415
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    config_file = tmp_path / "mlx-tui" / "config.toml"
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text('system = "stale system prompt"\n')
+    harness.app.config = replace(harness.app.config, system="stale system prompt")
+    pane = harness.app.query_one(ChatPane)
+    pane.apply_config_params(harness.app.config)
+    monkeypatch.setattr(harness.app, "suspend", nullcontext)
+
+    def fake_editor(_command: list[str], check: bool) -> None:
+        assert check is False
+        config_file.write_text("max_tokens = 256\n")
+
+    monkeypatch.setattr(config_edit.subprocess, "run", fake_editor)
+    config_edit.edit_config(harness.app)
+    await harness.pilot.pause()
+
+    assert harness.app.config.system is None
+    assert pane._system_prompt == ""
+    assert harness.app.query_one("#param-max-tokens", Input).value == "256"
+
+    inp = harness.app.query_one("#chat-input", Input)
+    inp.value = "without system"
+    inp.focus()
+    await harness.pilot.press("enter")
+
+    def reply_done(_app: MlxTuiApp) -> bool:
+        return len(pane.messages) == 2
+
+    assert await harness.wait_for(reply_done)
+    posts = [request for request in harness.server.requests if "messages" in request]
+    assert posts
+    messages = posts[-1]["messages"]
+    assert isinstance(messages, list)
+    assert not any(message.get("role") == "system" for message in messages)
+
+
+async def test_polling_follows_endpoint_not_cmdline(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    import psutil  # noqa: PLC0415
+
+    import mlx_tui.process as proc_mod  # noqa: PLC0415
+
+    harness.server.model_id = "mlx-community/server-a"
+    proc_mod._cached_identity = None  # type: ignore[attr-defined]
+    proc_mod._net_denied = False  # type: ignore[attr-defined]
+
+    fake_pid = 4242
+    other_cmdline = ["python", "-m", "mlx_lm.server", "--model", "other/model"]
+
+    class _FakeProc:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+
+        def cmdline(self) -> list[str]:
+            return other_cmdline
+
+        def create_time(self) -> float:
+            return 111.0
+
+        def memory_info(self) -> SimpleNamespace:
+            return SimpleNamespace(rss=1 * 2**30)
+
+    def _fake_conns(kind: str = "tcp") -> list[SimpleNamespace]:
+        assert kind == "tcp"
+        return [
+            SimpleNamespace(
+                pid=fake_pid, status="LISTEN", laddr=("127.0.0.1", harness.port)
+            )
+        ]
+
+    monkeypatch.setattr(psutil, "Process", _FakeProc)
+    monkeypatch.setattr(psutil, "net_connections", _fake_conns)
+
+    await harness.app._poll()
+    assert harness.app.status_state == "green"
+    assert harness.app.server_identity.model_id == "mlx-community/server-a"
+    assert harness.app.effective_model() == "mlx-community/server-a"
+    assert harness.app.server_identity.pid == fake_pid
+
+    # Loaded marker follows the endpoint ID, not the cmdline model.
+    from mlx_tui.table import loaded_cell  # noqa: PLC0415
+
+    assert loaded_cell("mlx-community/server-a", harness.app.effective_model()) == "●"
+    assert loaded_cell("other/model", harness.app.effective_model()) == ""
+
+    # Chat payload follows the endpoint ID too.
+    harness.server.requests.clear()
+    inp = harness.app.query_one("#chat-input", Input)
+    inp.value = "hi"
+    inp.focus()
+    await harness.pilot.press("enter")
+
+    def reply_done(a: MlxTuiApp) -> bool:
+        return len(harness.chat_pane().messages) == 2
+
+    assert await harness.wait_for(reply_done)
+    posts = [r for r in harness.server.requests if "messages" in r]
+    assert posts
+    assert posts[-1].get("model") == "mlx-community/server-a"
+
+
+async def test_external_restart_replaces_identity(harness: AppHarness) -> None:
+    import mlx_tui.process as proc_mod  # noqa: PLC0415
+
+    proc_mod._cached_identity = None  # type: ignore[attr-defined]
+    proc_mod._net_denied = False  # type: ignore[attr-defined]
+    harness.server.model_id = "mlx-community/v1"
+    await harness.app._poll()
+    assert harness.app.effective_model() == "mlx-community/v1"
+    first = harness.app.server_identity
+    harness.server.model_id = "mlx-community/v2"
+    await harness.app._poll()
+    assert harness.app.effective_model() == "mlx-community/v2"
+    assert harness.app.server_identity.model_id == "mlx-community/v2"
+    assert harness.app.server_identity != first

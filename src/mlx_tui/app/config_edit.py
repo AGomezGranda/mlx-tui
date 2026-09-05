@@ -11,6 +11,7 @@ from textual.css.query import NoMatches
 
 from mlx_tui.chat_pane import ChatPane
 from mlx_tui.config import ConfigParseError, config_path, parse_config, write_template
+from mlx_tui.history.tokens import ContextLimitError, prepare_context
 from mlx_tui.presets import load_presets
 
 if TYPE_CHECKING:
@@ -34,10 +35,24 @@ def edit_config(app: MlxTuiApp) -> None:
         return
     app.log_app("config reloaded")
     try:
-        app.query_one(ChatPane).apply_config_params(app.config)
+        pane = app.query_one(ChatPane)
+        pane.apply_config_params(app.config)
+        _refresh_context_bar(pane, app.config.max_ctx)
     except NoMatches:
         pass
     app.presets = load_presets()
     app.preset_idx = -1
     if (app.config.host, app.config.port) != before:
         app.log_app("restart mlx-tui to apply host/port", "yellow")
+
+
+def _refresh_context_bar(pane: ChatPane, max_ctx: int) -> None:
+    _, _, max_tokens = pane._parse_params()
+    try:
+        window = prepare_context(
+            pane.messages, pane.tui.config.system, max_ctx, max_tokens
+        )
+    except ContextLimitError:
+        pane.update_ctx_bar(max_ctx)
+    else:
+        pane.update_ctx_bar(window.reserved_tokens)

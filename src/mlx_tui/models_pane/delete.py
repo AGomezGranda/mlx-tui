@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mlx_tui.app.operations import OperationKind
 from mlx_tui.confirm import ConfirmScreen
 from mlx_tui.models import CacheNotFound, ModelRow, delete_repos
 from mlx_tui.table import ModelsTable
@@ -13,8 +14,8 @@ if TYPE_CHECKING:
 
 
 def request_delete_model(pane: ModelsPane) -> None:
-    if pane.tui.swap_busy:
-        pane.tui.log_app("swap already in progress", "yellow")
+    if pane.tui.operations.is_busy:
+        pane.tui.log_app("operation already in progress", "yellow")
         return
     table = pane.query_one("#models-table", ModelsTable)
     if not pane.rows or not 0 <= table.cursor_row < len(pane.rows):
@@ -26,8 +27,6 @@ def request_delete_model(pane: ModelsPane) -> None:
     # RAM while the files vanish), breaks the next warm-load (effective
     # model still points at the deleted id), and makes the next chat
     # re-download the deleted repo. Block it with a hint.
-    # Effective is authoritative: tracked warm-swaps shadow stale cmdline,
-    # and when tracked is None it already falls back to cmdline.
     effective = pane.tui.effective_model()
     if effective is not None and row.repo_id == effective:
         pane.tui.log_app(
@@ -50,22 +49,34 @@ def on_delete_confirmed(pane: ModelsPane, confirmed: bool | None) -> None:
     if not confirmed or row is None:
         pane.tui.log_app("kept", "dim")
         return
-    pane._run_delete(row)
+    pane.start_delete(row)
+
+
+def start_delete(pane: ModelsPane, row: ModelRow) -> None:
+    if not pane.tui.operations.try_acquire(OperationKind.DELETING):
+        pane.tui.log_app("operation already in progress", "yellow")
+        return
+    try:
+        pane.tui.set_operation_ui(True)
+        pane._run_delete(row)
+    except Exception:
+        pane.tui.operations.release(OperationKind.DELETING)
+        pane.tui.set_operation_ui(False)
+        raise
 
 
 def _run_delete_impl(pane: ModelsPane, row: ModelRow) -> None:
-    # Race: the loaded model may have changed between the button press
-    # and confirmation (or via an external restart). Re-check here before
-    # touching the cache.
-    effective_now = pane.tui.effective_model()
-    if effective_now is not None and row.repo_id == effective_now:
-        pane.tui.call_from_thread(
-            pane.tui.log_app,
-            f"cannot delete {row.repo_id}: it became active — swap first",
-            "yellow",
-        )
-        return
     try:
+        # Race: the loaded model may have changed between confirmation and
+        # worker execution. Re-check immediately before touching the cache.
+        effective_now = pane.tui.effective_model()
+        if effective_now is not None and row.repo_id == effective_now:
+            pane.tui.call_from_thread(
+                pane.tui.log_app,
+                f"cannot delete {row.repo_id}: it became active — swap first",
+                "yellow",
+            )
+            return
         freed = delete_repos(row.revision_hashes)
     except (CacheNotFound, OSError) as exc:
         pane.tui.call_from_thread(
@@ -73,14 +84,17 @@ def _run_delete_impl(pane: ModelsPane, row: ModelRow) -> None:
             f"delete failed: {exc.__class__.__name__}: {exc}",
             "red",
         )
-        return
-    # Defensive: if a warm-loaded model slipped past the guard, clear the
-    # tracked marker so the next effective_model() does not keep pointing
-    # at a deleted repo (which would re-trigger a download on chat).
-    if row.repo_id == pane.tui._tracked_model:
-        pane.tui.call_from_thread(pane.tui.set_tracked_model, None)
-        pane.tui.call_from_thread(pane.tui.refresh_models)
-    pane.tui.call_from_thread(
-        pane.tui.log_app, f"deleted {row.repo_id} — freed {freed / 2**30:.1f} GB"
-    )
-    pane.rescan()
+    except Exception as exc:
+        pane.tui.call_from_thread(
+            pane.tui.log_app,
+            f"delete failed: {exc.__class__.__name__}: {exc}"[:240],
+            "red",
+        )
+    else:
+        pane.tui.call_from_thread(
+            pane.tui.log_app, f"deleted {row.repo_id} — freed {freed / 2**30:.1f} GB"
+        )
+        pane.tui.call_from_thread(pane.rescan)
+    finally:
+        pane.tui.call_from_thread(pane.tui.operations.release, OperationKind.DELETING)
+        pane.tui.call_from_thread(pane.tui.set_operation_ui, False)

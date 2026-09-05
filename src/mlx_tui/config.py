@@ -6,7 +6,9 @@ import os
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
+
+SwapPolicy = Literal["auto", "warm", "restart"]
 
 
 @dataclass(frozen=True)
@@ -23,7 +25,8 @@ class AppConfig:
     top_p: float | None = None
     max_tokens: int | None = None
     system: str | None = None
-    max_ctx: int = 8000
+    max_ctx: int = 8192
+    swap_policy: SwapPolicy = "auto"
 
 
 def config_path() -> Path:
@@ -42,7 +45,9 @@ CONFIG_TEMPLATE = """\
 # top_p = 1.0
 # max_tokens = 1024
 # system = "You are a helpful assistant."
-# max_ctx = 8000
+# max_ctx = 8192
+# max_context = 8192  # alias for max_ctx
+# swap_policy = "auto"  # "auto" | "warm" | "restart"
 """
 
 
@@ -107,9 +112,19 @@ def _from_mapping(data: dict[str, object]) -> AppConfig:
     mt = cast("int | None", found.get("max_tokens"))
     if mt is not None:
         mt = _clamp_int(mt, 1, 16384)
-    mc = cast("int | None", found.get("max_ctx"))
-    if mc is not None:
-        mc = _clamp_int(mc, 1024, 131072)
+    raw_mc: int | None
+    if type(data.get("max_context")) is int:
+        raw_mc = data.get("max_context")  # type: ignore[assignment]
+    elif type(data.get("max_ctx")) is int:
+        raw_mc = data.get("max_ctx")  # type: ignore[assignment]
+    else:
+        raw_mc = None
+    mc = _clamp_int(raw_mc, 1024, 131072) if raw_mc is not None else None
+    raw_policy = data.get("swap_policy")
+    if raw_policy in ("auto", "warm", "restart"):
+        policy = cast("SwapPolicy", raw_policy)
+    else:
+        policy = cast("SwapPolicy", "auto")
     return AppConfig(
         model=cast("str | None", found.get("model")),
         host=cast("str", host if host is not None else "127.0.0.1"),
@@ -121,7 +136,8 @@ def _from_mapping(data: dict[str, object]) -> AppConfig:
         top_p=tp,
         max_tokens=mt,
         system=cast("str | None", found.get("system")),
-        max_ctx=mc if mc is not None else 8000,
+        max_ctx=mc if mc is not None else 8192,
+        swap_policy=policy,
     )
 
 

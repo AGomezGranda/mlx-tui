@@ -9,7 +9,12 @@ from textual.coordinate import Coordinate
 from textual.widgets import Input, Static
 
 from mlx_tui.models_pane import ModelsPane
-from mlx_tui.search import ALLOW_PATTERNS, CancelledDownload
+from mlx_tui.search import (
+    ALLOW_PATTERNS,
+    CancelledDownload,
+    RepoSnapshot,
+    filtered_download_size,
+)
 from mlx_tui.search_screen import ResultsTable, SearchScreen
 from mlx_tui.table import ModelsTable
 from tests.conftest import AppHarness
@@ -24,16 +29,14 @@ async def open_search(
     def _stub_list(api: object, q: str) -> list[str]:
         return [ROW]
 
-    def _stub_files(api: object, rid: str) -> list[tuple[str, int]]:
-        return SIZE_PAIRS
+    def _stub_snapshot(api: object, rid: str) -> RepoSnapshot:
+        return RepoSnapshot(revision="rev-a", files=tuple(SIZE_PAIRS))
 
     def _stub_free() -> int:
         return 10 * 2**30
 
     monkeypatch.setattr("mlx_tui.search_screen.query.list_results", _stub_list)
-    monkeypatch.setattr(
-        "mlx_tui.search_screen.query.repo_files_with_sizes", _stub_files
-    )
+    monkeypatch.setattr("mlx_tui.search_screen.query.repo_snapshot", _stub_snapshot)
     monkeypatch.setattr("mlx_tui.search_screen.query.free_disk_bytes", _stub_free)
     monkeypatch.setattr("mlx_tui.search_screen.download.free_disk_bytes", _stub_free)
     # Focus the models table so slash binding fires deterministically.
@@ -141,12 +144,14 @@ async def test_enter_downloads_hands_off_and_dismisses(
         on_progress=None,  # type: ignore[no-untyped-def]
         cancel_event=None,  # type: ignore[no-untyped-def]
         cache_dir=None,  # type: ignore[no-untyped-def]
+        revision=None,  # type: ignore[no-untyped-def]
         **_kw: object,
     ) -> None:
         captured["repo_id"] = repo_id
         captured["on_progress"] = on_progress
         captured["cancel_event"] = cancel_event
         captured["cache_dir"] = cache_dir
+        captured["revision"] = revision
         # also record allow_patterns if somehow passed (defensive)
         if "allow_patterns" in _kw:
             captured["allow_patterns"] = _kw["allow_patterns"]
@@ -181,12 +186,14 @@ async def test_enter_downloads_hands_off_and_dismisses(
     ), f"log lines: {harness.app_log_lines()!r}"
 
     assert captured.get("repo_id") == ROW
+    assert captured.get("revision") == "rev-a"
+    assert screen._revisions.get(ROW) == "rev-a"
     # The wrapper pins ALLOW_PATTERNS internally; if the fake received it, check identity.
-    # Otherwise verify the constant itself is as expected (mirrors unit-test intent).
+    # Otherwise verify the constant itself includes the MLX-LM loader set.
     if "allow_patterns" in captured:
         assert captured["allow_patterns"] is ALLOW_PATTERNS
     else:
-        assert ALLOW_PATTERNS == ["*.safetensors", "*.json", "tokenizer*"]
+        assert "*.jinja" in ALLOW_PATTERNS and "*.py" in ALLOW_PATTERNS
     assert calls == [1]
     assert await harness.wait_for(
         lambda app: not isinstance(app.screen, SearchScreen)
@@ -202,6 +209,7 @@ async def test_escape_mid_download_cancels(
         on_progress=None,  # type: ignore[no-untyped-def]
         cancel_event=None,  # type: ignore[no-untyped-def]
         cache_dir=None,  # type: ignore[no-untyped-def]
+        revision=None,  # type: ignore[no-untyped-def]
         **_kw: object,
     ) -> None:
         # Signal that we are in the blocking section; loop until cancelled.
@@ -250,6 +258,7 @@ async def test_download_failure_keeps_modal_usable(
         on_progress=None,  # type: ignore[no-untyped-def]
         cancel_event=None,  # type: ignore[no-untyped-def]
         cache_dir=None,  # type: ignore[no-untyped-def]
+        revision=None,  # type: ignore[no-untyped-def]
         **_kw: object,
     ) -> None:
         raise RuntimeError("disk full")
@@ -292,8 +301,8 @@ async def test_low_disk_warns_then_proceeds(
     def _stub_list_low(api: object, q: str) -> list[str]:
         return [ROW]
 
-    def _stub_files_low(api: object, rid: str) -> list[tuple[str, int]]:
-        return SIZE_PAIRS
+    def _stub_snapshot_low(api: object, rid: str) -> RepoSnapshot:
+        return RepoSnapshot(revision="rev-a", files=tuple(SIZE_PAIRS))
 
     def _stub_free_low() -> int:
         return 1_000_000_000
@@ -306,17 +315,17 @@ async def test_low_disk_warns_then_proceeds(
         on_progress=None,  # type: ignore[no-untyped-def]
         cancel_event=None,  # type: ignore[no-untyped-def]
         cache_dir=None,  # type: ignore[no-untyped-def]
+        revision=None,  # type: ignore[no-untyped-def]
         **_kw: object,
     ) -> None:
         captured["repo_id"] = repo_id
+        captured["revision"] = revision
         # Hold the modal open briefly so the warning line is observable
         # before the success log + dismiss.
         time.sleep(0.35)
 
     monkeypatch.setattr("mlx_tui.search_screen.query.list_results", _stub_list_low)
-    monkeypatch.setattr(
-        "mlx_tui.search_screen.query.repo_files_with_sizes", _stub_files_low
-    )
+    monkeypatch.setattr("mlx_tui.search_screen.query.repo_snapshot", _stub_snapshot_low)
     monkeypatch.setattr("mlx_tui.search_screen.query.free_disk_bytes", _stub_free_low)
     monkeypatch.setattr(
         "mlx_tui.search_screen.download.free_disk_bytes", _stub_free_low
@@ -360,3 +369,83 @@ async def test_low_disk_warns_then_proceeds(
         lambda app: any("✓ downloaded" in line for line in harness.app_log_lines())
     ), f"log lines: {harness.app_log_lines()!r}"
     assert captured.get("repo_id") == ROW
+    assert captured.get("revision") == "rev-a"
+
+
+async def test_size_and_download_share_revision_and_expanded_patterns(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expanded = [
+        ("model.safetensors", 1000),
+        ("config.json", 100),
+        ("tokenizer.json", 200),
+        ("modeling_custom.py", 300),
+        ("o200k_base.tiktoken", 400),
+        ("tiktoken.model", 500),
+        ("vocab.txt", 600),
+        ("metadata.jsonl", 700),
+        ("chat_template.jinja", 800),
+        ("README.md", 9999),
+    ]
+    expected_size = filtered_download_size(expanded)
+    # sanity: expanded loader files are counted, README is not
+    assert expected_size == 1000 + 100 + 200 + 300 + 400 + 500 + 600 + 700 + 800
+
+    def _stub_list(api: object, q: str) -> list[str]:
+        return [ROW]
+
+    def _stub_snapshot(api: object, rid: str) -> RepoSnapshot:
+        return RepoSnapshot(revision="rev-a", files=tuple(expanded))
+
+    def _stub_free() -> int:
+        return 10 * 2**30
+
+    captured: dict[str, object] = {}
+
+    def _recording_download(
+        repo_id: str,
+        *,
+        on_progress=None,  # type: ignore[no-untyped-def]
+        cancel_event=None,  # type: ignore[no-untyped-def]
+        cache_dir=None,  # type: ignore[no-untyped-def]
+        revision=None,  # type: ignore[no-untyped-def]
+        **_kw: object,
+    ) -> None:
+        captured["repo_id"] = repo_id
+        captured["revision"] = revision
+
+    monkeypatch.setattr("mlx_tui.search_screen.query.list_results", _stub_list)
+    monkeypatch.setattr("mlx_tui.search_screen.query.repo_snapshot", _stub_snapshot)
+    monkeypatch.setattr("mlx_tui.search_screen.query.free_disk_bytes", _stub_free)
+    monkeypatch.setattr("mlx_tui.search_screen.download.free_disk_bytes", _stub_free)
+    monkeypatch.setattr(
+        "mlx_tui.search_screen.download.download_snapshot", _recording_download
+    )
+
+    def _noop_rescan(self: ModelsPane) -> None:
+        return None
+
+    monkeypatch.setattr(ModelsPane, "rescan", _noop_rescan)
+
+    try:
+        harness.app.query_one("#models-table", ModelsTable).focus()
+    except Exception:
+        pass
+    await harness.pilot.press("/")
+    await harness.pilot.pause()
+    assert await harness.wait_for(lambda app: isinstance(app.screen, SearchScreen))
+    screen = harness.app.screen
+    assert isinstance(screen, SearchScreen)
+
+    await harness.pilot.press(*"qwen", "enter")
+    assert await harness.wait_for(lambda app: len(screen._repo_ids) == 1)
+    assert await harness.wait_for(lambda app: ROW in screen._sizes)
+    assert screen._sizes[ROW] == expected_size
+    assert screen._revisions.get(ROW) == "rev-a"
+
+    await harness.pilot.press("enter")
+    assert await harness.wait_for(
+        lambda app: any("✓ downloaded" in line for line in harness.app_log_lines())
+    )
+    assert captured.get("repo_id") == ROW
+    assert captured.get("revision") == "rev-a"

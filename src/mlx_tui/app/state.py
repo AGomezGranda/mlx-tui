@@ -1,52 +1,38 @@
-"""Tracked-model state + effective model union."""
+"""Endpoint-derived server identity + effective model."""
 
 from __future__ import annotations
 
+import dataclasses
 from typing import TYPE_CHECKING
 
-import psutil
-
-from mlx_tui import (
-    process,  # module import so monkeypatch of process.find_server_pid propagates
-)
-from mlx_tui.process import model_from_cmdline
-from mlx_tui.swap import SwapState
+from mlx_tui.process import ProcessIdentity
+from mlx_tui.status import ServerProbe
 
 if TYPE_CHECKING:
     from mlx_tui.app import MlxTuiApp
 
 
-class _SwapShim:
-    """Legacy shim: keeps SwapState graph API but no validation, proxies to busy."""
-
-    def __init__(self) -> None:
-        self.state: SwapState = SwapState.IDLE
-
-    @property
-    def busy(self) -> bool:
-        return self.state is not SwapState.IDLE
-
-    def transition(self, new: SwapState) -> None:
-        self.state = new
-
-    def reset(self) -> None:
-        self.state = SwapState.IDLE
+def update_server_identity(
+    app: MlxTuiApp,
+    probe: ServerProbe,
+    process_identity: ProcessIdentity | None,
+) -> None:
+    """Replace the endpoint snapshot; stale models never survive a new probe."""
+    model = probe.model_id if probe.state == "green" else None
+    pid = process_identity.pid if process_identity is not None else None
+    ctime = process_identity.create_time if process_identity is not None else None
+    app.server_identity = dataclasses.replace(
+        app.server_identity,
+        host=app.host,
+        port=app.port,
+        model_id=model,
+        pid=pid,
+        pid_create_time=ctime,
+    )
 
 
 def effective_model(app: MlxTuiApp) -> str | None:
-    """Tracked warm-swaps win over --model cmdline; gated on live pid."""
-    if app._tracked_model is not None:
-        return app._tracked_model
-    pid = process.find_server_pid(app.config.pidfile)
-    if pid is None:
+    """Only the model in the latest green endpoint probe."""
+    if app.status_state != "green":
         return None
-    try:
-        return model_from_cmdline(psutil.Process(pid))
-    except psutil.NoSuchProcess:
-        return None
-
-
-def set_tracked_model(app: MlxTuiApp, model: str | None) -> None:
-    """UI-thread setter for warm-swap tracking (hop via call_from_thread)."""
-    app._tracked_model = model
-    app._refresh_metrics()
+    return app.server_identity.model_id

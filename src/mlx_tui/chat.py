@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import httpx
 
 from mlx_tui.sse import (
+    TokenAccounting,
     delta_content_from_chunk,
     finish_reason_from_chunk,
     iter_sse_data,
@@ -43,9 +44,7 @@ class TurnResult:
 
     full_text: str
     ttft: float
-    tok_in_str: str
-    tok_out_str: str
-    tok_s: float
+    accounting: TokenAccounting
     finish_reason: str | None = None
     skipped_frames: int = 0
 
@@ -54,7 +53,7 @@ def stream_turn(  # noqa: PLR0913
     url: str,
     payload: dict[str, object],
     *,
-    user_chars: int,
+    prompt_estimate: int,
     on_flush: Callable[[str], None],
     flush_interval: float = _FLUSH_INTERVAL_S,
     on_active: Callable[[httpx.Response | None], None] | None = None,
@@ -63,7 +62,6 @@ def stream_turn(  # noqa: PLR0913
     t_first_text: float | None = None
     parts: list[str] = []
     last_flush = t_send
-    counted_deltas = 0
     skipped_frames = 0
     finish_reason: str | None = None
     prompt_tokens: int | None = None
@@ -96,7 +94,6 @@ def stream_turn(  # noqa: PLR0913
                     if t_first_text is None:
                         t_first_text = time.perf_counter()
                     parts.append(content)
-                    counted_deltas += 1
                     now = time.perf_counter()
                     if now - last_flush >= flush_interval:
                         last_flush = now
@@ -106,19 +103,18 @@ def stream_turn(  # noqa: PLR0913
     now = time.perf_counter()
     ttft = (t_first_text - t_send) if t_first_text is not None else now - t_send
     elapsed = (now - t_first_text) if t_first_text is not None else 0.0
-    tok_in_str, tok_out_str, tok_s = token_accounting(
+    full_text = "".join(parts)
+    accounting = token_accounting(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
-        counted_deltas=counted_deltas,
-        user_chars=user_chars,
+        prompt_estimate=prompt_estimate,
+        full_text=full_text,
         elapsed=elapsed,
     )
     return TurnResult(
-        full_text="".join(parts),
+        full_text=full_text,
         ttft=ttft,
-        tok_in_str=tok_in_str,
-        tok_out_str=tok_out_str,
-        tok_s=tok_s,
+        accounting=accounting,
         finish_reason=finish_reason,
         skipped_frames=skipped_frames,
     )

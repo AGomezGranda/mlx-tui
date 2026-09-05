@@ -9,6 +9,7 @@ from mlx_tui.status import (
     MemorySnapshot,
     classify_liveness,
     format_status_line,
+    probe_from_response,
 )
 
 
@@ -27,6 +28,33 @@ from mlx_tui.status import (
 )
 def test_classify_liveness(status_code: int, body: object, expected: str) -> None:
     assert classify_liveness(status_code, body) == expected
+
+
+@pytest.mark.parametrize(
+    ("status_code", "body", "state", "model_id"),
+    [
+        (200, {"data": [{"id": "m"}]}, "green", "m"),
+        (200, {"data": [{"id": ""}, {"id": "second"}]}, "green", "second"),
+        (200, {"data": [{"id": "first"}, {"id": "second"}]}, "green", "first"),
+        (200, {"data": [{"id": 123}, {"id": "ok"}]}, "green", "ok"),
+        (200, {"data": ["x"]}, "green", None),
+        (200, {"data": [{"no_id": 1}]}, "green", None),
+        (200, {"data": []}, "amber", None),
+        (200, {}, "amber", None),
+        (200, None, "amber", None),
+        (200, "junk", "amber", None),
+        (200, {"data": "junk"}, "amber", None),
+        (502, "<html>proxy</html>", "amber", None),
+        (500, {"data": [{"id": "m"}]}, "amber", None),
+    ],
+)
+def test_probe_from_response(
+    status_code: int, body: object, state: str, model_id: str | None
+) -> None:
+    probe = probe_from_response(status_code, body)
+    assert probe.state == state
+    assert probe.model_id == model_id
+    assert classify_liveness(status_code, body) == state
 
 
 def test_cold_tracker_fresh_consume_is_false() -> None:

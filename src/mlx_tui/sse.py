@@ -3,8 +3,18 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 
-from mlx_tui.history.tokens import CHARS_PER_TOKEN_EST
+from mlx_tui.history.tokens import estimate_tokens
+
+
+@dataclass(frozen=True)
+class TokenAccounting:
+    prompt_tokens: int
+    completion_tokens: int
+    prompt_estimated: bool
+    completion_estimated: bool
+    tok_s: float
 
 
 def iter_sse_data(lines: Iterable[str]) -> Iterator[str]:
@@ -63,21 +73,24 @@ def token_accounting(
     *,
     prompt_tokens: int | None,
     completion_tokens: int | None,
-    counted_deltas: int,
-    user_chars: int,
+    prompt_estimate: int,
+    full_text: str,
     elapsed: float,
-) -> tuple[str, str, float]:
-    """Compute ``(in-str, out-str, tok/s)``; estimates when usage missing."""
-    if completion_tokens is not None:
-        tok_out_str = str(completion_tokens)
-        rate = float(completion_tokens)
-    else:
-        tok_out_str = f"{counted_deltas} (est)"
-        rate = float(counted_deltas)
-    tok_in_str = (
-        str(prompt_tokens)
-        if prompt_tokens is not None
-        else f"{user_chars / CHARS_PER_TOKEN_EST:.0f} (est)"
+) -> TokenAccounting:
+    """Resolve typed counts; estimates from complete request/response text."""
+    resolved_prompt = prompt_tokens if prompt_tokens is not None else prompt_estimate
+    prompt_estimated = prompt_tokens is None
+    resolved_completion = (
+        completion_tokens
+        if completion_tokens is not None
+        else estimate_tokens(full_text)
     )
-    tok_s = rate / elapsed if elapsed > 0 else 0.0
-    return tok_in_str, tok_out_str, tok_s
+    completion_estimated = completion_tokens is None
+    tok_s = float(resolved_completion) / elapsed if elapsed > 0 else 0.0
+    return TokenAccounting(
+        prompt_tokens=resolved_prompt,
+        completion_tokens=resolved_completion,
+        prompt_estimated=prompt_estimated,
+        completion_estimated=completion_estimated,
+        tok_s=tok_s,
+    )

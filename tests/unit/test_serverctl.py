@@ -123,19 +123,18 @@ def test_wait_healthy_bails_when_spawned_command_dies(
     """A dead start_cmd can never turn green — bail instead of burning time."""
     install_transport(
         monkeypatch,
-        lambda request: httpx.Response(200, json={"data": [{"id": "m"}]}),
+        lambda request: httpx.Response(200, json={"data": [{"id": "other"}]}),
     )
 
     start = time.monotonic()
-    ok = serverctl.wait_healthy(
+    probe = serverctl.wait_healthy(
         MODELS_URL,
         target_model="m",
-        current_model=lambda: "other",  # never green-matches
         is_running=lambda: False,
         timeout_s=30,
     )
 
-    assert ok is False
+    assert probe is None
     assert time.monotonic() - start < 5
 
 
@@ -152,12 +151,51 @@ def test_warm_load_sends_probe_payload(monkeypatch: pytest.MonkeyPatch) -> None:
 
     install_transport(monkeypatch, handler)
 
-    serverctl.warm_load("http://stub/v1/chat/completions", "repo/a", timeout_s=5)
+    result = serverctl.warm_load(
+        "http://stub/v1/chat/completions", "repo/a", timeout_s=5
+    )
 
     payload = json.loads(requests[0].read())
     assert payload["model"] == "repo/a"
     assert payload["max_tokens"] == 1
     assert "stream" not in payload
+    assert result.response_model is None
+
+
+def test_warm_load_returns_response_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    install_transport(
+        monkeypatch,
+        lambda request: httpx.Response(
+            200,
+            json={
+                "model": "repo/a",
+                "choices": [{"message": {"role": "assistant", "content": "hi"}}],
+            },
+        ),
+    )
+
+    result = serverctl.warm_load("http://stub/x", "repo/a", timeout_s=5)
+
+    assert result.response_model == "repo/a"
+
+
+def test_warm_load_non_string_model_yields_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_transport(
+        monkeypatch,
+        lambda request: httpx.Response(
+            200,
+            json={
+                "model": 123,
+                "choices": [{"message": {"role": "assistant", "content": "hi"}}],
+            },
+        ),
+    )
+
+    result = serverctl.warm_load("http://stub/x", "repo/a", timeout_s=5)
+
+    assert result.response_model is None
 
 
 def test_warm_load_http_error_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -214,38 +252,38 @@ def test_wait_healthy_green_first_poll_with_matching_model(
         lambda request: httpx.Response(200, json={"data": [{"id": "m"}]}),
     )
 
-    ok = serverctl.wait_healthy(
+    probe = serverctl.wait_healthy(
         MODELS_URL,
         target_model="m",
-        current_model=lambda: "m",
         timeout_s=5,
     )
 
-    assert ok is True
+    assert probe is not None
+    assert probe.state == "green"
+    assert probe.model_id == "m"
 
 
 def test_wait_healthy_wrong_model_then_right(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    install_transport(
-        monkeypatch,
-        lambda request: httpx.Response(200, json={"data": [{"id": "m"}]}),
-    )
     calls = 0
 
-    def flipper() -> str | None:
+    def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
-        return "other" if calls <= 2 else "m"
+        model = "other" if calls <= 2 else "m"
+        return httpx.Response(200, json={"data": [{"id": model}]})
 
-    ok = serverctl.wait_healthy(
+    install_transport(monkeypatch, handler)
+
+    probe = serverctl.wait_healthy(
         MODELS_URL,
         target_model="m",
-        current_model=flipper,
         timeout_s=10,
     )
 
-    assert ok is True
+    assert probe is not None
+    assert probe.model_id == "m"
     assert calls >= 3
 
 
@@ -259,15 +297,14 @@ def test_wait_healthy_times_out_when_always_red(
     ticks: list[int] = []
     start = time.monotonic()
 
-    ok = serverctl.wait_healthy(
+    probe = serverctl.wait_healthy(
         MODELS_URL,
         target_model=None,
-        current_model=lambda: "m",
         timeout_s=1,
         on_tick=ticks.append,
     )
 
-    assert ok is False
+    assert probe is None
     assert time.monotonic() - start >= 0.9
     assert ticks  # progress ticks were emitted while waiting
 
@@ -280,11 +317,65 @@ def test_wait_healthy_target_none_accepts_any_green(
         lambda request: httpx.Response(200, json={"data": [{"id": "someone"}]}),
     )
 
-    ok = serverctl.wait_healthy(
+    probe = serverctl.wait_healthy(
         MODELS_URL,
         target_model=None,
-        current_model=lambda: "never-matches",
         timeout_s=5,
     )
 
-    assert ok is True
+    assert probe is not None
+    assert probe.state == "green"
+    assert probe.model_id == "someone"
+
+
+def test_wait_healthy_wrong_endpoint_model_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_transport(
+        monkeypatch,
+        lambda request: httpx.Response(200, json={"data": [{"id": "other"}]}),
+    )
+
+    probe = serverctl.wait_healthy(
+        MODELS_URL,
+        target_model="m",
+        timeout_s=1,
+    )
+
+    assert probe is None
+
+
+def test_wait_healthy_missing_target_id_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_transport(
+        monkeypatch,
+        lambda request: httpx.Response(200, json={"data": [{"id": ""}]}),
+    )
+
+    probe = serverctl.wait_healthy(
+        MODELS_URL,
+        target_model="m",
+        timeout_s=1,
+    )
+
+    assert probe is None
+
+
+def test_wait_healthy_probe_timeout_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("boom")
+
+    install_transport(monkeypatch, boom)
+
+    start = time.monotonic()
+    probe = serverctl.wait_healthy(
+        MODELS_URL,
+        target_model="m",
+        timeout_s=1,
+    )
+
+    assert probe is None
+    assert time.monotonic() - start >= 0.9

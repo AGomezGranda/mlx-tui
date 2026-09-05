@@ -70,9 +70,13 @@ def apply_params_to_inputs(
 
 
 def apply_config_params(pane: ChatPane, cfg: AppConfig) -> None:
-    apply_params_to_inputs(pane, cfg.temperature, cfg.top_p, cfg.max_tokens)
-    if cfg.system is not None:
-        pane._system_prompt = cfg.system
+    apply_params_to_inputs(
+        pane,
+        cfg.temperature if cfg.temperature is not None else _DEFAULT_TEMPERATURE,
+        cfg.top_p if cfg.top_p is not None else _DEFAULT_TOP_P,
+        cfg.max_tokens if cfg.max_tokens is not None else _DEFAULT_MAX_TOKENS,
+    )
+    pane._system_prompt = cfg.system or ""
 
 
 def on_param_submitted(

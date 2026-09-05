@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -137,9 +138,87 @@ def test_config_path_falls_back_to_home_config(
 
 
 def test_default_max_ctx_is_8000() -> None:
-    assert AppConfig().max_ctx == 8000
+    assert AppConfig().max_ctx == 8192
+
+
+def test_max_ctx_default_is_8192() -> None:
+    assert AppConfig().max_ctx == 8192
 
 
 def test_max_ctx_round_trip(tmp_path: Path) -> None:
     cfg = load_config(_write(tmp_path, "max_ctx = 32000\n"))
     assert cfg.max_ctx == 32000
+
+
+def test_max_context_alias_wins(tmp_path: Path) -> None:
+    cfg = load_config(_write(tmp_path, "max_context = 16384\nmax_ctx = 4096\n"))
+    assert cfg.max_ctx == 16384
+
+
+def test_max_ctx_clamps_and_bool_rejected(tmp_path: Path) -> None:
+    cfg = load_config(_write(tmp_path, "max_ctx = true\n"))
+    assert cfg.max_ctx == 8192
+    cfg2 = load_config(_write(tmp_path, "max_ctx = 999999\n"))
+    assert cfg2.max_ctx == 131072
+    cfg3 = load_config(_write(tmp_path, "max_context = 999999\n"))
+    assert cfg3.max_ctx == 131072
+    cfg4 = load_config(_write(tmp_path, "max_ctx = 512\n"))
+    assert cfg4.max_ctx == 1024
+
+
+def test_swap_policy_default_is_auto() -> None:
+    assert AppConfig().swap_policy == "auto"
+
+
+@pytest.mark.parametrize("policy", ["auto", "warm", "restart"])
+def test_swap_policy_round_trip(tmp_path: Path, policy: str) -> None:
+    cfg = load_config(_write(tmp_path, f'swap_policy = "{policy}"\n'))
+    assert cfg.swap_policy == policy
+
+
+@pytest.mark.parametrize(
+    "toml_line",
+    [
+        'swap_policy = "sometimes"',
+        'swap_policy = ""',
+        "swap_policy = 123",
+        "swap_policy = true",
+    ],
+)
+def test_swap_policy_invalid_falls_back_to_auto(tmp_path: Path, toml_line: str) -> None:
+    cfg = load_config(_write(tmp_path, toml_line))
+    assert cfg.swap_policy == "auto"
+
+
+def test_replace_preserves_unrelated_app_config_fields() -> None:
+    cfg = AppConfig(
+        model="org/model",
+        host="example.test",
+        port=9000,
+        start_cmd="start",
+        stop_cmd="stop",
+        pidfile="/tmp/mlx.pid",
+        temperature=0.2,
+        top_p=0.8,
+        max_tokens=512,
+        system="old",
+        max_ctx=32768,
+        swap_policy="restart",
+    )
+
+    updated = replace(cfg, system=None, max_tokens=1024)
+
+    assert updated == AppConfig(
+        model="org/model",
+        host="example.test",
+        port=9000,
+        start_cmd="start",
+        stop_cmd="stop",
+        pidfile="/tmp/mlx.pid",
+        temperature=0.2,
+        top_p=0.8,
+        max_tokens=1024,
+        system=None,
+        max_ctx=32768,
+        swap_policy="restart",
+    )

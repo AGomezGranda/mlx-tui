@@ -56,6 +56,7 @@ class SearchScreen(ModalScreen[None]):
         super().__init__()
         self._repo_ids: list[str] = []
         self._sizes: dict[str, int] = {}  # repo_id -> exact download bytes
+        self._revisions: dict[str, str | None] = {}  # repo_id -> snapshot revision
         self._downloading: str | None = None
         self._cancel_event: threading.Event | None = None
         self._cancel_logged: bool = False
@@ -114,10 +115,12 @@ class SearchScreen(ModalScreen[None]):
 
         return query.fetch_size_impl(self, repo_id)  # type: ignore[arg-type]
 
-    def _fill_size_cell(self, repo_id: str, size: int, glyph: str) -> None:
+    def _fill_size_cell(
+        self, repo_id: str, size: int, glyph: str, revision: str | None = None
+    ) -> None:
         from . import query  # noqa: PLC0415
 
-        return query.fill_size_cell(self, repo_id, size, glyph)  # type: ignore[arg-type]
+        return query.fill_size_cell(self, repo_id, size, glyph, revision)  # type: ignore[arg-type]
 
     def start_download(self) -> None:
         from . import download  # noqa: PLC0415
@@ -125,10 +128,15 @@ class SearchScreen(ModalScreen[None]):
         return download.start_download(self)  # type: ignore[arg-type]
 
     @work(exclusive=True, group="hf-download", thread=True)
-    def _run_download(self, repo_id: str, cancel_event: threading.Event) -> None:
+    def _run_download(
+        self,
+        repo_id: str,
+        cancel_event: threading.Event,
+        revision: str | None = None,
+    ) -> None:
         from . import download  # noqa: PLC0415
 
-        return download.run_download_impl(self, repo_id, cancel_event)  # type: ignore[arg-type]
+        return download.run_download_impl(self, repo_id, cancel_event, revision)  # type: ignore[arg-type]
 
     def _progress_line(self, repo_id: str, done: int, expected: int) -> None:
         from . import download  # noqa: PLC0415

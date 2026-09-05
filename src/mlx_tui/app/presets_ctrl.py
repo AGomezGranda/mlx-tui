@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from textual.css.query import NoMatches
 
 from mlx_tui.chat_pane import ChatPane
-from mlx_tui.config import AppConfig
 from mlx_tui.presets import Preset
 
 if TYPE_CHECKING:
@@ -19,22 +19,17 @@ def apply_preset(app: MlxTuiApp, preset: Preset) -> None:
         pane = app.query_one(ChatPane)
     except NoMatches:
         return
-    pane.set_system_prompt(preset.system)
     pane._apply_params_to_inputs(preset.temperature, preset.top_p, preset.max_tokens)
     # sync config snapshot
     temp, top_p, max_tok = pane._parse_params()
-    app.config = AppConfig(
-        model=app.config.model,
-        host=app.config.host,
-        port=app.config.port,
-        start_cmd=app.config.start_cmd,
-        stop_cmd=app.config.stop_cmd,
-        pidfile=app.config.pidfile,
+    app.config = replace(
+        app.config,
         temperature=temp,
         top_p=top_p,
         max_tokens=max_tok,
-        system=preset.system or None,
+        system=preset.system.strip() or None,
     )
+    pane.apply_config_params(app.config)
     app.log_app(f"preset: {preset.name}", "dim")
 
 

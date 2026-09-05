@@ -23,6 +23,7 @@ from tests.builders import sse_frames
 
 class StubServer(HTTPServer):
     mode: str = "ok"
+    model_id: str = "mlx-community/stub-test"
 
     def __init__(
         self,
@@ -59,16 +60,13 @@ class StubHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"<html>proxy</html>")
             return
-        body = b"""{
-            "object": "list",
-            "data": [
-                {
-                    "id": "mlx-community/stub-test",
-                    "object": "model",
-                    "created": 0
-                }
-            ]
-        }"""
+        assert isinstance(self.server, StubServer)
+        model_id = self.server.model_id
+        body = (
+            b'{"object": "list", "data": [{"id": "'
+            + model_id.encode()
+            + b'", "object": "model", "created": 0}]}'
+        )
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -123,6 +121,8 @@ class StubHandler(BaseHTTPRequestHandler):
         elif self._mode() == "empty":
             # 200 OK but zero content deltas — the silent-no-answer shape.
             body = sse_frames(finish=None, usage=(12, 0))
+        elif self._mode() == "no_usage":
+            body = sse_frames(deltas=["Hi"], usage=None)
         else:
             body = sse_frames(
                 deltas=["Hello", " world", " this", " is", " MLX."],

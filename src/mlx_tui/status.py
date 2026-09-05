@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import NamedTuple
 
 
@@ -10,7 +11,42 @@ class MemorySnapshot(NamedTuple):
     total_gib: float
 
 
+@dataclass(frozen=True)
+class ServerProbe:
+    state: str
+    model_id: str | None
+
+
+@dataclass(frozen=True)
+class ServerIdentity:
+    host: str
+    port: int
+    model_id: str | None = None
+    pid: int | None = None
+    pid_create_time: float | None = None
+
+
 _HTTP_OK = 200
+
+
+def probe_from_response(status_code: int, body: object) -> ServerProbe:
+    """Pure probe for a completed ``GET /v1/models`` response.
+
+    green ⇔ 200 AND body parses to a dict whose ``data`` is a non-empty
+    list; every other complete HTTP response is amber. The model is the
+    first non-empty string ``id`` in ``data`` when green, else None.
+    """
+    data = body.get("data") if isinstance(body, dict) else None
+    if status_code == _HTTP_OK and isinstance(data, list) and len(data) > 0:
+        model_id: str | None = None
+        for entry in data:
+            if isinstance(entry, dict):
+                mid = entry.get("id")
+                if isinstance(mid, str) and mid:
+                    model_id = mid
+                    break
+        return ServerProbe(state="green", model_id=model_id)
+    return ServerProbe(state="amber", model_id=None)
 
 
 def classify_liveness(status_code: int, body: object) -> str:
@@ -22,10 +58,7 @@ def classify_liveness(status_code: int, body: object) -> str:
     response (junk JSON, wrong shape, 502 HTML proxy squatting on the port)
     is 'amber'.
     """
-    data = body.get("data") if isinstance(body, dict) else None
-    if status_code == _HTTP_OK and isinstance(data, list) and len(data) > 0:
-        return "green"
-    return "amber"
+    return probe_from_response(status_code, body).state
 
 
 class ColdTracker:

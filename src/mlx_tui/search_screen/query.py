@@ -14,7 +14,7 @@ from mlx_tui.search import (
     fits_disk,
     free_disk_bytes,
     list_results,
-    repo_files_with_sizes,
+    repo_snapshot,
 )
 
 if TYPE_CHECKING:
@@ -27,6 +27,8 @@ def on_search_submitted(screen: SearchScreen, event: Input.Submitted) -> None:
         screen._set_line("#search-status", "type a search", "dim")
         # Clear stale results so an empty submit doesn't leave old rows.
         screen._repo_ids = []
+        screen._sizes.clear()
+        screen._revisions.clear()
         try:
             from mlx_tui.search_screen import ResultsTable  # noqa: PLC0415
 
@@ -65,6 +67,8 @@ def populate(screen: SearchScreen, ids: list[str]) -> None:
     except NoMatches:
         return
     screen._repo_ids = ids
+    screen._sizes.clear()
+    screen._revisions.clear()
     table.clear()
     for rid in ids:
         table.add_row(rid, quant_label(rid), "—", key=rid)
@@ -96,17 +100,27 @@ def on_row_highlighted(screen: SearchScreen, event: DataTable.RowHighlighted) ->
 
 def fetch_size_impl(screen: SearchScreen, repo_id: str) -> None:
     try:
-        size = filtered_download_size(repo_files_with_sizes(HfApi(), repo_id))
+        snapshot = repo_snapshot(HfApi(), repo_id)
+        size = filtered_download_size(snapshot.files)
     except Exception:
         return
     glyph_map: dict[bool | None, str] = {True: "✓", False: "⚠", None: "—"}
     glyph = glyph_map[fits_disk(size, free_disk_bytes())]
-    screen.app.call_from_thread(fill_size_cell, screen, repo_id, size, glyph)
+    screen.app.call_from_thread(
+        fill_size_cell, screen, repo_id, size, glyph, snapshot.revision
+    )
 
 
-def fill_size_cell(screen: SearchScreen, repo_id: str, size: int, glyph: str) -> None:
+def fill_size_cell(
+    screen: SearchScreen,
+    repo_id: str,
+    size: int,
+    glyph: str,
+    revision: str | None = None,
+) -> None:
     # Mutate only on the UI thread to avoid a worker/UI dict race.
     screen._sizes[repo_id] = size
+    screen._revisions[repo_id] = revision
     try:
         from mlx_tui.search_screen import ResultsTable  # noqa: PLC0415
 

@@ -44,6 +44,9 @@ class TurnRecord:
     ctx_len: int
     cold: bool
     cancelled: bool = False
+    prefill_tok_s: float | None = None
+    prompt_estimated: bool = False
+    out_estimated: bool = False
 
 
 class HistoryStore:

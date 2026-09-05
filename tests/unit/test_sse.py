@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from mlx_tui.history.tokens import estimate_tokens
 from mlx_tui.sse import (
     delta_content_from_chunk,
     finish_reason_from_chunk,
@@ -86,40 +87,97 @@ def test_finish_reason_from_chunk(chunk: object, expected: str | None) -> None:
 
 
 def test_token_accounting_with_usage() -> None:
-    assert token_accounting(
+    acct = token_accounting(
         prompt_tokens=12,
         completion_tokens=6,
-        counted_deltas=99,
-        user_chars=999,
+        prompt_estimate=999,
+        full_text="x" * 10_000,
         elapsed=2.0,
-    ) == ("12", "6", 3.0)
+    )
+    assert acct.prompt_tokens == 12
+    assert acct.completion_tokens == 6
+    assert acct.prompt_estimated is False
+    assert acct.completion_estimated is False
+    assert acct.tok_s == 3.0
 
 
 def test_token_accounting_estimate_path() -> None:
-    assert token_accounting(
+    acct = token_accounting(
         prompt_tokens=None,
         completion_tokens=None,
-        counted_deltas=4,
-        user_chars=70,
+        prompt_estimate=20,
+        full_text="abcd",
         elapsed=2.0,
-    ) == ("20 (est)", "4 (est)", 2.0)
+    )
+    assert acct.prompt_tokens == 20
+    assert acct.prompt_estimated is True
+    assert acct.completion_tokens == estimate_tokens("abcd")
+    assert acct.completion_estimated is True
+    assert acct.tok_s == estimate_tokens("abcd") / 2.0
 
 
 def test_token_accounting_mixed_estimated_prompt_known_completion() -> None:
-    assert token_accounting(
+    acct = token_accounting(
         prompt_tokens=None,
         completion_tokens=6,
-        counted_deltas=9,
-        user_chars=70,
+        prompt_estimate=20,
+        full_text="abcd",
         elapsed=2.0,
-    ) == ("20 (est)", "6", 3.0)
+    )
+    assert acct.prompt_tokens == 20
+    assert acct.prompt_estimated is True
+    assert acct.completion_tokens == 6
+    assert acct.completion_estimated is False
+    assert acct.tok_s == 3.0
 
 
 def test_token_accounting_zero_elapsed_yields_zero_rate() -> None:
-    assert token_accounting(
+    acct = token_accounting(
         prompt_tokens=12,
         completion_tokens=6,
-        counted_deltas=9,
-        user_chars=70,
+        prompt_estimate=20,
+        full_text="abcd",
         elapsed=0.0,
-    ) == ("12", "6", 0.0)
+    )
+    assert acct.prompt_tokens == 12
+    assert acct.completion_tokens == 6
+    assert acct.tok_s == 0.0
+
+
+def test_token_accounting_single_long_delta() -> None:
+    full_text = "x" * 350
+    acct = token_accounting(
+        prompt_tokens=None,
+        completion_tokens=None,
+        prompt_estimate=10,
+        full_text=full_text,
+        elapsed=2.0,
+    )
+    assert acct.completion_tokens == estimate_tokens(full_text)
+    assert acct.completion_tokens > 1
+    assert acct.completion_estimated is True
+    assert acct.prompt_estimated is True
+    assert acct.tok_s > 0
+
+
+def test_token_accounting_frame_count_independent() -> None:
+    full_text = "Hello world, this is a longer response for estimation."
+    single = token_accounting(
+        prompt_tokens=None,
+        completion_tokens=None,
+        prompt_estimate=10,
+        full_text=full_text,
+        elapsed=2.0,
+    )
+    split = token_accounting(
+        prompt_tokens=None,
+        completion_tokens=None,
+        prompt_estimate=10,
+        full_text="".join(
+            ["Hello ", "world, ", "this is ", "a longer response ", "for estimation."]
+        ),
+        elapsed=2.0,
+    )
+    assert single.completion_tokens == split.completion_tokens
+    assert single.completion_tokens == estimate_tokens(full_text)
+    assert single.tok_s == split.tok_s

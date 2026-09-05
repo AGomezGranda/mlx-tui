@@ -6,6 +6,7 @@ import shutil
 import threading
 import time
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, override
 
@@ -15,7 +16,19 @@ from huggingface_hub.hf_api import ModelInfo
 from huggingface_hub.utils import filter_repo_objects
 from huggingface_hub.utils import tqdm as hf_tqdm
 
-ALLOW_PATTERNS = ["*.safetensors", "*.json", "tokenizer*"]
+# Supported MLX-LM loader file set. Note: *.py pulls executable custom code,
+# matching the loader contract.
+ALLOW_PATTERNS = [
+    "*.safetensors",
+    "*.json",
+    "tokenizer*",
+    "*.py",
+    "*.tiktoken",
+    "tiktoken.model",
+    "*.txt",
+    "*.jsonl",
+    "*.jinja",
+]
 _SEARCH_AUTHOR = "mlx-community"
 _SEARCH_LIMIT = 50
 _PROGRESS_MIN_INTERVAL_S = 0.5
@@ -54,6 +67,21 @@ def filtered_download_size(files: Iterable[tuple[str, int]]) -> int:
 def repo_files_with_sizes(api: HubApi, repo_id: str) -> list[tuple[str, int]]:
     info = api.model_info(repo_id, files_metadata=True)
     return [(s.rfilename, s.size or 0) for s in info.siblings or []]
+
+
+@dataclass(frozen=True)
+class RepoSnapshot:
+    revision: str | None
+    files: tuple[tuple[str, int], ...]
+
+
+def repo_snapshot(api: HubApi, repo_id: str) -> RepoSnapshot:
+    info = api.model_info(repo_id, files_metadata=True)
+    sha = getattr(info, "sha", None)
+    revision = sha if isinstance(sha, str) else None
+    siblings = info.siblings or []
+    files = tuple((s.rfilename, s.size or 0) for s in siblings)
+    return RepoSnapshot(revision=revision, files=files)
 
 
 def free_disk_bytes(cache_dir: Path | None = None) -> int | None:
@@ -116,7 +144,7 @@ def _throttled_tqdm(
             ):
                 return super().update(n)
             state["last_flush"] = now
-            on_progress(int(state["disk_bytes"]), int(state["expected"]))
+            on_progress(state["disk_bytes"], state["expected"])
             return super().update(n)
 
         @override
@@ -139,10 +167,13 @@ def download_snapshot(
     cache_dir: str | Path | None = None,
     on_progress: Callable[[int, int], None] | None = None,
     cancel_event: threading.Event | None = None,
+    revision: str | None = None,
 ) -> None:
-    snapshot_download(
-        repo_id,
-        allow_patterns=ALLOW_PATTERNS,
-        tqdm_class=_throttled_tqdm(on_progress, cancel_event),
-        cache_dir=cache_dir,
-    )
+    kwargs: dict[str, object] = {
+        "allow_patterns": ALLOW_PATTERNS,
+        "tqdm_class": _throttled_tqdm(on_progress, cancel_event),
+        "cache_dir": cache_dir,
+    }
+    if revision is not None:
+        kwargs["revision"] = revision
+    snapshot_download(repo_id, **kwargs)  # type: ignore[arg-type]

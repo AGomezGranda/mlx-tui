@@ -3,15 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
-
-
-class SwapState(Enum):  # kept for test compat, graph removed
-    IDLE = "idle"
-    STOPPING = "stopping"
-    STARTING = "starting"
-    WAITING_HEALTH = "waiting-health"
-    FAILED = "failed"
 
 
 @dataclass(frozen=True)

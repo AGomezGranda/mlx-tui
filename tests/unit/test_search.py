@@ -15,12 +15,14 @@ import mlx_tui.search as search_mod
 from mlx_tui.search import (
     ALLOW_PATTERNS,
     CancelledDownload,
+    RepoSnapshot,
     _throttled_tqdm,
     filtered_download_size,
     fits_disk,
     free_disk_bytes,
     list_results,
     repo_files_with_sizes,
+    repo_snapshot,
 )
 
 # ---------------------------------------------------------------------------
@@ -36,9 +38,11 @@ class _StubApi:
         *,
         list_infos: list[Any] | None = None,
         siblings: list[Any] | None = None,
+        sha: str | None = "rev-a",
     ) -> None:
         self.list_infos = list_infos or []
         self.siblings = siblings or []
+        self.sha = sha
         self.captured_list_kwargs: dict[str, object] | None = None
         self.captured_model_info: tuple[str, bool] | None = None
 
@@ -48,7 +52,7 @@ class _StubApi:
 
     def model_info(self, repo_id: str, *, files_metadata: bool):  # type: ignore[no-untyped-def]
         self.captured_model_info = (repo_id, files_metadata)
-        return SimpleNamespace(siblings=self.siblings)
+        return SimpleNamespace(siblings=self.siblings, sha=self.sha)
 
 
 def _siblings_with_sizes(*pairs: tuple[str, int | None]):  # type: ignore[no-untyped-def]
@@ -95,6 +99,31 @@ def test_filtered_download_size_matches_downloader() -> None:
     assert filtered_download_size(nested) == 122
 
 
+def test_filtered_download_size_includes_all_supported_extensions() -> None:
+    supported = [
+        ("model.safetensors", 100),
+        ("config.json", 10),
+        ("tokenizer.json", 20),
+        ("modeling_custom.py", 30),
+        ("o200k_base.tiktoken", 40),
+        ("tiktoken.model", 50),
+        ("vocab.txt", 60),
+        ("metadata.jsonl", 70),
+        ("chat_template.jinja", 80),
+        ("tokenizer.model", 90),
+    ]
+    assert filtered_download_size(supported) == sum(size for _, size in supported)
+    excluded = [
+        ("README.md", 1000),
+        ("weights.gguf", 2000),
+        ("model.bin", 3000),
+    ]
+    assert filtered_download_size(excluded) == 0
+    assert filtered_download_size([*supported, *excluded]) == sum(
+        size for _, size in supported
+    )
+
+
 # ---------------------------------------------------------------------------
 # repo_files_with_sizes
 # ---------------------------------------------------------------------------
@@ -114,6 +143,28 @@ def test_repo_files_with_sizes_maps_siblings() -> None:
 def test_repo_files_with_sizes_empty_siblings() -> None:
     stub = _StubApi(siblings=[])
     assert repo_files_with_sizes(stub, "mlx-community/empty") == []  # type: ignore[arg-type]
+
+
+def test_repo_snapshot_returns_revision_and_files() -> None:
+    stub = _StubApi(
+        siblings=_siblings_with_sizes(("model.safetensors", 100), ("config.json", 50)),
+        sha="rev-a",
+    )
+    snapshot = repo_snapshot(stub, "mlx-community/x")  # type: ignore[arg-type]
+    assert isinstance(snapshot, RepoSnapshot)
+    assert snapshot.revision == "rev-a"
+    assert snapshot.files == (("model.safetensors", 100), ("config.json", 50))
+    assert stub.captured_model_info == ("mlx-community/x", True)
+
+
+def test_repo_snapshot_none_sha_passthrough() -> None:
+    stub = _StubApi(
+        siblings=_siblings_with_sizes(("a.safetensors", 10)),
+        sha=None,
+    )
+    snapshot = repo_snapshot(stub, "mlx-community/x")  # type: ignore[arg-type]
+    assert snapshot.revision is None
+    assert snapshot.files == (("a.safetensors", 10),)
 
 
 # ---------------------------------------------------------------------------
@@ -401,3 +452,27 @@ def test_download_snapshot_pins_patterns_and_plumbs_event(
     with pytest.raises(CancelledDownload):
         inst.update(1)
     inst.close()
+
+
+def test_download_snapshot_forwards_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def recorder(repo_id: str, **kwargs):  # type: ignore[no-untyped-def]
+        captured["repo_id"] = repo_id
+        captured.update(kwargs)
+        return "/tmp/fake"
+
+    monkeypatch.setattr(search_mod, "snapshot_download", recorder)
+
+    search_mod.download_snapshot("org/m", revision="rev-a")
+    assert captured["repo_id"] == "org/m"
+    assert captured["allow_patterns"] is ALLOW_PATTERNS
+    assert captured["revision"] == "rev-a"
+
+    captured.clear()
+    search_mod.download_snapshot("org/m")
+    assert captured["repo_id"] == "org/m"
+    assert captured["allow_patterns"] is ALLOW_PATTERNS
+    assert "revision" not in captured
