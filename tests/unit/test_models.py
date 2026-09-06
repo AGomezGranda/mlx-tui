@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
-from huggingface_hub.utils._cache_manager import (
+from huggingface_hub import (
     CachedFileInfo,
     CachedRepoInfo,
     CachedRevisionInfo,

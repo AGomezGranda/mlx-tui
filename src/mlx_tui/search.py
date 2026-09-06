@@ -169,6 +169,8 @@ def download_snapshot(
     cancel_event: threading.Event | None = None,
     revision: str | None = None,
 ) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise CancelledDownload("cancelled by user")
     kwargs: dict[str, object] = {
         "allow_patterns": ALLOW_PATTERNS,
         "tqdm_class": _throttled_tqdm(on_progress, cancel_event),
@@ -177,3 +179,5 @@ def download_snapshot(
     if revision is not None:
         kwargs["revision"] = revision
     snapshot_download(repo_id, **kwargs)  # type: ignore[arg-type]
+    if cancel_event is not None and cancel_event.is_set():
+        raise CancelledDownload("cancelled by user")

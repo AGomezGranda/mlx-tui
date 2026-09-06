@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import re
+import subprocess
 import time
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from textual.widgets import Input, Static
@@ -18,6 +22,11 @@ _STAMP_RE = re.compile(
     r"(?:▎ )?\d+( \(est\))? in · \d+( \(est\))? out · (?:\d+ prefill tok/s · [\d.]+ decode tok/s|[\d.]+ tok/s) · TTFT [\d.]+s( · cold)?"
 )
 _REPLY = "Hello world this is MLX."
+
+
+def _current_op(app: MlxTuiApp) -> OperationKind:
+    """Fresh-read helper: the checker must not narrow this across mutations."""
+    return app.operations.current
 
 
 async def test_status_green_and_chat_stamp_over_stub_http(harness: AppHarness) -> None:
@@ -47,6 +56,58 @@ async def test_status_green_and_chat_stamp_over_stub_http(harness: AppHarness) -
     assert "cold" not in stamp_line
     stream = harness.app.query_one("#chat-stream", Static)
     assert stream.content == ""
+
+
+async def test_chat_multiline_event_streams_without_malformed_notice(
+    stub_server_factory,  # type: ignore[no-untyped-def]
+) -> None:
+    from mlx_tui.app import MlxTuiApp  # noqa: PLC0415
+    from tests.conftest import AppHarness  # noqa: PLC0415
+
+    server = stub_server_factory("multiline")
+    app = MlxTuiApp(host="127.0.0.1", port=int(server.server_address[1]))
+    async with app.run_test() as pilot:
+        harness = AppHarness(app=app, pilot=pilot, server=server)
+        await harness.app._poll()
+        inp = harness.app.query_one("#chat-input", Input)
+        inp.value = "hi"
+        inp.focus()
+        await harness.pilot.press("enter")
+
+        def stamp_visible(a: MlxTuiApp) -> bool:
+            return any("tok/s" in t for t in harness.log_lines())
+
+        assert await harness.wait_for(stamp_visible), (
+            f"stamp never appeared; log={harness.log_lines()}"
+        )
+        texts = harness.log_lines()
+        assert _REPLY in texts
+        assert not any("malformed" in t for t in texts)
+
+
+async def test_chat_no_space_data_stream_parses(
+    stub_server_factory,  # type: ignore[no-untyped-def]
+) -> None:
+    from mlx_tui.app import MlxTuiApp  # noqa: PLC0415
+    from tests.conftest import AppHarness  # noqa: PLC0415
+
+    server = stub_server_factory("nospace")
+    app = MlxTuiApp(host="127.0.0.1", port=int(server.server_address[1]))
+    async with app.run_test() as pilot:
+        harness = AppHarness(app=app, pilot=pilot, server=server)
+        await harness.app._poll()
+        inp = harness.app.query_one("#chat-input", Input)
+        inp.value = "hi"
+        inp.focus()
+        await harness.pilot.press("enter")
+
+        def stamp_visible(a: MlxTuiApp) -> bool:
+            return any("tok/s" in t for t in harness.log_lines())
+
+        assert await harness.wait_for(stamp_visible), (
+            f"stamp never appeared; log={harness.log_lines()}"
+        )
+        assert _REPLY in harness.log_lines()
 
 
 async def test_chat_payload_carries_effective_model(
@@ -228,7 +289,7 @@ async def test_chat_lease_blocks_swap_and_delete_until_cleanup(
 
     def cleanup_complete(_a: MlxTuiApp) -> bool:
         return (
-            harness.app.operations.current is OperationKind.IDLE
+            _current_op(harness.app) is OperationKind.IDLE
             and not harness.chat_pane().has_live_turn
         )
 
@@ -363,8 +424,10 @@ async def test_chat_renders_markdown(harness: AppHarness) -> None:
 
     harness.app.query_one(TabbedContent).active = "chat"
     await harness.pilot.pause()
-    # Directly invoke completion UI with markdown to avoid stub coupling
+    # Directly invoke completion UI with markdown to avoid stub coupling.
+    # Rendering alone must not commit to conversation history.
     pane = harness.app.query_one(ChatPane)
+    assert pane.messages == []
     pane._complete_turn_ui(
         "# hi\n\n**bold**", "12 in · 6 out · 10.0 tok/s · TTFT 0.10s", False, []
     )
@@ -376,6 +439,7 @@ async def test_chat_renders_markdown(harness: AppHarness) -> None:
     assert any("bold" in line for line in lines)
     # stamp still present and dim style is via Text but line contains tok/s
     assert any("tok/s" in line for line in lines)
+    assert pane.messages == []
     # stream cleared
     assert harness.app.query_one("#chat-stream", Static).content == ""
     # check RichLog contains markdown rendering (fallback substring check already covers)
@@ -389,7 +453,7 @@ async def test_chat_renders_markdown(harness: AppHarness) -> None:
     await harness.pilot.press("enter")
 
     def done(a: MlxTuiApp) -> bool:
-        return len(a.query_one(ChatPane).messages) >= 3
+        return len(a.query_one(ChatPane).messages) >= 2
 
     assert await harness.wait_for(done)
     assert harness.app.query_one("#chat-stream", Static).content == ""
@@ -725,7 +789,6 @@ async def test_prefill_vs_decode_stamp_and_table(harness: AppHarness) -> None:  
 async def test_preset_cycle_drives_params_and_system(  # noqa: PLR0915
     harness: AppHarness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-
     from dataclasses import replace  # noqa: PLC0415
 
     from textual.widgets import Input as _Input  # noqa: PLC0415
@@ -746,25 +809,24 @@ async def test_preset_cycle_drives_params_and_system(  # noqa: PLR0915
     harness.app.config = replace(harness.app.config, max_ctx=32768)
     harness.app.query_one(TabbedContent).active = "chat"
     await harness.pilot.pause()
-    pane = harness.app.query_one(ChatPane)
     # direct action kept: pilot.press for ctrl+p was unreliable in textual 8.2.8; ctrl+n forward is now reliable but direct keeps test stable
     harness.app.action_cycle_preset()
     await harness.pilot.pause()
     assert harness.app.config.max_ctx == 32768
-    assert pane._system_prompt == "You are A"
+    assert harness.app.config.system == "You are A"
     assert harness.app.query_one("#param-temp", _Input).value == "0.2"
     assert any("preset: a" in line for line in harness.app_log_lines())
     harness.app.action_cycle_preset()
     await harness.pilot.pause()
     assert harness.app.config.max_ctx == 32768
-    assert pane._system_prompt == "You are B"
+    assert harness.app.config.system == "You are B"
     assert harness.app.query_one("#param-top-p", _Input).value == "0.5"
     assert harness.app.query_one("#param-max-tokens", _Input).value == "512"
     assert any("preset: b" in line for line in harness.app_log_lines())
     harness.app.action_cycle_preset_back()
     await harness.pilot.pause()
     assert harness.app.config.max_ctx == 32768
-    assert pane._system_prompt == "You are A"
+    assert harness.app.config.system == "You are A"
 
     bindings: dict[str, str] = {}
     for b in harness.app.BINDINGS:
@@ -800,7 +862,7 @@ async def test_config_reload_clears_removed_system_prompt(
     from contextlib import nullcontext  # noqa: PLC0415
     from dataclasses import replace  # noqa: PLC0415
 
-    from mlx_tui.app import config_edit  # noqa: PLC0415
+    import mlx_tui.app as app_mod  # noqa: PLC0415
     from mlx_tui.chat_pane import ChatPane  # noqa: PLC0415
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
@@ -812,16 +874,16 @@ async def test_config_reload_clears_removed_system_prompt(
     pane.apply_config_params(harness.app.config)
     monkeypatch.setattr(harness.app, "suspend", nullcontext)
 
-    def fake_editor(_command: list[str], check: bool) -> None:
+    def fake_editor(_command: list[str], check: bool) -> SimpleNamespace:
         assert check is False
         config_file.write_text("max_tokens = 256\n")
+        return SimpleNamespace(returncode=0)
 
-    monkeypatch.setattr(config_edit.subprocess, "run", fake_editor)
-    config_edit.edit_config(harness.app)
+    monkeypatch.setattr(app_mod.subprocess, "run", fake_editor)
+    harness.app.action_edit_config()
     await harness.pilot.pause()
 
     assert harness.app.config.system is None
-    assert pane._system_prompt == ""
     assert harness.app.query_one("#param-max-tokens", Input).value == "256"
 
     inp = harness.app.query_one("#chat-input", Input)
@@ -922,3 +984,590 @@ async def test_external_restart_replaces_identity(harness: AppHarness) -> None:
     assert harness.app.effective_model() == "mlx-community/v2"
     assert harness.app.server_identity.model_id == "mlx-community/v2"
     assert harness.app.server_identity != first
+
+
+def _install_async_mock(monkeypatch: pytest.MonkeyPatch, handler: object) -> None:
+    from functools import partial  # noqa: PLC0415
+
+    import httpx  # noqa: PLC0415
+
+    transport = httpx.MockTransport(handler)  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        httpx, "AsyncClient", partial(httpx.AsyncClient, transport=transport)
+    )
+
+
+async def test_cancel_before_headers_event_transport(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio  # noqa: PLC0415
+    import time  # noqa: PLC0415
+
+    import httpx  # noqa: PLC0415
+
+    entered = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        entered.set()
+        await asyncio.sleep(30)
+        return httpx.Response(200, content=b"data: [DONE]\n\n")
+
+    _install_async_mock(monkeypatch, handler)
+    monkeypatch.setattr(harness.app, "effective_model", lambda: "test-model")
+    pane = harness.chat_pane()
+    inp = harness.app.query_one("#chat-input", Input)
+    inp.value = "hi before headers"
+    inp.focus()
+    await harness.pilot.press("enter")
+    assert await asyncio.wait_for(entered.wait(), timeout=2)
+    assert pane.has_live_turn
+
+    start = time.monotonic()
+    pane.abort()
+    assert any("cancellation requested" in t for t in harness.log_lines()), (
+        f"log={harness.log_lines()}"
+    )
+
+    def cancelled(a: MlxTuiApp) -> bool:
+        return any("cancelled — request aborted" in t for t in harness.log_lines())
+
+    assert await harness.wait_for(cancelled)
+    assert time.monotonic() - start < 2
+
+    def cleanup(a: MlxTuiApp) -> bool:
+        return (
+            harness.app.operations.current is OperationKind.IDLE
+            and not pane.has_live_turn
+            and not harness.app.query_one("#chat-input", Input).disabled
+        )
+
+    assert await harness.wait_for(cleanup)
+    assert pane.messages == []
+    assert (
+        len([t for t in harness.log_lines() if "cancelled — request aborted" in t]) == 1
+    )
+    assert not any("tok/s" in t for t in harness.log_lines())
+    await asyncio.sleep(0.3)
+    assert (
+        len([t for t in harness.log_lines() if "cancelled — request aborted" in t]) == 1
+    )
+    assert harness.app.query_one("#chat-stream", Static).content == ""
+
+
+async def test_cancel_during_idle_stream_closes(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio  # noqa: PLC0415
+    import time  # noqa: PLC0415
+    from typing import override  # noqa: PLC0415
+
+    import httpx  # noqa: PLC0415
+
+    entered = asyncio.Event()
+    closed = asyncio.Event()
+
+    class _Idle(httpx.AsyncByteStream):
+        async def __aiter__(self):  # type: ignore[no-untyped-def]
+            entered.set()
+            yield b'data: {"choices": [{"delta": {"role": "assistant"}, "finish_reason": null}]}\n\n'
+            await asyncio.sleep(30)
+            yield b"data: [DONE]\n\n"
+
+        @override
+        async def aclose(self) -> None:
+            closed.set()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            stream=_Idle(),
+        )
+
+    _install_async_mock(monkeypatch, handler)
+    monkeypatch.setattr(harness.app, "effective_model", lambda: "test-model")
+    pane = harness.chat_pane()
+    inp = harness.app.query_one("#chat-input", Input)
+    inp.value = "hi idle"
+    inp.focus()
+    await harness.pilot.press("enter")
+    assert await asyncio.wait_for(entered.wait(), timeout=2)
+
+    start = time.monotonic()
+    pane.abort()
+    assert await harness.wait_for(
+        lambda a: any("cancelled — request aborted" in t for t in harness.log_lines())
+    )
+    assert time.monotonic() - start < 2
+    assert await asyncio.wait_for(closed.wait(), timeout=2)
+    assert pane.messages == []
+    assert harness.app.operations.current is OperationKind.IDLE
+    assert not harness.app.query_one("#chat-input", Input).disabled
+
+
+async def test_cancel_after_partial_text_no_commit(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio  # noqa: PLC0415
+    from typing import override  # noqa: PLC0415
+
+    import httpx  # noqa: PLC0415
+
+    from tests.builders import sse_frames  # noqa: PLC0415
+
+    started = asyncio.Event()
+    closed = asyncio.Event()
+    head = sse_frames(deltas=["Hello"], finish=None, done=False)
+
+    class _Partial(httpx.AsyncByteStream):
+        async def __aiter__(self):  # type: ignore[no-untyped-def]
+            started.set()
+            yield head
+            await asyncio.sleep(30)
+            yield b"data: [DONE]\n\n"
+
+        @override
+        async def aclose(self) -> None:
+            closed.set()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            stream=_Partial(),
+        )
+
+    _install_async_mock(monkeypatch, handler)
+    monkeypatch.setattr(harness.app, "effective_model", lambda: "test-model")
+    pane = harness.chat_pane()
+    inp = harness.app.query_one("#chat-input", Input)
+    inp.value = "hi partial"
+    inp.focus()
+    await harness.pilot.press("enter")
+    assert await asyncio.wait_for(started.wait(), timeout=2)
+    pane.abort()
+    assert await harness.wait_for(
+        lambda a: any("cancelled — request aborted" in t for t in harness.log_lines())
+    )
+    assert await asyncio.wait_for(closed.wait(), timeout=2)
+    assert pane.messages == []
+    assert harness.app.operations.current is OperationKind.IDLE
+    assert not harness.app.query_one("#chat-input", Input).disabled
+    assert not any("tok/s" in t for t in harness.log_lines())
+    await asyncio.sleep(0.3)
+    assert (
+        len([t for t in harness.log_lines() if "cancelled — request aborted" in t]) == 1
+    )
+
+
+async def test_cancel_before_task_start_makes_no_request(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import httpx  # noqa: PLC0415
+    from textual.widgets import Input as _Input  # noqa: PLC0415
+
+    called = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200, content=b"data: [DONE]\n\n")
+
+    _install_async_mock(monkeypatch, handler)
+    monkeypatch.setattr(harness.app, "effective_model", lambda: "test-model")
+    pane = harness.chat_pane()
+    assert pane.messages == []
+    inp = harness.app.query_one("#chat-input", _Input)
+    event = _Input.Submitted(inp, "hi pre-start")
+    pane._on_input_submitted(event)  # type: ignore[arg-type]
+    pane.abort()
+    assert await harness.wait_for(
+        lambda a: any("cancelled — request aborted" in t for t in harness.log_lines())
+    )
+    assert await harness.wait_for(
+        lambda a: (
+            harness.app.operations.current is OperationKind.IDLE
+            and not pane.has_live_turn
+        )
+    )
+    assert not called
+    assert pane.messages == []
+    assert (
+        len([t for t in harness.log_lines() if "cancelled — request aborted" in t]) == 1
+    )
+
+
+async def test_repeated_escape_single_outcome(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio  # noqa: PLC0415
+
+    import httpx  # noqa: PLC0415
+
+    entered = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        entered.set()
+        await asyncio.sleep(30)
+        return httpx.Response(200, content=b"data: [DONE]\n\n")
+
+    _install_async_mock(monkeypatch, handler)
+    monkeypatch.setattr(harness.app, "effective_model", lambda: "test-model")
+    pane = harness.chat_pane()
+    inp = harness.app.query_one("#chat-input", Input)
+    inp.value = "hi repeat"
+    inp.focus()
+    await harness.pilot.press("enter")
+    assert await asyncio.wait_for(entered.wait(), timeout=2)
+    pane.abort()
+    pane.abort()
+    pane.abort()
+    assert await harness.wait_for(
+        lambda a: any("cancelled — request aborted" in t for t in harness.log_lines())
+    )
+    assert await harness.wait_for(
+        lambda a: harness.app.operations.current is OperationKind.IDLE
+    )
+    await asyncio.sleep(0.3)
+    assert (
+        len([t for t in harness.log_lines() if "cancellation requested" in t]) == 1
+    ), f"log={harness.log_lines()}"
+    assert (
+        len([t for t in harness.log_lines() if "cancelled — request aborted" in t]) == 1
+    )
+
+
+async def test_failed_prompt_excluded_from_next_payload(harness: AppHarness) -> None:
+    harness.server.mode = "ok"
+    inp = harness.app.query_one("#chat-input", Input)
+    inp.value = "first good"
+    inp.focus()
+    await harness.pilot.press("enter")
+
+    def two_messages(a: MlxTuiApp) -> bool:
+        return len(harness.chat_pane().messages) == 2
+
+    assert await harness.wait_for(two_messages)
+    assert harness.chat_pane().messages[0] == {"role": "user", "content": "first good"}
+
+    harness.server.mode = "error500"
+    harness.server.requests.clear()
+    inp.value = "will fail"
+    inp.focus()
+    await harness.pilot.press("enter")
+
+    def failed(a: MlxTuiApp) -> bool:
+        return any("server error" in t for t in harness.log_lines())
+
+    assert await harness.wait_for(failed)
+    assert await harness.wait_for(
+        lambda a: not harness.app.query_one("#chat-input", Input).disabled
+    )
+    assert len(harness.chat_pane().messages) == 2
+    assert harness.chat_pane().messages[0]["content"] == "first good"
+
+    harness.server.mode = "ok"
+    harness.server.requests.clear()
+    inp.value = "second good"
+    inp.focus()
+    await harness.pilot.press("enter")
+    assert await harness.wait_for(lambda a: len(harness.chat_pane().messages) == 4)
+    posts = [r for r in harness.server.requests if "messages" in r]
+    assert posts
+    sent = posts[-1]["messages"]
+    assert isinstance(sent, list)
+    texts = [m.get("content") for m in sent if isinstance(m, dict)]
+    assert "will fail" not in texts
+    assert "first good" in texts
+    assert "second good" in texts
+
+
+async def test_cancelled_prompt_excluded_retains_prior(harness: AppHarness) -> None:
+    harness.server.mode = "ok"
+    inp = harness.app.query_one("#chat-input", Input)
+    inp.value = "prior kept"
+    inp.focus()
+    await harness.pilot.press("enter")
+    assert await harness.wait_for(lambda a: len(harness.chat_pane().messages) == 2)
+
+    harness.server.mode = "slow"
+    await harness.app._poll()
+    harness.server.requests.clear()
+    inp.value = "to cancel"
+    inp.focus()
+    await harness.pilot.press("enter")
+    assert await harness.wait_for(lambda a: harness.chat_pane().has_live_turn)
+    await harness.pilot.press("escape")
+    assert await harness.wait_for(
+        lambda a: any("cancelled — request aborted" in t for t in harness.log_lines())
+    )
+    assert await harness.wait_for(
+        lambda a: harness.app.operations.current is OperationKind.IDLE
+    )
+    assert len(harness.chat_pane().messages) == 2
+    assert harness.chat_pane().messages[0]["content"] == "prior kept"
+
+    harness.server.mode = "ok"
+    harness.server.requests.clear()
+    inp.value = "after cancel"
+    inp.focus()
+    await harness.pilot.press("enter")
+    assert await harness.wait_for(lambda a: len(harness.chat_pane().messages) == 4)
+    posts = [r for r in harness.server.requests if "messages" in r]
+    assert posts
+    sent = posts[-1]["messages"]
+    assert isinstance(sent, list)
+    texts = [m.get("content") for m in sent if isinstance(m, dict)]
+    assert "to cancel" not in texts
+    assert "prior kept" in texts
+    assert "after cancel" in texts
+
+
+def _poll_failed_lines(harness: AppHarness) -> list[str]:
+    return [t for t in harness.app_log_lines() if "poll failed" in t]
+
+
+async def test_log_error_once_dedups_until_cleared(harness: AppHarness) -> None:
+    app = harness.app
+    app.log_error_once("poll", RuntimeError("boom"))
+    app.log_error_once("poll", RuntimeError("boom"))
+    assert len(_poll_failed_lines(harness)) == 1
+    app.log_error_once("poll", ValueError("other"))
+    assert len(_poll_failed_lines(harness)) == 2
+    app.clear_error("poll")
+    app.log_error_once("poll", RuntimeError("boom"))
+    assert len(_poll_failed_lines(harness)) == 3
+    assert "RuntimeError: boom" in _poll_failed_lines(harness)[-1]
+
+
+async def test_poll_connection_failure_stays_red_with_single_diagnostic(
+    harness: AppHarness,
+) -> None:
+    harness.server.shutdown()
+    harness.server.server_close()
+    for _ in range(3):
+        await harness.app._poll()
+    assert harness.app.status_state == "red"
+    assert harness.app.effective_model() is None
+    assert harness.app.server_identity.model_id is None
+    assert harness.app._poll_in_flight is False
+    lines = _poll_failed_lines(harness)
+    assert len(lines) == 1, harness.app_log_lines()
+    assert "ConnectError" in lines[0]
+    assert harness.app.operations.current is OperationKind.IDLE
+    assert not harness.app.query_one("#chat-input", Input).disabled
+
+
+async def test_poll_unexpected_fault_keeps_state_and_logs_once(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await harness.app._poll()
+    assert harness.app.status_state == "green"
+    assert harness.app.server_identity.model_id == "mlx-community/stub-test"
+    orig_probe = MlxTuiApp._fetch_probe
+
+    async def boom_probe(self: MlxTuiApp):  # type: ignore[no-untyped-def]
+        raise RuntimeError("boom")
+
+    async def other_probe(self: MlxTuiApp):  # type: ignore[no-untyped-def]
+        raise ValueError("other")
+
+    monkeypatch.setattr(MlxTuiApp, "_fetch_probe", boom_probe)
+    await harness.app._poll()
+    assert harness.app.status_state == "green"
+    assert harness.app.server_identity.model_id == "mlx-community/stub-test"
+    assert harness.app._poll_in_flight is False
+    assert len(_poll_failed_lines(harness)) == 1
+    assert "RuntimeError: boom" in _poll_failed_lines(harness)[0]
+
+    # Identical repeats stay silent; a changed error logs immediately.
+    await harness.app._poll()
+    assert len(_poll_failed_lines(harness)) == 1
+    monkeypatch.setattr(MlxTuiApp, "_fetch_probe", other_probe)
+    await harness.app._poll()
+    assert len(_poll_failed_lines(harness)) == 2
+    assert harness.app.status_state == "green"
+
+    # Recovery clears the source so a recurrence becomes visible again.
+    monkeypatch.setattr(MlxTuiApp, "_fetch_probe", orig_probe)
+    await harness.app._poll()
+    assert harness.app.status_state == "green"
+    monkeypatch.setattr(MlxTuiApp, "_fetch_probe", boom_probe)
+    await harness.app._poll()
+    assert len(_poll_failed_lines(harness)) == 3
+
+    assert harness.app.operations.current is OperationKind.IDLE
+    assert not harness.app.query_one("#chat-input", Input).disabled
+
+
+async def test_poll_malformed_json_is_amber_with_single_diagnostic(
+    harness: AppHarness,
+) -> None:
+    harness.server.mode = "html"
+    await harness.app._poll()
+    assert harness.app.status_state == "amber"
+    assert harness.app.effective_model() is None
+    await harness.app._poll()
+    assert len(_poll_failed_lines(harness)) == 1, harness.app_log_lines()
+
+    harness.server.mode = "ok"
+    await harness.app._poll()
+    assert harness.app.status_state == "green"
+    harness.server.mode = "html"
+    await harness.app._poll()
+    assert harness.app.status_state == "amber"
+    assert len(_poll_failed_lines(harness)) == 2
+
+
+@contextmanager
+def _stub_suspend(entered: list[bool], exited: list[bool]) -> Generator[None]:
+    entered.append(True)
+    try:
+        yield
+    finally:
+        exited.append(True)
+
+
+def _config_model(app: MlxTuiApp) -> str | None:
+    """Fresh-read helper: the checker must not narrow this across mutations."""
+    return app.config.model
+
+
+def _stub_editor(
+    harness: AppHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    returncode: int = 0,
+    raise_oserror: bool = False,
+) -> tuple[Path, dict[str, object], list[bool], list[bool]]:
+    path = tmp_path / "mlx-tui.toml"
+    monkeypatch.setattr("mlx_tui.app.config_path", lambda: path)
+    monkeypatch.setenv("EDITOR", "fake-editor")
+    ran: dict[str, object] = {}
+    entered: list[bool] = []
+    exited: list[bool] = []
+
+    def fake_run(argv: object, **kwargs: object) -> SimpleNamespace:
+        ran["argv"] = argv
+        ran["kwargs"] = kwargs
+        ran["suspended_during"] = (len(entered), len(exited))
+        if raise_oserror:
+            raise OSError("no such editor")
+        return SimpleNamespace(returncode=returncode)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(harness.app, "suspend", lambda: _stub_suspend(entered, exited))
+    return path, ran, entered, exited
+
+
+async def test_edit_config_missing_file_creates_template_and_reloads(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path, _ran, entered, exited = _stub_editor(harness, monkeypatch, tmp_path)
+    assert not path.exists()
+    harness.app.action_edit_config()
+    await harness.pilot.pause()
+    assert path.exists()
+    assert "config reloaded" in harness.app_log_lines()
+    assert entered == [True] and exited == [True]
+
+
+async def test_edit_config_editor_argv_with_spaces(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path, ran, _entered, _exited = _stub_editor(harness, monkeypatch, tmp_path)
+    path.write_text('model = "a/b"\n')
+    monkeypatch.setenv("EDITOR", "code --wait --new-window")
+    harness.app.action_edit_config()
+    await harness.pilot.pause()
+    assert ran["argv"] == ["code", "--wait", "--new-window", str(path)]
+    assert harness.app.config.model == "a/b"
+    assert "config reloaded" in harness.app_log_lines()
+
+
+async def test_edit_config_suspends_around_editor(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _path, ran, entered, exited = _stub_editor(harness, monkeypatch, tmp_path)
+    harness.app.action_edit_config()
+    await harness.pilot.pause()
+    assert entered == [True] and exited == [True]
+    assert ran["suspended_during"] == (1, 0)
+
+
+async def test_edit_config_editor_oserror_keeps_config(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path, _ran, _entered, _exited = _stub_editor(
+        harness, monkeypatch, tmp_path, raise_oserror=True
+    )
+    path.write_text('model = "a/b"\n')
+    harness.app.action_edit_config()
+    await harness.pilot.pause()
+    lines = harness.app_log_lines()
+    assert any("config edit failed" in t and "OSError" in t for t in lines), lines
+    assert "config reloaded" not in lines
+    assert harness.app.config.model is None
+
+
+async def test_edit_config_editor_nonzero_keeps_config(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path, _ran, _entered, _exited = _stub_editor(
+        harness, monkeypatch, tmp_path, returncode=3
+    )
+    path.write_text('model = "a/b"\n')
+    harness.app.action_edit_config()
+    await harness.pilot.pause()
+    lines = harness.app_log_lines()
+    assert any("config edit failed" in t and "exited 3" in t for t in lines), lines
+    assert "config reloaded" not in lines
+    assert harness.app.config.model is None
+
+
+async def test_edit_config_malformed_toml_preserves_config(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path, _ran, _entered, _exited = _stub_editor(harness, monkeypatch, tmp_path)
+    path.write_text('model = "keep/me"\n')
+    harness.app.action_edit_config()
+    await harness.pilot.pause()
+    assert harness.app.config.model == "keep/me"
+    path.write_text("<<<")
+    harness.app.action_edit_config()
+    await harness.pilot.pause()
+    assert harness.app.config.model == "keep/me"
+    assert any("config kept" in t for t in harness.app_log_lines())
+
+
+async def test_edit_config_cleared_values_apply_and_presets_reset(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path, _ran, _entered, _exited = _stub_editor(harness, monkeypatch, tmp_path)
+    path.write_text('model = "a/b"\nport = 9001\n')
+    harness.app.action_edit_config()
+    await harness.pilot.pause()
+    assert harness.app.config.model == "a/b"
+    assert harness.app.config.port == 9001
+    harness.app.presets = []
+    harness.app.preset_idx = 3
+    path.write_text("port = 9002\n")
+    harness.app.action_edit_config()
+    await harness.pilot.pause()
+    assert _config_model(harness.app) is None
+    assert harness.app.config.port == 9002
+    assert harness.app.preset_idx == -1
+
+
+async def test_edit_config_host_port_change_notifies_restart(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path, _ran, _entered, _exited = _stub_editor(harness, monkeypatch, tmp_path)
+    path.write_text('host = "0.0.0.0"\nport = 9001\n')
+    harness.app.action_edit_config()
+    await harness.pilot.pause()
+    assert harness.app.config.host == "0.0.0.0"
+    assert harness.app.config.port == 9001
+    assert harness.app.host == "127.0.0.1"
+    assert any("restart mlx-tui" in t for t in harness.app_log_lines())

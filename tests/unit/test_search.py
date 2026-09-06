@@ -476,3 +476,48 @@ def test_download_snapshot_forwards_revision(
     assert captured["repo_id"] == "org/m"
     assert captured["allow_patterns"] is ALLOW_PATTERNS
     assert "revision" not in captured
+
+
+def test_download_snapshot_cancel_before_start_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = False
+
+    def recorder(repo_id: str, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal called
+        called = True
+        return "/tmp/fake"
+
+    monkeypatch.setattr(search_mod, "snapshot_download", recorder)
+    ev = threading.Event()
+    ev.set()
+    with pytest.raises(CancelledDownload):
+        search_mod.download_snapshot("org/m", cancel_event=ev)
+    assert not called
+
+
+def test_download_snapshot_cancel_at_return_wins_over_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ev = threading.Event()
+
+    def recorder(repo_id: str, **kwargs):  # type: ignore[no-untyped-def]
+        ev.set()
+        return "/tmp/fake"
+
+    monkeypatch.setattr(search_mod, "snapshot_download", recorder)
+    with pytest.raises(CancelledDownload):
+        search_mod.download_snapshot("org/m", cancel_event=ev)
+
+
+def test_download_snapshot_cached_no_progress_cancel_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def recorder(repo_id: str, **kwargs):  # type: ignore[no-untyped-def]
+        return "/tmp/cached"
+
+    monkeypatch.setattr(search_mod, "snapshot_download", recorder)
+    ev = threading.Event()
+    ev.set()
+    with pytest.raises(CancelledDownload):
+        search_mod.download_snapshot("org/m", cancel_event=ev, revision="rev-a")

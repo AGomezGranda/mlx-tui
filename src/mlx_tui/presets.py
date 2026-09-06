@@ -22,21 +22,6 @@ def presets_path() -> Path:
     return config_path().parent / "presets.toml"
 
 
-PRESETS_TEMPLATE = """# mlx-tui presets — flat [[preset]] list, ctrl+n forward, ctrl+o back
-# [[preset]]
-# name = "default"
-# system = "You are helpful."
-# temperature = 0.7
-# top_p = 1.0
-# max_tokens = 1024
-"""
-
-
-def write_template(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(PRESETS_TEMPLATE)
-
-
 class PresetParseError(Exception):
     """Raised by :func:`parse_presets` when the file is unreadable or invalid."""
 

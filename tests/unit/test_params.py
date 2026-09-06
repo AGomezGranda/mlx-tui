@@ -1,62 +1,40 @@
-"""Headless tests for the ChatPane configuration bridge."""
+"""Mounted tests for the ChatPane configuration bridge."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from textual.widgets import Input
 
-from mlx_tui.chat_pane import params
 from mlx_tui.config import AppConfig
+from tests.conftest import AppHarness
 
 
-@dataclass
-class _Input:
-    value: str = ""
-
-
-class _Pane:
-    def __init__(self) -> None:
-        self.inputs = {
-            "#param-temp": _Input("old temp"),
-            "#param-top-p": _Input("old top-p"),
-            "#param-max-tokens": _Input("old max"),
-        }
-        self._system_prompt = "old system"
-
-    def query_one(self, selector: str, _widget_type: object) -> _Input:
-        return self.inputs[selector]
-
-
-def test_apply_config_params_writes_full_config() -> None:
-    pane = _Pane()
-
-    params.apply_config_params(
-        pane,  # type: ignore[arg-type]
+async def test_apply_config_params_writes_full_config(harness: AppHarness) -> None:
+    pane = harness.chat_pane()
+    pane.apply_config_params(
         AppConfig(temperature=0.2, top_p=0.6, max_tokens=512, system="Be concise."),
     )
+    await harness.pilot.pause()
 
-    assert pane.inputs["#param-temp"].value == "0.2"
-    assert pane.inputs["#param-top-p"].value == "0.6"
-    assert pane.inputs["#param-max-tokens"].value == "512"
-    assert pane._system_prompt == "Be concise."
-
-
-def test_apply_config_params_clears_optional_values() -> None:
-    pane = _Pane()
-
-    params.apply_config_params(pane, AppConfig())  # type: ignore[arg-type]
-
-    assert pane.inputs["#param-temp"].value == "0.7"
-    assert pane.inputs["#param-top-p"].value == "1.0"
-    assert pane.inputs["#param-max-tokens"].value == "1024"
-    assert pane._system_prompt == ""
+    assert harness.app.query_one("#param-temp", Input).value == "0.2"
+    assert harness.app.query_one("#param-top-p", Input).value == "0.6"
+    assert harness.app.query_one("#param-max-tokens", Input).value == "512"
 
 
-def test_apply_config_params_uses_parser_defaults() -> None:
-    pane = _Pane()
+async def test_apply_config_params_clears_optional_values(harness: AppHarness) -> None:
+    pane = harness.chat_pane()
+    pane.apply_config_params(AppConfig())
 
-    params.apply_config_params(
-        pane,  # type: ignore[arg-type]
+    await harness.pilot.pause()
+    assert harness.app.query_one("#param-temp", Input).value == "0.7"
+    assert harness.app.query_one("#param-top-p", Input).value == "1.0"
+    assert harness.app.query_one("#param-max-tokens", Input).value == "1024"
+
+
+async def test_apply_config_params_uses_parser_defaults(harness: AppHarness) -> None:
+    pane = harness.chat_pane()
+    pane.apply_config_params(
         AppConfig(temperature=None, top_p=None, max_tokens=None),
     )
+    await harness.pilot.pause()
 
-    assert params.parse_params(pane) == (0.7, 1.0, 1024)  # type: ignore[arg-type]
+    assert pane._parse_params() == (0.7, 1.0, 1024)

@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "mlx tui"
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE"]
 authors = [{name = "Alvaro Gomez", email = "alvarogomezgranda@gmail.com"}]
 requires-python = ">=3.13"
 dependencies = [
@@ -11,6 +12,7 @@ dependencies = [
     "huggingface_hub>=1.28",
     "psutil>=7.0",
     "textual>=8.2.8",
+    "rich>=15.0.0",
 ]
 
 [build-system]
@@ -47,6 +49,7 @@ dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4",
     "ruff>=0.16.4",
+    "types-psutil>=7.0",
 ]
 
 [tool.pytest.ini_options]

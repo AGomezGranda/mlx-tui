@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import time
 from collections.abc import Callable
@@ -20,26 +21,112 @@ MODELS_URL = "http://stub/v1/models"
 @pytest.mark.parametrize(
     ("start_cmd", "model_id", "expected"),
     [
-        ("{model} --port 8080", "org/m-4bit", "org/m-4bit --port 8080"),
-        ("{model}", None, ""),
+        ("{model} --port 8080", "org/m-4bit", ["org/m-4bit", "--port", "8080"]),
         (
             "mlx_lm.server --port 8080",
             "org/m",
-            "mlx_lm.server --port 8080 --model org/m",
+            ["mlx_lm.server", "--port", "8080", "--model", "org/m"],
         ),
         (
             "mlx_lm.server --port 8080",
             "or g/m",
-            "mlx_lm.server --port 8080 --model 'or g/m'",
+            ["mlx_lm.server", "--port", "8080", "--model", "or g/m"],
         ),
-        ("s --model x", "org/m", "s --model x"),
-        ("s", None, "s"),
+        (
+            "s --model x",
+            "org/m",
+            ["s", "--model", "org/m"],
+        ),
+        (
+            "s --model=x",
+            "org/m",
+            ["s", "--model=org/m"],
+        ),
+        (
+            "s --model x --model y",
+            "org/m",
+            ["s", "--model", "org/m"],
+        ),
+        (
+            "s --model=x --model=y",
+            "org/m",
+            ["s", "--model=org/m"],
+        ),
+        (
+            "s --model x --model=y",
+            "org/m",
+            ["s", "--model", "org/m"],
+        ),
+        (
+            "s --model-path p",
+            "org/m",
+            ["s", "--model-path", "p", "--model", "org/m"],
+        ),
+        ("s --model x", None, ["s", "--model", "x"]),
+        ("s --model=x", None, ["s", "--model=x"]),
+        ("s", None, ["s"]),
+        (
+            "prog --model {model}",
+            "org/m",
+            ["prog", "--model", "org/m"],
+        ),
+        (
+            "prog --model={model}",
+            "org/m",
+            ["prog", "--model=org/m"],
+        ),
     ],
 )
 def test_build_start_command(
-    start_cmd: str, model_id: str | None, expected: str
+    start_cmd: str, model_id: str | None, expected: list[str]
 ) -> None:
     assert build_start_command(start_cmd, model_id) == expected
+
+
+def test_build_start_command_spaces_stay_literal() -> None:
+    assert build_start_command("prog --port 8080", "or g/m; rm") == [
+        "prog",
+        "--port",
+        "8080",
+        "--model",
+        "or g/m; rm",
+    ]
+    assert build_start_command("prog {model}", "a; rm -rf") == ["prog", "a; rm -rf"]
+    assert build_start_command("prog {model}", "$(rm -rf)") == ["prog", "$(rm -rf)"]
+
+
+def test_build_start_command_semicolon_is_literal_data() -> None:
+    argv = build_start_command("prog --port 8080; rm -rf", "m")
+    assert argv[0] == "prog"
+    assert "rm" in argv
+    # No shell splitting: the semicolon stays attached as argument data.
+    assert any(";" in arg for arg in argv)
+
+
+@pytest.mark.parametrize(
+    "start_cmd",
+    ["", "   ", "prog --model", "--model"],
+)
+def test_build_start_command_rejects_empty_and_dangling(start_cmd: str) -> None:
+    with pytest.raises(ValueError):
+        build_start_command(start_cmd, "org/m")
+
+
+def test_build_start_command_rejects_dangling_without_target() -> None:
+    with pytest.raises(ValueError):
+        build_start_command("prog --model", None)
+
+
+def test_build_start_command_rejects_placeholder_without_target() -> None:
+    with pytest.raises(ValueError):
+        build_start_command("{model}", None)
+    with pytest.raises(ValueError):
+        build_start_command("prog {model}", None)
+
+
+def test_build_start_command_rejects_malformed_quoting() -> None:
+    with pytest.raises(ValueError):
+        build_start_command('prog "unterminated', "m")
 
 
 def _green_body() -> bytes:
@@ -62,9 +149,112 @@ def test_run_command_streams_merged_output() -> None:
 
 
 def test_run_command_failing_exit_code_does_not_raise() -> None:
-    rc = serverctl.run_command("exit 3", on_line=lambda _line: None)
+    rc = serverctl.run_command(
+        [sys.executable, "-c", "raise SystemExit(3)"],
+        on_line=lambda _line: None,
+    )
 
     assert rc == 3
+
+
+def test_run_command_shell_mode_explicit() -> None:
+    rc = serverctl.run_command("exit 3", on_line=lambda _line: None, shell=True)
+
+    assert rc == 3
+
+
+def test_run_command_argv_with_spaces_and_shell_syntax_literal() -> None:
+    lines: list[str] = []
+    rc = serverctl.run_command(
+        [sys.executable, "-c", "print('a; $(echo hi)')"],
+        on_line=lines.append,
+    )
+
+    assert rc == 0
+    assert lines == ["a; $(echo hi)"]
+
+
+def test_run_command_missing_executable_raises() -> None:
+    with pytest.raises((FileNotFoundError, OSError)):
+        serverctl.run_command(
+            ["definitely-missing-mlx-tui-prog-xyz"],
+            on_line=lambda _line: None,
+        )
+
+
+def test_run_command_rejects_empty() -> None:
+    with pytest.raises(ValueError):
+        serverctl.run_command("", on_line=lambda _line: None)
+    with pytest.raises(ValueError):
+        serverctl.run_command([], on_line=lambda _line: None)
+
+
+def test_run_command_shell_env_handoff() -> None:
+    lines: list[str] = []
+    rc = serverctl.run_command(
+        'echo "$MLX_TUI_MODEL"',
+        on_line=lines.append,
+        shell=True,
+        env={"MLX_TUI_MODEL": "org/m", "PATH": "/usr/bin:/bin"},
+    )
+
+    assert rc == 0
+    assert lines == ["org/m"]
+
+
+def test_run_command_timeout_kills_process_group() -> None:
+    with pytest.raises(subprocess.TimeoutExpired):
+        serverctl.run_command(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            on_line=lambda _line: None,
+            timeout_s=0.2,
+        )
+
+
+def test_run_command_tolerates_callback_failure() -> None:
+    def bad(_line: str) -> None:
+        raise RuntimeError("callback boom")
+
+    rc = serverctl.run_command(
+        [sys.executable, "-c", "print('hi')"],
+        on_line=bad,
+    )
+
+    assert rc == 0
+
+
+def test_terminate_failed_process_handles_exited_and_none() -> None:
+    serverctl._terminate_failed_process(None)
+    proc = serverctl.spawn_command(
+        [sys.executable, "-c", "pass"],
+        on_line=lambda _line: None,
+    )
+    proc.wait(timeout=5)
+    serverctl._terminate_failed_process(proc)
+
+
+def test_terminate_failed_process_kills_sleeping_child() -> None:
+    proc = serverctl.spawn_command(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        on_line=lambda _line: None,
+    )
+    serverctl._terminate_failed_process(proc)
+    assert proc.poll() is not None
+
+
+def test_terminate_failed_process_cleans_grandchild() -> None:
+    grandchild_code = (
+        "import subprocess, sys, time; "
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+        "time.sleep(30)"
+    )
+    proc = serverctl.spawn_command(
+        [sys.executable, "-c", grandchild_code],
+        on_line=lambda _line: None,
+    )
+    time.sleep(0.5)
+    serverctl._terminate_failed_process(proc)
+    assert proc.poll() is not None
 
 
 def test_spawn_command_returns_before_exit_and_streams() -> None:
@@ -285,6 +475,25 @@ def test_wait_healthy_wrong_model_then_right(
     assert probe is not None
     assert probe.model_id == "m"
     assert calls >= 3
+
+
+def test_wait_healthy_catalog_verifies_target_with_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": [{"id": "a"}, {"id": "b"}]})
+        assert str(request.url) == "http://stub/v1/chat/completions"
+        assert json.loads(request.read())["model"] == "b"
+        return httpx.Response(200, json={"model": "b", "choices": [{"message": {}}]})
+
+    install_transport(monkeypatch, handler)
+    probe = serverctl.wait_healthy(MODELS_URL, target_model="b", timeout_s=5)
+    assert probe is not None and probe.model_id == "b"
+    assert len(requests) == 2
 
 
 def test_wait_healthy_times_out_when_always_red(

@@ -5,9 +5,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from huggingface_hub import scan_cache_dir
-from huggingface_hub.errors import CacheNotFound
-from huggingface_hub.utils._cache_manager import CachedRepoInfo, HFCacheInfo
+from huggingface_hub import (
+    CachedRepoInfo,
+    CacheNotFound,
+    HFCacheInfo,
+    scan_cache_dir,
+)
 
 
 @dataclass(frozen=True)
@@ -74,8 +77,12 @@ def collect_rows(info: HFCacheInfo, avail_gib: float | None) -> list[ModelRow]:
         for r in info.repos
         if _is_mlx_model(r)
     ]
-    rows.sort(key=lambda r: (-r.size_on_disk, r.repo_id))  # pyrefly: ignore[implicit-any-lambda]
+    rows.sort(key=_row_sort_key)
     return rows
+
+
+def _row_sort_key(row: ModelRow) -> tuple[int, str]:
+    return (-row.size_on_disk, row.repo_id)
 
 
 def scan_models(avail_gib: float | None) -> list[ModelRow]:

@@ -21,6 +21,7 @@ class ProcessIdentity:
 
 
 _cached_identity: ProcessIdentity | None = None
+_cached_endpoint: tuple[str, int] | None = None
 _net_denied: bool = False
 
 
@@ -90,6 +91,21 @@ def _fetch_listening_pids(port: int) -> set[int] | None:
     return _listening_pids(port, conns)
 
 
+def _process_listening_pids(port: int) -> set[int]:
+    """macOS permits inspecting our servers even when a global scan is denied."""
+    pids: set[int] = set()
+    for proc in psutil.process_iter():
+        try:
+            if _matches_server_tokens(proc.cmdline()) and any(
+                _conn_status(conn) == "LISTEN" and _conn_port(conn) == port
+                for conn in proc.net_connections(kind="tcp")
+            ):
+                pids.add(proc.pid)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    return pids
+
+
 def find_server_process(
     host: str, port: int, pidfile: str | None = None
 ) -> ProcessIdentity | None:
@@ -98,9 +114,12 @@ def find_server_process(
     Returns None for non-loopback hosts, missing permissions, stale/recycled
     PIDs, and unmatched listeners.
     """
-    global _cached_identity  # noqa: PLW0603
+    global _cached_identity, _cached_endpoint  # noqa: PLW0603
     if host not in LOOPBACK_HOSTS:
         return None
+    if _cached_endpoint != (host, port):
+        _cached_identity = None
+    _cached_endpoint = (host, port)
     if _cached_identity is not None:
         try:
             proc = psutil.Process(_cached_identity.pid)
@@ -114,19 +133,15 @@ def find_server_process(
             ):
                 return _cached_identity
             _cached_identity = None
-    if pidfile is not None:
-        pid = _pid_from_file(pidfile)
-        if pid is not None:
-            ident = _validated_identity(pid)
-            if ident is not None:
-                listening = _fetch_listening_pids(port)
-                if listening is not None and pid in listening:
-                    _cached_identity = ident
-                    return ident
     listening = _fetch_listening_pids(port)
     if listening is None:
-        return None
-    for pid in sorted(listening):
+        listening = _process_listening_pids(port)
+    preferred_pid = _pid_from_file(pidfile) if pidfile is not None else None
+    candidates = sorted(listening)
+    if preferred_pid is not None and preferred_pid in listening:
+        candidates.remove(preferred_pid)
+        candidates.insert(0, preferred_pid)
+    for pid in candidates:
         ident = _validated_identity(pid)
         if ident is not None:
             _cached_identity = ident

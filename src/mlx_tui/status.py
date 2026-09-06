@@ -15,6 +15,7 @@ class MemorySnapshot(NamedTuple):
 class ServerProbe:
     state: str
     model_id: str | None
+    available_models: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -34,18 +35,22 @@ def probe_from_response(status_code: int, body: object) -> ServerProbe:
 
     green ⇔ 200 AND body parses to a dict whose ``data`` is a non-empty
     list; every other complete HTTP response is amber. The model is the
-    first non-empty string ``id`` in ``data`` when green, else None.
+    sole valid model ID when unambiguous. Multiple IDs are a catalog, not
+    evidence that its first entry is loaded.
     """
     data = body.get("data") if isinstance(body, dict) else None
     if status_code == _HTTP_OK and isinstance(data, list) and len(data) > 0:
-        model_id: str | None = None
+        model_ids: list[str] = []
         for entry in data:
             if isinstance(entry, dict):
                 mid = entry.get("id")
                 if isinstance(mid, str) and mid:
-                    model_id = mid
-                    break
-        return ServerProbe(state="green", model_id=model_id)
+                    model_ids.append(mid)
+        return ServerProbe(
+            state="green",
+            model_id=model_ids[0] if len(model_ids) == 1 else None,
+            available_models=tuple(model_ids),
+        )
     return ServerProbe(state="amber", model_id=None)
 
 

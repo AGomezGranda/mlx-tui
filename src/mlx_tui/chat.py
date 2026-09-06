@@ -11,9 +11,9 @@ import httpx
 
 from mlx_tui.sse import (
     TokenAccounting,
+    aiter_sse_data,
     delta_content_from_chunk,
     finish_reason_from_chunk,
-    iter_sse_data,
     token_accounting,
     usage_from_chunk,
 )
@@ -49,14 +49,13 @@ class TurnResult:
     skipped_frames: int = 0
 
 
-def stream_turn(  # noqa: PLR0913
+async def stream_turn(  # noqa: PLR0913
     url: str,
     payload: dict[str, object],
     *,
     prompt_estimate: int,
     on_flush: Callable[[str], None],
     flush_interval: float = _FLUSH_INTERVAL_S,
-    on_active: Callable[[httpx.Response | None], None] | None = None,
 ) -> TurnResult:
     t_send = time.perf_counter()
     t_first_text: float | None = None
@@ -66,16 +65,14 @@ def stream_turn(  # noqa: PLR0913
     finish_reason: str | None = None
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
-    with httpx.Client(
+    async with httpx.AsyncClient(
         timeout=httpx.Timeout(connect=5.0, read=300.0, write=5.0, pool=5.0)
     ) as client:
-        with client.stream("POST", url, json=payload) as response:
-            if on_active is not None:
-                on_active(response)
+        async with client.stream("POST", url, json=payload) as response:
             if response.is_error:
-                response.read()
+                await response.aread()
                 response.raise_for_status()
-            for data in iter_sse_data(response.iter_lines()):
+            async for data in aiter_sse_data(response.aiter_lines()):
                 try:
                     chunk = json.loads(data)
                 except ValueError:
@@ -98,8 +95,6 @@ def stream_turn(  # noqa: PLR0913
                     if now - last_flush >= flush_interval:
                         last_flush = now
                         on_flush("".join(parts))
-            if on_active is not None:
-                on_active(None)
     now = time.perf_counter()
     ttft = (t_first_text - t_send) if t_first_text is not None else now - t_send
     elapsed = (now - t_first_text) if t_first_text is not None else 0.0

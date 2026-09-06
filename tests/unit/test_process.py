@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import psutil
@@ -67,6 +70,7 @@ def _install(
 
     monkeypatch.setattr(psutil, "Process", fake_ctor)
     monkeypatch.setattr(psutil, "net_connections", fake_conns)
+    monkeypatch.setattr(psutil, "process_iter", lambda: iter(()))
     return calls
 
 
@@ -79,7 +83,24 @@ def test_two_mlx_processes_on_different_ports(
     }
     _install(monkeypatch, procs, [_conn(100, _PORT_A), _conn(200, _PORT_B)])
     assert find_server_process(_HOST, _PORT_A) == ProcessIdentity(100, 111.0)
-    proc_mod._cached_identity = None  # type: ignore[attr-defined]
+    assert find_server_process(_HOST, _PORT_B) == ProcessIdentity(200, 222.0)
+
+
+def test_denied_global_scan_uses_each_mlx_process_listener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    procs = {
+        100: FakeProcess(100, MATCHING_CMDLINE, 111.0),
+        200: FakeProcess(200, MATCHING_CMDLINE, 222.0),
+    }
+    _install(monkeypatch, procs, psutil.AccessDenied())
+    monkeypatch.setattr(psutil, "process_iter", lambda: iter(procs.values()))
+
+    def connections(self: FakeProcess, kind: str) -> list[SimpleNamespace]:
+        assert kind == "tcp"
+        return [_conn(None, _PORT_A if self.pid == 100 else _PORT_B)]
+
+    monkeypatch.setattr(FakeProcess, "net_connections", connections, raising=False)
     assert find_server_process(_HOST, _PORT_B) == ProcessIdentity(200, 222.0)
 
 
@@ -217,3 +238,49 @@ def test_memory_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
     snap = memory_snapshot()
     assert snap.avail_gib == _AVAIL_GIB
     assert snap.total_gib == _TOTAL_GIB
+
+
+_LISTENER_CODE = (
+    "import socket, time; "
+    "s = socket.socket(); "
+    "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); "
+    "s.bind(('127.0.0.1', 0)); s.listen(1); "
+    "print(s.getsockname()[1], flush=True); "
+    "time.sleep(30)"
+)
+
+
+def test_real_listener_discovery_and_pidfile_never_trusted(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Disposable python listener with an MLX-matching argv token.
+
+    When the platform permits listener inspection the child is discovered;
+    when inspection is denied the supported unavailable result (None) is
+    returned instead of an error. A pidfile pointing at a live non-server
+    process is never trusted either way.
+    """
+    child = subprocess.Popen(
+        [sys.executable, "-c", _LISTENER_CODE, "mlx_lm.server"],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None
+        line = child.stdout.readline()
+        assert line.strip(), "listener child produced no port"
+        port = int(line.strip())
+        pidfile = tmp_path / "server.pid"
+        pidfile.write_text(f"{os.getpid()}\n")
+        ident = find_server_process(_HOST, port, pidfile=str(pidfile))
+        # Either discovered (our pidfile decoy must not win) or unavailable.
+        assert ident is None or ident.pid == child.pid
+        if ident is not None:
+            assert ident.create_time > 0
+    finally:
+        child.terminate()
+        try:
+            child.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=10)

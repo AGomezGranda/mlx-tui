@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+import asyncio
+import time
+from collections.abc import Callable, Coroutine
 from functools import partial
+from typing import Any, override
 
 import httpx
 import pytest
 
 from mlx_tui.chat import error_detail, stream_turn
-from tests.builders import sse_frames
+from tests.builders import sse_frames, sse_multiline_event
 
-Handler = Callable[[httpx.Request], httpx.Response]
+SyncHandler = Callable[[httpx.Request], httpx.Response]
+AsyncHandler = Callable[[httpx.Request], Coroutine[Any, Any, httpx.Response]]
+Handler = SyncHandler | AsyncHandler
 URL = "http://stub/v1/chat/completions"
 
 
@@ -41,8 +46,17 @@ def test_error_detail_non_json_body_yields_empty() -> None:
 
 
 def install_transport(monkeypatch: pytest.MonkeyPatch, handler: Handler) -> None:
-    transport = httpx.MockTransport(handler)
-    monkeypatch.setattr(httpx, "Client", partial(httpx.Client, transport=transport))
+    transport = httpx.MockTransport(handler)  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        httpx, "AsyncClient", partial(httpx.AsyncClient, transport=transport)
+    )
+    # serverctl unit tests reuse this helper but exercise sync httpx.Client;
+    # keep both patched so Phase 1 regressions stay green. Async handlers are
+    # never used by the sync path.
+    try:
+        monkeypatch.setattr(httpx, "Client", partial(httpx.Client, transport=transport))
+    except Exception:
+        pass
 
 
 def stream_response(body: bytes) -> httpx.Response:
@@ -51,12 +65,12 @@ def stream_response(body: bytes) -> httpx.Response:
     )
 
 
-def test_happy_path_with_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_happy_path_with_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     body = sse_frames(deltas=["Hello", " world", " this"], usage=(12, 6))
     install_transport(monkeypatch, lambda request: stream_response(body))
     flushes: list[str] = []
 
-    result = stream_turn(
+    result = await stream_turn(
         URL,
         {"messages": []},
         prompt_estimate=20,
@@ -77,11 +91,11 @@ def test_happy_path_with_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     assert flushes == ["Hello", "Hello world", "Hello world this"]
 
 
-def test_estimate_fallback_without_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_estimate_fallback_without_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     body = sse_frames(deltas=["a", "b", "c", "d"], finish=None)
     install_transport(monkeypatch, lambda request: stream_response(body))
 
-    result = stream_turn(
+    result = await stream_turn(
         URL, {"messages": []}, prompt_estimate=20, on_flush=_noop_flush
     )
 
@@ -95,39 +109,72 @@ def test_estimate_fallback_without_usage(monkeypatch: pytest.MonkeyPatch) -> Non
     assert result.accounting.completion_tokens > 1
 
 
-def test_skips_malformed_keepalive_and_stops_at_done(
+async def test_skips_malformed_keepalive_and_stops_at_done(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     body = sse_frames(deltas=["A"], finish=None, malformed=True, keepalive=(3, 10))
     install_transport(monkeypatch, lambda request: stream_response(body))
 
-    result = stream_turn(URL, {}, prompt_estimate=1, on_flush=_noop_flush)
+    result = await stream_turn(URL, {}, prompt_estimate=1, on_flush=_noop_flush)
 
     assert result.full_text == "A"
     assert result.skipped_frames == 1
 
 
-def test_length_finish_reason_is_surfaced(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_no_space_data_stream_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = sse_frames(deltas=["Hello", " world"], usage=(12, 6), no_space=True)
+    install_transport(monkeypatch, lambda request: stream_response(body))
+
+    result = await stream_turn(URL, {}, prompt_estimate=20, on_flush=_noop_flush)
+
+    assert result.full_text == "Hello world"
+    assert result.skipped_frames == 0
+
+
+async def test_multiline_json_event_joins_with_newline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chunk: dict[str, object] = {
+        "choices": [{"delta": {"content": "Hi"}, "finish_reason": None}]
+    }
+    body = (
+        b'data: {"choices": [{"delta": {"role": "assistant"}, "finish_reason": null}]}\n\n'
+        + sse_multiline_event(chunk)
+        + b"data: [DONE]\n\n"
+    )
+    install_transport(monkeypatch, lambda request: stream_response(body))
+
+    result = await stream_turn(URL, {}, prompt_estimate=1, on_flush=_noop_flush)
+
+    assert result.full_text == "Hi"
+    assert result.skipped_frames == 0
+
+
+async def test_length_finish_reason_is_surfaced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     body = sse_frames(deltas=["Partial ans"], finish="length", usage=(9, 3))
     install_transport(monkeypatch, lambda request: stream_response(body))
 
-    result = stream_turn(URL, {"messages": []}, prompt_estimate=9, on_flush=_noop_flush)
+    result = await stream_turn(
+        URL, {"messages": []}, prompt_estimate=9, on_flush=_noop_flush
+    )
 
     assert result.full_text == "Partial ans"
     assert result.finish_reason == "length"
 
 
-def test_exceptions_propagate(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_exceptions_propagate(monkeypatch: pytest.MonkeyPatch) -> None:
     def boom(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("boom")
 
     install_transport(monkeypatch, boom)
 
     with pytest.raises(httpx.ConnectError):
-        stream_turn(URL, {}, prompt_estimate=0, on_flush=_noop_flush)
+        await stream_turn(URL, {}, prompt_estimate=0, on_flush=_noop_flush)
 
 
-def test_http_error_status_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_http_error_status_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     install_transport(
         monkeypatch,
         lambda request: httpx.Response(
@@ -138,21 +185,21 @@ def test_http_error_status_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     with pytest.raises(httpx.HTTPStatusError) as excinfo:
-        stream_turn(URL, {}, prompt_estimate=0, on_flush=_noop_flush)
+        await stream_turn(URL, {}, prompt_estimate=0, on_flush=_noop_flush)
 
     # The body must survive the closed stream context so the UI can show
     # the server's explanation, not just the status code.
     assert excinfo.value.response.json() == {"detail": "model load failed"}
 
 
-def test_remote_protocol_error_mid_stream_propagates(
+async def test_remote_protocol_error_mid_stream_propagates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        def body() -> Iterator[bytes]:
-            yield sse_frames(deltas=["Hel"], finish=None, done=False)
-            raise httpx.RemoteProtocolError("peer died mid-stream")
+    async def body():  # type: ignore[no-untyped-def]
+        yield sse_frames(deltas=["Hel"], finish=None, done=False)
+        raise httpx.RemoteProtocolError("peer died mid-stream")
 
+    def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200, headers={"Content-Type": "text/event-stream"}, content=body()
         )
@@ -160,34 +207,65 @@ def test_remote_protocol_error_mid_stream_propagates(
     install_transport(monkeypatch, handler)
 
     with pytest.raises(httpx.RemoteProtocolError):
-        stream_turn(URL, {}, prompt_estimate=0, on_flush=_noop_flush)
+        await stream_turn(URL, {}, prompt_estimate=0, on_flush=_noop_flush)
 
 
-def test_active_response_exposed_mid_stream(monkeypatch: pytest.MonkeyPatch) -> None:
-    responses: list[httpx.Response] = []
+async def test_stalled_transport_cancellation_closes_within_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed = asyncio.Event()
+    entered = asyncio.Event()
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        response = stream_response(sse_frames(deltas=["A"], finish=None))
-        responses.append(response)
-        return response
+    class _Stalled(httpx.AsyncByteStream):
+        async def __aiter__(self):  # type: ignore[no-untyped-def]
+            entered.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                raise
+            yield b"data: [DONE]\n\n"
+
+        @override
+        async def aclose(self) -> None:
+            closed.set()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            stream=_Stalled(),
+        )
 
     install_transport(monkeypatch, handler)
-    seen_during_flush: list[httpx.Response | None] = []
-    holder: list[httpx.Response | None] = [None]
-
-    def flush(_text: str) -> None:
-        seen_during_flush.append(holder[0])
-
-    stream_turn(
-        URL,
-        {},
-        prompt_estimate=1,
-        on_flush=flush,
-        flush_interval=0.0,
-        on_active=lambda r: holder.__setitem__(0, r),
+    task = asyncio.create_task(
+        stream_turn(URL, {}, prompt_estimate=1, on_flush=_noop_flush)
     )
+    assert await asyncio.wait_for(entered.wait(), timeout=2)
+    start = time.monotonic()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(asyncio.shield(task), timeout=2)
+    assert time.monotonic() - start < 2
+    assert await asyncio.wait_for(closed.wait(), timeout=2)
 
-    assert len(responses) == 1
-    # The seam matters mid-stream (that is when cancel reads it): the flush
-    # callback must observe the very response object being streamed.
-    assert seen_during_flush == [responses[0]]
+
+async def test_cancel_before_headers_closes_within_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        entered.set()
+        await asyncio.sleep(30)
+        return stream_response(b"data: [DONE]\n\n")
+
+    install_transport(monkeypatch, handler)
+    task = asyncio.create_task(
+        stream_turn(URL, {}, prompt_estimate=1, on_flush=_noop_flush)
+    )
+    assert await asyncio.wait_for(entered.wait(), timeout=2)
+    start = time.monotonic()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(asyncio.shield(task), timeout=2)
+    assert time.monotonic() - start < 2

@@ -23,6 +23,11 @@ ROW = "mlx-community/stub-test-4bit"
 SIZE_PAIRS = [("model.safetensors", 2_000_000_000), ("README.md", 10)]
 
 
+def _downloading(screen: SearchScreen) -> str | None:
+    """Fresh-read helper: the checker must not narrow this across mutations."""
+    return screen._downloading
+
+
 async def open_search(
     harness: AppHarness, monkeypatch: pytest.MonkeyPatch
 ) -> SearchScreen:
@@ -35,10 +40,9 @@ async def open_search(
     def _stub_free() -> int:
         return 10 * 2**30
 
-    monkeypatch.setattr("mlx_tui.search_screen.query.list_results", _stub_list)
-    monkeypatch.setattr("mlx_tui.search_screen.query.repo_snapshot", _stub_snapshot)
-    monkeypatch.setattr("mlx_tui.search_screen.query.free_disk_bytes", _stub_free)
-    monkeypatch.setattr("mlx_tui.search_screen.download.free_disk_bytes", _stub_free)
+    monkeypatch.setattr("mlx_tui.search_screen.list_results", _stub_list)
+    monkeypatch.setattr("mlx_tui.search_screen.repo_snapshot", _stub_snapshot)
+    monkeypatch.setattr("mlx_tui.search_screen.free_disk_bytes", _stub_free)
     # Focus the models table so slash binding fires deterministically.
     try:
         harness.app.query_one("#models-table", ModelsTable).focus()
@@ -157,9 +161,7 @@ async def test_enter_downloads_hands_off_and_dismisses(
             captured["allow_patterns"] = _kw["allow_patterns"]
         # simulate successful download
 
-    monkeypatch.setattr(
-        "mlx_tui.search_screen.download.download_snapshot", _recording_download
-    )
+    monkeypatch.setattr("mlx_tui.search_screen.download_snapshot", _recording_download)
 
     calls: list[int] = []
 
@@ -218,9 +220,7 @@ async def test_escape_mid_download_cancels(
             time.sleep(0.01)
         raise CancelledDownload("cancelled by user")  # noqa: PLC0415  # type: ignore[no-untyped-call]
 
-    monkeypatch.setattr(
-        "mlx_tui.search_screen.download.download_snapshot", _blocking_download
-    )
+    monkeypatch.setattr("mlx_tui.search_screen.download_snapshot", _blocking_download)
 
     screen = await open_search(harness, monkeypatch)
     await harness.pilot.press(*"qwen", "enter")
@@ -263,9 +263,7 @@ async def test_download_failure_keeps_modal_usable(
     ) -> None:
         raise RuntimeError("disk full")
 
-    monkeypatch.setattr(
-        "mlx_tui.search_screen.download.download_snapshot", _failing_download
-    )
+    monkeypatch.setattr("mlx_tui.search_screen.download_snapshot", _failing_download)
 
     screen = await open_search(harness, monkeypatch)
     await harness.pilot.press(*"qwen", "enter")
@@ -324,14 +322,11 @@ async def test_low_disk_warns_then_proceeds(
         # before the success log + dismiss.
         time.sleep(0.35)
 
-    monkeypatch.setattr("mlx_tui.search_screen.query.list_results", _stub_list_low)
-    monkeypatch.setattr("mlx_tui.search_screen.query.repo_snapshot", _stub_snapshot_low)
-    monkeypatch.setattr("mlx_tui.search_screen.query.free_disk_bytes", _stub_free_low)
+    monkeypatch.setattr("mlx_tui.search_screen.list_results", _stub_list_low)
+    monkeypatch.setattr("mlx_tui.search_screen.repo_snapshot", _stub_snapshot_low)
+    monkeypatch.setattr("mlx_tui.search_screen.free_disk_bytes", _stub_free_low)
     monkeypatch.setattr(
-        "mlx_tui.search_screen.download.free_disk_bytes", _stub_free_low
-    )
-    monkeypatch.setattr(
-        "mlx_tui.search_screen.download.download_snapshot", _recording_download_low
+        "mlx_tui.search_screen.download_snapshot", _recording_download_low
     )
 
     # open manually (cannot use helper which patches free to 10GB)
@@ -414,13 +409,10 @@ async def test_size_and_download_share_revision_and_expanded_patterns(
         captured["repo_id"] = repo_id
         captured["revision"] = revision
 
-    monkeypatch.setattr("mlx_tui.search_screen.query.list_results", _stub_list)
-    monkeypatch.setattr("mlx_tui.search_screen.query.repo_snapshot", _stub_snapshot)
-    monkeypatch.setattr("mlx_tui.search_screen.query.free_disk_bytes", _stub_free)
-    monkeypatch.setattr("mlx_tui.search_screen.download.free_disk_bytes", _stub_free)
-    monkeypatch.setattr(
-        "mlx_tui.search_screen.download.download_snapshot", _recording_download
-    )
+    monkeypatch.setattr("mlx_tui.search_screen.list_results", _stub_list)
+    monkeypatch.setattr("mlx_tui.search_screen.repo_snapshot", _stub_snapshot)
+    monkeypatch.setattr("mlx_tui.search_screen.free_disk_bytes", _stub_free)
+    monkeypatch.setattr("mlx_tui.search_screen.download_snapshot", _recording_download)
 
     def _noop_rescan(self: ModelsPane) -> None:
         return None
@@ -449,3 +441,264 @@ async def test_size_and_download_share_revision_and_expanded_patterns(
     )
     assert captured.get("repo_id") == ROW
     assert captured.get("revision") == "rev-a"
+
+
+async def test_cancel_pending_until_acknowledged(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading  # noqa: PLC0415
+
+    ack = threading.Event()
+    started = threading.Event()
+
+    def _ack_download(
+        repo_id: str,
+        *,
+        on_progress=None,  # type: ignore[no-untyped-def]
+        cancel_event=None,  # type: ignore[no-untyped-def]
+        cache_dir=None,  # type: ignore[no-untyped-def]
+        revision=None,  # type: ignore[no-untyped-def]
+        **_kw: object,
+    ) -> None:
+        assert cancel_event is not None
+        started.set()
+        while not cancel_event.is_set():
+            time.sleep(0.01)
+        assert ack.wait(timeout=5)
+        raise CancelledDownload("cancelled by user")  # noqa: PLC0415  # type: ignore[no-untyped-call]
+
+    monkeypatch.setattr("mlx_tui.search_screen.download_snapshot", _ack_download)
+    rescans: list[int] = []
+
+    def _spy_rescan(self: ModelsPane) -> None:
+        rescans.append(1)
+
+    monkeypatch.setattr(ModelsPane, "rescan", _spy_rescan)
+
+    screen = await open_search(harness, monkeypatch)
+    await harness.pilot.press(*"qwen", "enter")
+    assert await harness.wait_for(lambda app: len(screen._repo_ids) == 1)
+    assert await harness.wait_for(lambda app: ROW in screen._sizes)
+    await harness.pilot.press("enter")
+    assert await harness.wait_for(lambda app: screen._downloading == ROW)
+    assert await harness.wait_for(lambda app: started.is_set())
+    ev = screen._cancel_event
+    assert ev is not None
+
+    await harness.pilot.press("escape")
+    assert await harness.wait_for(lambda app: ev.is_set())
+    await harness.pilot.pause()
+
+    def pending_line() -> str:
+        try:
+            return _static_plain(screen.query_one("#dl-progress", Static))
+        except Exception:
+            return ""
+
+    assert await harness.wait_for(
+        lambda app: "cancellation requested" in pending_line()
+    )
+    assert isinstance(harness.app.screen, SearchScreen)
+    assert screen._downloading == ROW
+    assert screen.query_one("#search-input", Input).disabled is True
+    assert not any("download cancelled" in line for line in harness.app_log_lines())
+    assert not any("✓ downloaded" in line for line in harness.app_log_lines())
+
+    await harness.pilot.press("enter")
+    await harness.pilot.pause()
+    assert screen._downloading == ROW
+    assert not any("download cancelled" in line for line in harness.app_log_lines()), (
+        "second download must not start while pending"
+    )
+
+    ack.set()
+    assert await harness.wait_for(
+        lambda app: any(
+            "download cancelled" in line for line in harness.app_log_lines()
+        )
+    )
+    assert await harness.wait_for(lambda app: not isinstance(app.screen, SearchScreen))
+    assert _downloading(screen) is None
+    assert screen._cancel_event is None
+    assert rescans == [1]
+    assert (
+        len([line for line in harness.app_log_lines() if "download cancelled" in line])
+        == 1
+    )
+    assert (
+        len(
+            [
+                line
+                for line in harness.app_log_lines()
+                if "cancellation requested" in line
+            ]
+        )
+        == 1
+    )
+
+
+async def test_repeated_escape_single_request(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading  # noqa: PLC0415
+
+    ack = threading.Event()
+    started = threading.Event()
+
+    def _ack_download(
+        repo_id: str,
+        *,
+        on_progress=None,  # type: ignore[no-untyped-def]
+        cancel_event=None,  # type: ignore[no-untyped-def]
+        cache_dir=None,  # type: ignore[no-untyped-def]
+        revision=None,  # type: ignore[no-untyped-def]
+        **_kw: object,
+    ) -> None:
+        assert cancel_event is not None
+        started.set()
+        while not cancel_event.is_set():
+            time.sleep(0.01)
+        assert ack.wait(timeout=5)
+        raise CancelledDownload("cancelled by user")  # noqa: PLC0415  # type: ignore[no-untyped-call]
+
+    monkeypatch.setattr("mlx_tui.search_screen.download_snapshot", _ack_download)
+
+    screen = await open_search(harness, monkeypatch)
+    await harness.pilot.press(*"qwen", "enter")
+    assert await harness.wait_for(lambda app: len(screen._repo_ids) == 1)
+    assert await harness.wait_for(lambda app: ROW in screen._sizes)
+    await harness.pilot.press("enter")
+    assert await harness.wait_for(lambda app: screen._downloading == ROW)
+    assert await harness.wait_for(lambda app: started.is_set())
+
+    await harness.pilot.press("escape")
+    await harness.pilot.press("escape")
+    await harness.pilot.press("escape")
+    await harness.pilot.pause()
+    assert isinstance(harness.app.screen, SearchScreen)
+    assert screen._downloading == ROW
+
+    ack.set()
+    assert await harness.wait_for(
+        lambda app: any(
+            "download cancelled" in line for line in harness.app_log_lines()
+        )
+    )
+    assert await harness.wait_for(lambda app: not isinstance(app.screen, SearchScreen))
+    await harness.pilot.pause()
+    assert (
+        len(
+            [
+                line
+                for line in harness.app_log_lines()
+                if "cancellation requested" in line
+            ]
+        )
+        == 1
+    )
+    assert (
+        len([line for line in harness.app_log_lines() if "download cancelled" in line])
+        == 1
+    )
+
+
+async def test_error_before_ack_reports_failure_not_cancel(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _fail_after_cancel(
+        repo_id: str,
+        *,
+        on_progress=None,  # type: ignore[no-untyped-def]
+        cancel_event=None,  # type: ignore[no-untyped-def]
+        cache_dir=None,  # type: ignore[no-untyped-def]
+        revision=None,  # type: ignore[no-untyped-def]
+        **_kw: object,
+    ) -> None:
+        assert cancel_event is not None
+        while not cancel_event.is_set():
+            time.sleep(0.01)
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr("mlx_tui.search_screen.download_snapshot", _fail_after_cancel)
+
+    screen = await open_search(harness, monkeypatch)
+    await harness.pilot.press(*"qwen", "enter")
+    assert await harness.wait_for(lambda app: len(screen._repo_ids) == 1)
+    assert await harness.wait_for(lambda app: ROW in screen._sizes)
+    await harness.pilot.press("enter")
+    assert await harness.wait_for(lambda app: screen._downloading == ROW)
+
+    await harness.pilot.press("escape")
+    assert await harness.wait_for(
+        lambda app: any(
+            "download failed: RuntimeError: disk full" in line
+            for line in harness.app_log_lines()
+        )
+    )
+    assert isinstance(harness.app.screen, SearchScreen)
+    assert screen.query_one("#search-input", Input).disabled is False
+    assert not any("download cancelled" in line for line in harness.app_log_lines())
+    dl_plain = _static_plain(screen.query_one("#dl-progress", Static))
+    assert "download failed" in dl_plain
+
+
+async def test_teardown_sets_event_without_fabricated_outcome(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading  # noqa: PLC0415
+
+    screen = await open_search(harness, monkeypatch)
+    ev = threading.Event()
+    screen._cancel_event = ev
+    screen._downloading = ROW
+    screen.on_unmount()
+    assert ev.is_set()
+
+
+async def test_size_lookup_failure_logs_once_with_repo_id(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    screen = await open_search(harness, monkeypatch)
+
+    def failing_snapshot(api: object, rid: str) -> RepoSnapshot:
+        raise OSError("disk gone")
+
+    def working_snapshot(api: object, rid: str) -> RepoSnapshot:
+        return RepoSnapshot(revision="rev-a", files=tuple(SIZE_PAIRS))
+
+    def size_failed(app: object) -> bool:
+        return harness.app._last_errors.get(f"size {ROW}") == "OSError: disk gone"
+
+    def size_failed_lines() -> list[str]:
+        return [
+            t
+            for t in harness.app_log_lines()
+            if f"size {ROW} failed" in t and "OSError" in t
+        ]
+
+    # Submit first so the row exists; the automatic fetch succeeds.
+    await harness.pilot.press(*"qwen", "enter")
+    assert await harness.wait_for(lambda app: len(screen._repo_ids) == 1)
+    assert await harness.wait_for(lambda app: ROW in screen._sizes)
+
+    monkeypatch.setattr("mlx_tui.search_screen.repo_snapshot", failing_snapshot)
+    del screen._sizes[ROW]
+    screen._fetch_size(ROW)
+    assert await harness.wait_for(size_failed), harness.app_log_lines()
+    assert ROW not in screen._sizes
+    # A repeated identical failure stays silent.
+    screen._fetch_size(ROW)
+    await harness.pilot.pause()
+    await harness.pilot.pause()
+    assert len(size_failed_lines()) == 1
+
+    # A successful fetch clears the source; recurrence becomes visible again.
+    monkeypatch.setattr("mlx_tui.search_screen.repo_snapshot", working_snapshot)
+    screen._fetch_size(ROW)
+    assert await harness.wait_for(lambda app: ROW in screen._sizes)
+    monkeypatch.setattr("mlx_tui.search_screen.repo_snapshot", failing_snapshot)
+    del screen._sizes[ROW]
+    screen._fetch_size(ROW)
+    assert await harness.wait_for(lambda app: len(size_failed_lines()) == 2), (
+        harness.app_log_lines()
+    )

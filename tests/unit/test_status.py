@@ -35,7 +35,7 @@ def test_classify_liveness(status_code: int, body: object, expected: str) -> Non
     [
         (200, {"data": [{"id": "m"}]}, "green", "m"),
         (200, {"data": [{"id": ""}, {"id": "second"}]}, "green", "second"),
-        (200, {"data": [{"id": "first"}, {"id": "second"}]}, "green", "first"),
+        (200, {"data": [{"id": "first"}, {"id": "second"}]}, "green", None),
         (200, {"data": [{"id": 123}, {"id": "ok"}]}, "green", "ok"),
         (200, {"data": ["x"]}, "green", None),
         (200, {"data": [{"no_id": 1}]}, "green", None),
@@ -67,7 +67,7 @@ def test_cold_tracker_red_before_any_green_arms_nothing() -> None:
     tracker.observe("red")
     assert tracker.ever_green is False
     tracker.observe("green")
-    assert tracker.ever_green is True
+    assert tracker.ever_green
     assert tracker.consume_cold() is False
 
 

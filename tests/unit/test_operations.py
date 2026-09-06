@@ -7,6 +7,11 @@ import threading
 from mlx_tui.app.operations import OperationCoordinator, OperationKind
 
 
+def _current(coordinator: OperationCoordinator) -> OperationKind:
+    """Fresh-read helper: the checker must not narrow this across mutations."""
+    return coordinator.current
+
+
 def test_acquisition_and_conflicting_requests() -> None:
     coordinator = OperationCoordinator()
 
@@ -26,7 +31,7 @@ def test_release_is_owner_only_and_idle_recovers() -> None:
     assert coordinator.current is OperationKind.LOADING
     coordinator.release(OperationKind.LOADING)
     coordinator.release(OperationKind.LOADING)
-    assert coordinator.current is OperationKind.IDLE
+    assert _current(coordinator) is OperationKind.IDLE
     assert not coordinator.is_busy
     assert not coordinator.is_swap_busy
 

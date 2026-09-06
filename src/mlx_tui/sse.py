@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from collections.abc import AsyncIterable, AsyncIterator, Iterable, Iterator
+from dataclasses import dataclass, field
 
 from mlx_tui.history.tokens import estimate_tokens
 
@@ -18,15 +18,73 @@ class TokenAccounting:
 
 
 def iter_sse_data(lines: Iterable[str]) -> Iterator[str]:
-    """Yield JSON payload of each ``data: `` frame, stop at ``[DONE]``."""
+    """Yield each SSE ``data`` event payload, stop at dispatched ``[DONE]``.
+
+    Blank lines dispatch; ``data`` fields join with newline. See WHATWG SSE
+    interpretation rules; no reconnection/replay for a completion POST.
+    """
+    decoder = SSEDecoder()
     for raw_line in lines:
-        line = raw_line.strip()
-        if not line.startswith("data: "):
+        payload = decoder.feed(raw_line)
+        if payload is None:
             continue
-        data = line[len("data: ") :]
-        if data == "[DONE]":
+        if payload == "[DONE]":
             break
-        yield data
+        yield payload
+
+
+async def aiter_sse_data(lines: AsyncIterable[str]) -> AsyncIterator[str]:
+    """Async wrapper over the same decoder for Phase 3 async transport."""
+    decoder = SSEDecoder()
+    async for raw_line in lines:
+        payload = decoder.feed(raw_line)
+        if payload is None:
+            continue
+        if payload == "[DONE]":
+            break
+        yield payload
+
+
+@dataclass
+class SSEDecoder:
+    """Incremental SSE data-event framing.
+
+    Feed split lines; blank line dispatches joined ``data`` fields.
+    """
+
+    _buf: list[str] = field(default_factory=list)
+    _first: bool = True
+
+    def feed(self, line: str) -> str | None:  # noqa: PLR0911
+        """Process one line; return dispatched payload or ``None``."""
+        if self._first:
+            self._first = False
+            if line.startswith("\ufeff"):
+                line = line[1:]
+        if line.endswith("\r\n"):
+            line = line[:-2]
+        elif line.endswith("\n") or line.endswith("\r"):
+            line = line[:-1]
+        if line == "":
+            if not self._buf:
+                return None
+            payload = "\n".join(self._buf)
+            self._buf.clear()
+            return payload
+        if line.startswith(":"):
+            return None
+        if ":" in line:
+            field_name, value = line.split(":", 1)
+            if value.startswith(" "):
+                value = value[1:]
+            if field_name != "data":
+                return None
+            self._buf.append(value)
+            return None
+        if line != "data":
+            return None
+        self._buf.append("")
+        return None
 
 
 def usage_from_chunk(chunk: object) -> tuple[int | None, int | None]:

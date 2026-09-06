@@ -31,13 +31,13 @@ Current entry `mlx-tui = "mlx_tui.app:main"` `pyproject.toml:23`, `README.md:7`,
 | `todo:40-44` vim, file inject, session persist, vision | Mixed | **Keep file-inject + JSONL**, vim is 5 lines, **cut vision** per `docs/idea.md:372` |
 | `todo:8` server-log tailing | Explicit out-of-scope `docs/idea.md:379` | **Cut** — client timing + `psutil` is the contract |
 | `todo:9` "separate docs/plan to its own repo" | Meta | **YAGNI** |
-| `todo:14-16` MIT + brew/pypi + hold public | Ops | MIT done `pyproject.toml:6`; brew/pypi hold per `todo:16` until Metrics gate passes |
+| `todo:14-16` MIT + brew/pypi + hold public | Ops | MIT is declared in `LICENSE` and package metadata; brew/pypi remain held per `todo:16` until the Metrics usage gate passes |
 
-Research pile `todo:1-5` (quant runner, mlx-lm inference tricks, harness Pi, benchmarks) is pre-work, not features. Quant is cut per `docs/idea.md:28` (`mlx_lm.convert` one-liner). Others need a 15 min `curl` spike before any code (see *Verify*).
+Research pile `todo:1-5` (quant runner, mlx-lm inference tricks, harness Pi, benchmarks) is pre-work, not features. Quant is cut per `docs/idea.md:28` (`mlx_lm.convert` one-liner). Later sampler/backend work remains gated on a short `curl` spike (see *Research gates*).
 
-## Verify before writing code (repeat of `docs/idea.md:201`, new surface)
+## Research gates for the backlog (repeat of `docs/idea.md:201`, new surface)
 
-Run against a real `mlx_lm.server` before touching Part 2:
+Run against a real `mlx_lm.server` before implementing any of the backlog below:
 
 1. **Sampler params:** does `POST /v1/chat/completions` honour `top_k`, `repetition_penalty`, `min_p`, `seed`? Or does it silently drop them / 400? Determines Phase 5 scope.
 2. **KV / speculative / structured / LoRA:** does the server expose `--kv-bits`, `--draft-model`, `response_format`/`grammar`, `--adapter-path` via the OpenAI surface, or only via CLI flags at boot? If CLI-only, TUI work is `start_cmd` templating, not a chat payload.
@@ -49,6 +49,9 @@ Run against a real `mlx_lm.server` before touching Part 2:
 Each phase answers one question and has a kill line. Ponytail ladder applies: stdlib → native → installed dep → one line → minimal code.
 
 ### Phase 4 — Finish the control plane (the only must-do)
+
+**Implementation status:** Complete. The real-world usage gate described below
+is separate and remains unverified.
 
 **Q:** does visual headroom change a load decision? (`todo:19-24` trimmed)
 
@@ -103,8 +106,16 @@ Gated on verify #1 — if server drops the keys, don't add them.
 - Multi-backend, quant runner, server-log tailing, agentic harness (`docs/idea.md:372` + `README.md:123` — unchanged).
 - Config/preset management UI — flat files + `$EDITOR` (`src/mlx_tui/app/config_edit.py:20`).
 - `docs/plans` split to another repo (`todo:9`).
-- Brew / PyPI publish (`todo:15`) — hold until Phase 4 gate passes (`todo:16`).
+- Brew / PyPI publish (`todo:15`) — hold until the Phase 4 usage gate passes (`todo:16`).
 
 ## Status
 
-Part 2 not started. Next action: 15 min verify spike (the 4 curls above), then Phase 4 behind the 1-week gate.
+Phase 4, the control-plane implementation, is complete: the memory and context
+bars, client-observed prefill/decode metrics, bounded context reservation, and
+the Metrics tab are shipped. The real-world usage gate—using the product for a
+week and confirming that the visual headroom changes a load decision—has not
+been performed and is intentionally not claimed here.
+
+Phases 5 and 6, plus the research-gated backlog, remain unimplemented. The
+next action is the short real-server verification spike above; only evidence
+from that spike should open sampler, backend, or persistence work.

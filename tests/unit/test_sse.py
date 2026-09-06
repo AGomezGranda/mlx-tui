@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 import pytest
 
 from mlx_tui.history.tokens import estimate_tokens
 from mlx_tui.sse import (
+    SSEDecoder,
+    aiter_sse_data,
     delta_content_from_chunk,
     finish_reason_from_chunk,
     iter_sse_data,
@@ -14,23 +18,106 @@ from mlx_tui.sse import (
 )
 
 
+async def _collect_async(lines: list[str]) -> list[str]:
+    async def gen() -> AsyncIterator[str]:
+        for line in lines:
+            yield line
+
+    return [payload async for payload in aiter_sse_data(gen())]
+
+
+def test_decoder_dispatches_only_on_blank_line() -> None:
+    decoder = SSEDecoder()
+    assert decoder.feed("data: a") is None
+    assert decoder.feed("data: b") is None
+    assert decoder.feed("") == "a\nb"
+
+
 def test_iter_sse_data_stops_at_done() -> None:
-    lines = ['data: {"a":1}\n', "data: [DONE]\n"]
+    lines = ['data: {"a":1}\n', "\n", "data: [DONE]\n", "\n"]
     assert list(iter_sse_data(lines)) == ['{"a":1}']
 
 
-def test_iter_sse_data_skips_empty_keepalive_and_non_data_lines() -> None:
-    lines = ["", "\n", ": keepalive 3/10\n", "event: ping\n", "data: x\n"]
+def test_iter_sse_data_skips_comments_and_non_data_fields() -> None:
+    lines = [
+        ": keepalive 3/10\n",
+        "\n",
+        "event: ping\n",
+        "id: 1\n",
+        "retry: 100\n",
+        "unknown: x\n",
+        "data: x\n",
+        "\n",
+    ]
     assert list(iter_sse_data(lines)) == ["x"]
 
 
-def test_iter_sse_data_ignores_frames_after_done() -> None:
-    lines = ["data: a\n", "data: [DONE]\n", "data: late\n"]
+def test_iter_sse_data_ignores_events_after_done() -> None:
+    lines = ["data: a\n", "\n", "data: [DONE]\n", "\n", "data: late\n", "\n"]
     assert list(iter_sse_data(lines)) == ["a"]
 
 
-def test_iter_sse_data_tolerates_surrounding_whitespace() -> None:
-    assert list(iter_sse_data(["  data: y  \n"])) == ["y"]
+def test_iter_sse_data_rejects_indented_field() -> None:
+    assert list(iter_sse_data(["  data: y  \n", "\n"])) == []
+
+
+def test_iter_sse_data_no_space_field() -> None:
+    assert list(iter_sse_data(["data:x\n", "\n"])) == ["x"]
+    assert list(iter_sse_data(["data:\n", "\n"])) == [""]
+
+
+def test_iter_sse_data_joins_multiple_data_fields() -> None:
+    assert list(iter_sse_data(["data: a\n", "data: b\n", "\n"])) == ["a\nb"]
+
+
+def test_iter_sse_data_empty_data_event_yields_empty() -> None:
+    assert list(iter_sse_data(["data:\n", "\n"])) == [""]
+    assert list(iter_sse_data(["data\n", "\n"])) == [""]
+
+
+def test_iter_sse_data_ignores_event_without_data() -> None:
+    assert list(iter_sse_data(["event: ping\n", "\n"])) == []
+    assert list(iter_sse_data(["\n"])) == []
+
+
+def test_iter_sse_data_strips_bom_once() -> None:
+    assert list(iter_sse_data(["\ufeffdata: x\n", "\n"])) == ["x"]
+
+
+def test_iter_sse_data_preserves_payload_spaces() -> None:
+    assert list(iter_sse_data(["data:  x  \n", "\n"])) == [" x  "]
+
+
+def test_iter_sse_data_normalizes_cr_lf() -> None:
+    assert list(iter_sse_data(["data: a\r\n", "\r\n"])) == ["a"]
+    assert list(iter_sse_data(["data: a\r", "\r"])) == ["a"]
+    assert list(iter_sse_data(["data: a\n", "\n"])) == ["a"]
+
+
+def test_iter_sse_data_discards_unfinished_at_eof() -> None:
+    assert list(iter_sse_data(["data: incomplete\n"])) == []
+    assert list(iter_sse_data(["data: a\n", "data: b\n"])) == []
+
+
+def test_iter_sse_data_similar_option_names_ignored() -> None:
+    assert list(iter_sse_data(["data-path: x\n", "\n"])) == []
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        ["data: a\n", "\n", "data: [DONE]\n", "\n", "data: late\n", "\n"],
+        ["data:a\n", "\n"],
+        ["data: a\n", "data: b\n", "\n"],
+        ["data:\n", "\n"],
+        [": comment\n", "event: x\n", "data: x\n", "\n"],
+        ["\ufeffdata: x\n", "\n"],
+        ["data:  x  \n", "\n"],
+        ["data: incomplete\n"],
+    ],
+)
+async def test_aiter_matches_iter(lines: list[str]) -> None:
+    assert await _collect_async(lines) == list(iter_sse_data(lines))
 
 
 @pytest.mark.parametrize(

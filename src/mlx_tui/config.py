@@ -20,6 +20,7 @@ class AppConfig:
     port: int = 8080
     start_cmd: str | None = None
     stop_cmd: str | None = None
+    command_shell: bool = False
     pidfile: str | None = None
     temperature: float | None = None
     top_p: float | None = None
@@ -40,6 +41,9 @@ CONFIG_TEMPLATE = """\
 # model = "ornith-ai/Ornith-1.5-9B-MLX-4bit"
 # start_cmd = "mlx_lm.server --port 8080"
 # stop_cmd = "pkill -f mlx_lm.server"
+# command_shell = false  # true: run start_cmd/stop_cmd via shell with $MLX_TUI_MODEL
+# shell example: command_shell = true
+# start_cmd = "mlx_lm.server --model \\"$MLX_TUI_MODEL\\" --port 8080"
 # pidfile = "/tmp/mlx-server.pid"
 # temperature = 0.7
 # top_p = 1.0
@@ -63,6 +67,7 @@ _KEY_TYPES: dict[str, type] = {
     "port": int,
     "start_cmd": str,
     "stop_cmd": str,
+    "command_shell": bool,
     "pidfile": str,
     "temperature": float,
     "top_p": float,
@@ -131,6 +136,7 @@ def _from_mapping(data: dict[str, object]) -> AppConfig:
         port=cast("int", port if port is not None else 8080),
         start_cmd=cast("str | None", found.get("start_cmd")),
         stop_cmd=cast("str | None", found.get("stop_cmd")),
+        command_shell=found.get("command_shell") is True,
         pidfile=cast("str | None", found.get("pidfile")),
         temperature=temp,
         top_p=tp,

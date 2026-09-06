@@ -123,6 +123,26 @@ class StubHandler(BaseHTTPRequestHandler):
             body = sse_frames(finish=None, usage=(12, 0))
         elif self._mode() == "no_usage":
             body = sse_frames(deltas=["Hi"], usage=None)
+        elif self._mode() == "multiline":
+            from tests.builders import sse_multiline_event  # noqa: PLC0415
+
+            body = (
+                sse_frames(deltas=["Hello"], finish=None, done=False)
+                + sse_multiline_event(
+                    {
+                        "choices": [
+                            {"delta": {"content": " world"}, "finish_reason": None}
+                        ]
+                    }
+                )
+                + sse_frames(deltas=[" this", " is", " MLX."], usage=(12, 6))
+            )
+        elif self._mode() == "nospace":
+            body = sse_frames(
+                deltas=["Hello", " world", " this", " is", " MLX."],
+                usage=(12, 6),
+                no_space=True,
+            )
         else:
             body = sse_frames(
                 deltas=["Hello", " world", " this", " is", " MLX."],
@@ -168,7 +188,7 @@ class AppHarness:
 
     @property
     def port(self) -> int:
-        return int(self.server.server_address[1])
+        return self.server.server_address[1]
 
     def models_pane(self) -> ModelsPane:
         return self.app.query_one(ModelsPane)
@@ -200,6 +220,6 @@ async def harness(
     stub_server_factory: Callable[[str], StubServer],
 ) -> AsyncIterator[AppHarness]:
     server = stub_server_factory("ok")
-    app = MlxTuiApp(host="127.0.0.1", port=int(server.server_address[1]))
+    app = MlxTuiApp(host="127.0.0.1", port=server.server_address[1])
     async with app.run_test() as pilot:
         yield AppHarness(app=app, pilot=pilot, server=server)

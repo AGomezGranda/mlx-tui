@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from mlx_tui.app import MlxTuiApp
+from mlx_tui.app import main as app_main
 from mlx_tui.config import (
     AppConfig,
     ConfigParseError,
@@ -190,6 +193,42 @@ def test_swap_policy_invalid_falls_back_to_auto(tmp_path: Path, toml_line: str) 
     assert cfg.swap_policy == "auto"
 
 
+def test_command_shell_default_is_false() -> None:
+    assert AppConfig().command_shell is False
+
+
+def test_command_shell_round_trip(tmp_path: Path) -> None:
+    cfg = load_config(_write(tmp_path, "command_shell = true\n"))
+    assert cfg.command_shell is True
+    cfg2 = load_config(_write(tmp_path, "command_shell = false\n"))
+    assert cfg2.command_shell is False
+
+
+@pytest.mark.parametrize(
+    "toml_line",
+    [
+        'command_shell = "true"',
+        "command_shell = 1",
+        "command_shell = 123",
+    ],
+)
+def test_command_shell_wrong_type_degrades_to_false(
+    tmp_path: Path, toml_line: str
+) -> None:
+    cfg = load_config(_write(tmp_path, toml_line))
+    assert cfg.command_shell is False
+
+
+def test_write_template_mentions_command_shell(tmp_path: Path) -> None:
+    path = tmp_path / "sub" / "config.toml"
+
+    write_template(path)
+
+    content = path.read_bytes()
+    assert b"command_shell" in content
+    assert b"MLX_TUI_MODEL" in content
+
+
 def test_replace_preserves_unrelated_app_config_fields() -> None:
     cfg = AppConfig(
         model="org/model",
@@ -197,6 +236,7 @@ def test_replace_preserves_unrelated_app_config_fields() -> None:
         port=9000,
         start_cmd="start",
         stop_cmd="stop",
+        command_shell=True,
         pidfile="/tmp/mlx.pid",
         temperature=0.2,
         top_p=0.8,
@@ -214,6 +254,7 @@ def test_replace_preserves_unrelated_app_config_fields() -> None:
         port=9000,
         start_cmd="start",
         stop_cmd="stop",
+        command_shell=True,
         pidfile="/tmp/mlx.pid",
         temperature=0.2,
         top_p=0.8,
@@ -222,3 +263,63 @@ def test_replace_preserves_unrelated_app_config_fields() -> None:
         max_ctx=32768,
         swap_policy="restart",
     )
+
+
+def _stub_main(
+    monkeypatch: pytest.MonkeyPatch, argv: list[str], cfg: AppConfig
+) -> dict[str, object]:
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr("mlx_tui.app.load_config", lambda: cfg)
+
+    def fake_run(self: MlxTuiApp) -> None:
+        seen["app"] = self
+
+    monkeypatch.setattr(MlxTuiApp, "run", fake_run)
+    return seen
+
+
+def test_main_uses_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = AppConfig(host="127.0.0.1", port=8080)
+    seen = _stub_main(monkeypatch, ["mlx-tui"], cfg)
+    app_main()
+    app = seen["app"]
+    assert isinstance(app, MlxTuiApp)
+    assert app.host == "127.0.0.1"
+    assert app.port == 8080
+    assert app.config is cfg
+
+
+def test_main_explicit_host_port_win_over_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = AppConfig(host="127.0.0.1", port=8080)
+    seen = _stub_main(
+        monkeypatch, ["mlx-tui", "--host", "0.0.0.0", "--port", "1234"], cfg
+    )
+    app_main()
+    app = seen["app"]
+    assert isinstance(app, MlxTuiApp)
+    assert app.host == "0.0.0.0"
+    assert app.port == 1234
+
+
+def test_main_help_exits_without_launch(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seen = _stub_main(monkeypatch, ["mlx-tui", "--help"], AppConfig())
+    with pytest.raises(SystemExit) as excinfo:
+        app_main()
+    assert excinfo.value.code == 0
+    assert "app" not in seen
+    assert "usage" in capsys.readouterr().out
+
+
+def test_main_invalid_port_exits_without_launch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _stub_main(monkeypatch, ["mlx-tui", "--port", "abc"], AppConfig())
+    with pytest.raises(SystemExit) as excinfo:
+        app_main()
+    assert excinfo.value.code == 2
+    assert "app" not in seen
