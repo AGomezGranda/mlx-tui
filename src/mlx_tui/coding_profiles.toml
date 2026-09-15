@@ -1,0 +1,77 @@
+schema_version = 1
+
+[[profiles]]
+id = "qwen3-1.7b-baseline"
+name = "Qwen3 1.7B baseline"
+repo_id = "mlx-community/Qwen3-1.7B-4bit"
+revision = "3b1b1768f8f8cf8351c712464f906e86c2b8269e"
+quantization = "4bit, group size 64"
+runtime_commit = "74e7cf931e84ef7c2f63e875adf414e20decc1c5"
+mlx_version = "0.32.2"
+template_sha256 = "253153d0738ceb4c668d2eff957714dd2bea0b56de772a9fdccd96cbf517e6a0"
+template_assets = { "config.json" = "507a6701220524eb8b283425bf0856a9ae4f21f4052e563896ddd668994b1dc7", "tokenizer_config.json" = "253153d0738ceb4c668d2eff957714dd2bea0b56de772a9fdccd96cbf517e6a0", "tokenizer.json" = "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4", "model.safetensors" = "0e86d9677e519323849eac1bc272caae88567a481ff188c431f70be543d9995f" }
+launch_settings = { server = "mlx_lm.server", host = "127.0.0.1", port = 18080, log_level = "INFO", model_argument = "pinned_snapshot_path" }
+system = ""
+temperature = 0.0
+top_p = 1.0
+max_tokens = 32
+max_ctx = 8192
+seed = 7
+enable_thinking = false
+
+[[profiles.evidence]]
+owner = "Alvaro Gomez"
+source = "milestone-a"
+status = "qualified"
+revocation_reason = ""
+tested_at = "2026-09-08T18:00:00Z"
+expires_at = "2026-09-20T18:00:00Z"
+machine_tier = "local-m4-16gib"
+task_id = "milestone-a-coding-check"
+check_id = "coding-check-v1"
+prompt_sha256 = "4234429d3463214f4566b36f293df6f42bc5af44ea6a8f1c8410f38ca346b54a"
+runtime_freeze = "docs/compatibility/milestone-a-runtime.txt"
+profile_fingerprint = "a0225c0c42addbc9b061c7cffb7786b20b2685d38d192b8eb0423bcc20811303"
+result_references = [
+  "docs/compatibility/evidence/milestone-a/contract-v1-20260908T183324Z-480180d2/metadata.json",
+  "docs/compatibility/evidence/milestone-a/contract-v1-20260908T183324Z-480180d2/results.json",
+]
+result_hashes = [
+  "4a0736b91574daab76cb32e6b3e564a07618ecdedea02f1ed55e8b974d0b6509",
+  "54ef767f23773659eb6730e794eb85cb2795401f56312a27c65886e437b1598a",
+]
+
+[[profiles]]
+id = "qwen3.5-4b-baseline"
+name = "Qwen3.5 4B baseline"
+repo_id = "mlx-community/Qwen3.5-4B-MLX-4bit"
+revision = "32f3e8ecf65426fc3306969496342d504bfa13f3"
+quantization = "4bit, group size 64, affine"
+runtime_commit = "74e7cf931e84ef7c2f63e875adf414e20decc1c5"
+mlx_version = "0.32.2"
+template_sha256 = "e98f1901ac6f0adff67b1d540bfa0c36ac1a0cf59eb72ed78146ef89aafa1182"
+template_assets = { "tokenizer_config.json" = "e98f1901ac6f0adff67b1d540bfa0c36ac1a0cf59eb72ed78146ef89aafa1182", "chat_template.jinja" = "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715" }
+launch_settings = { server = "mlx_lm.server", host = "127.0.0.1", port = 18080, log_level = "INFO", model_argument = "pinned_snapshot_path" }
+system = ""
+temperature = 0.0
+top_p = 1.0
+max_tokens = 32
+max_ctx = 8192
+seed = 7
+enable_thinking = false
+
+[[profiles.evidence]]
+owner = "Alvaro Gomez"
+source = "milestone-b"
+status = "unqualified"
+revocation_reason = ""
+tested_at = "2026-09-09T00:00:00Z"
+expires_at = "2026-09-20T00:00:00Z"
+machine_tier = "local-m4-16gib"
+task_id = "milestone-b-coding-check"
+check_id = "coding-check-v1"
+prompt_sha256 = "4234429d3463214f4566b36f293df6f42bc5af44ea6a8f1c8410f38ca346b54a"
+runtime_freeze = "docs/compatibility/milestone-a-runtime.txt"
+profile_fingerprint = "58d3e27d947dbd1140e7324ab16dfd8f2ec6bb16b257173f3263de0b669d6a96"
+result_references = []
+result_hashes = []

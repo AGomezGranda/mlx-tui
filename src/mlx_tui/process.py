@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 
 import psutil
 
@@ -25,13 +24,6 @@ _cached_endpoint: tuple[str, int] | None = None
 _net_denied: bool = False
 
 
-def _pid_from_file(pidfile: str) -> int | None:
-    try:
-        return int(Path(pidfile).read_text().strip())
-    except (OSError, ValueError):
-        return None
-
-
 def _matches_server_tokens(cmdline: list[str]) -> bool:
     return any(token.endswith(_SERVER_TOKEN_SUFFIXES) for token in cmdline)
 
@@ -47,12 +39,29 @@ def _conn_port(conn: object) -> int | None:
     return port if isinstance(port, int) else None
 
 
+def _conn_host(conn: object) -> str | None:
+    laddr = getattr(conn, "laddr", None)
+    if isinstance(laddr, (tuple, list)) and laddr:
+        host = laddr[0]
+        return host if isinstance(host, str) else None
+    host = getattr(laddr, "ip", None)
+    return host if isinstance(host, str) else None
+
+
+def _address_matches(requested: str, actual: str | None) -> bool:
+    if requested == "127.0.0.1":
+        return actual in {"127.0.0.1", "0.0.0.0"}
+    if requested == "::1":
+        return actual in {"::1", "::"}
+    return False
+
+
 def _conn_status(conn: object) -> str | None:
     status = getattr(conn, "status", None)
     return status if isinstance(status, str) else None
 
 
-def _listening_pids(port: int, conns: object) -> set[int]:
+def _listening_pids(host: str, port: int, conns: object) -> set[int]:
     pids: set[int] = set()
     assert isinstance(conns, list)
     for conn in conns:
@@ -62,6 +71,8 @@ def _listening_pids(port: int, conns: object) -> set[int]:
         if _conn_status(conn) != "LISTEN":
             continue
         if _conn_port(conn) != port:
+            continue
+        if not _address_matches(host, _conn_host(conn)):
             continue
         pids.add(pid)
     return pids
@@ -79,7 +90,35 @@ def _validated_identity(pid: int) -> ProcessIdentity | None:
     return ProcessIdentity(pid=pid, create_time=ctime)
 
 
-def _fetch_listening_pids(port: int) -> set[int] | None:
+def _cached_identity_is_verified(
+    identity: ProcessIdentity, host: str, port: int
+) -> bool:
+    try:
+        proc = psutil.Process(identity.pid)
+        cmdline: list[str] = proc.cmdline()
+        ctime = proc.create_time()
+        conns = proc.net_connections(kind="tcp")
+    except (
+        psutil.NoSuchProcess,
+        psutil.AccessDenied,
+        psutil.ZombieProcess,
+        PermissionError,
+        RuntimeError,
+    ):
+        return False
+    return (
+        ctime == identity.create_time
+        and _matches_server_tokens(cmdline)
+        and any(
+            _conn_status(conn) == "LISTEN"
+            and _conn_port(conn) == port
+            and _address_matches(host, _conn_host(conn))
+            for conn in conns
+        )
+    )
+
+
+def _fetch_listening_pids(host: str, port: int) -> set[int] | None:
     global _net_denied  # noqa: PLW0603
     if _net_denied:
         return None
@@ -88,65 +127,45 @@ def _fetch_listening_pids(port: int) -> set[int] | None:
     except (psutil.AccessDenied, PermissionError, RuntimeError):
         _net_denied = True
         return None
-    return _listening_pids(port, conns)
+    return _listening_pids(host, port, conns)
 
 
-def _process_listening_pids(port: int) -> set[int]:
-    """macOS permits inspecting our servers even when a global scan is denied."""
-    pids: set[int] = set()
-    for proc in psutil.process_iter():
-        try:
-            if _matches_server_tokens(proc.cmdline()) and any(
-                _conn_status(conn) == "LISTEN" and _conn_port(conn) == port
-                for conn in proc.net_connections(kind="tcp")
-            ):
-                pids.add(proc.pid)
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            continue
-    return pids
-
-
-def find_server_process(
-    host: str, port: int, pidfile: str | None = None
-) -> ProcessIdentity | None:
+def find_server_process(host: str, port: int) -> ProcessIdentity | None:
     """Find the mlx server process serving the configured loopback endpoint.
 
-    Returns None for non-loopback hosts, missing permissions, stale/recycled
-    PIDs, and unmatched listeners.
+    Returns None for non-loopback hosts, ambiguous ``localhost`` address
+    families, missing process permissions, ambiguous matches, stale/recycled PIDs,
+    and unmatched listeners.
     """
     global _cached_identity, _cached_endpoint  # noqa: PLW0603
-    if host not in LOOPBACK_HOSTS:
+    if host not in LOOPBACK_HOSTS or host == "localhost":
         return None
     if _cached_endpoint != (host, port):
         _cached_identity = None
     _cached_endpoint = (host, port)
-    if _cached_identity is not None:
-        try:
-            proc = psutil.Process(_cached_identity.pid)
-            cmdline: list[str] = proc.cmdline()
-            ctime = proc.create_time()
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            _cached_identity = None
-        else:
-            if ctime == _cached_identity.create_time and _matches_server_tokens(
-                cmdline
-            ):
-                return _cached_identity
-            _cached_identity = None
-    listening = _fetch_listening_pids(port)
-    if listening is None:
-        listening = _process_listening_pids(port)
-    preferred_pid = _pid_from_file(pidfile) if pidfile is not None else None
-    candidates = sorted(listening)
-    if preferred_pid is not None and preferred_pid in listening:
-        candidates.remove(preferred_pid)
-        candidates.insert(0, preferred_pid)
+    cached_identity = _cached_identity
+    if cached_identity is not None:
+        if _cached_identity_is_verified(cached_identity, host, port):
+            return cached_identity
+        _cached_identity = None
+    listening = _fetch_listening_pids(host, port)
+    identities: list[ProcessIdentity] = []
+    # macOS may deny the global scan while allowing our server's sockets.
+    candidates = (
+        sorted(listening)
+        if listening is not None
+        else (proc.pid for proc in psutil.process_iter())
+    )
     for pid in candidates:
         ident = _validated_identity(pid)
-        if ident is not None:
-            _cached_identity = ident
-            return ident
-    return None
+        if ident is not None and (
+            listening is not None or _cached_identity_is_verified(ident, host, port)
+        ):
+            identities.append(ident)
+    if len(identities) != 1:
+        return None
+    _cached_identity = identities[0]
+    return identities[0]
 
 
 def memory_snapshot() -> MemorySnapshot:

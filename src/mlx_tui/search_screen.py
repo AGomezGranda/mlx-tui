@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 from typing import TYPE_CHECKING, cast, override
 
 from huggingface_hub import HfApi
@@ -14,7 +15,12 @@ from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Input, Static
 
-from mlx_tui.models import quant_label
+from mlx_tui.models import (
+    quant_label,
+    resolve_cached_snapshot,
+    verify_cached_assets,
+)
+from mlx_tui.operations import OperationKind
 from mlx_tui.search import (
     CancelledDownload,
     download_snapshot,
@@ -39,10 +45,10 @@ class ResultsTable(DataTable[str]):
 
 
 def _format_size(size_bytes: int) -> str:
-    """Human size for the table/progress: GB with 1 dp, otherwise MB."""
+    """Human size for the table/progress using binary units."""
     if size_bytes >= 2**30:
-        return f"{size_bytes / 2**30:.1f} GB"
-    return f"{size_bytes / 2**20:.0f} MB"
+        return f"{size_bytes / 2**30:.1f} GiB"
+    return f"{size_bytes / 2**20:.0f} MiB"
 
 
 class SearchScreen(ModalScreen[None]):
@@ -64,11 +70,13 @@ class SearchScreen(ModalScreen[None]):
     }
     """
 
-    def __init__(self) -> None:
+    def __init__(self, pinned_candidates: tuple[tuple[str, str], ...] = ()) -> None:
         super().__init__()
-        self._repo_ids: list[str] = []
+        self._pinned_revisions = dict(pinned_candidates)
+        self._repo_ids: list[str] = list(self._pinned_revisions)
         self._sizes: dict[str, int] = {}  # repo_id -> exact download bytes
         self._revisions: dict[str, str | None] = {}  # repo_id -> snapshot revision
+        self._search_generation = 0
         self._downloading: str | None = None
         self._cancel_event: threading.Event | None = None
 
@@ -88,12 +96,19 @@ class SearchScreen(ModalScreen[None]):
         table = self.query_one("#search-results", ResultsTable)
         for column_key in ("model", "quant", "download"):
             table.add_column(column_key, key=column_key)
+        if self._repo_ids:
+            self._populate(self._search_generation, self._repo_ids)
         self.query_one("#search-input", Input).focus()
 
     def on_unmount(self) -> None:
+        self._search_generation += 1
         ev = self._cancel_event
         if ev is not None:
             ev.set()
+        self.tui.operations.release(OperationKind.DOWNLOADING)
+
+    def _is_current(self, generation: int) -> bool:
+        return self.is_mounted and generation == self._search_generation
 
     def _set_line(self, wid: str, message: str, style: str | None = None) -> None:
         try:
@@ -104,6 +119,8 @@ class SearchScreen(ModalScreen[None]):
 
     @on(Input.Submitted, "#search-input")
     def _on_search_submitted(self, event: Input.Submitted) -> None:
+        self._search_generation += 1
+        generation = self._search_generation
         query = event.value.strip()
         if not query:
             self._set_line("#search-status", "type a search", "dim")
@@ -116,36 +133,40 @@ class SearchScreen(ModalScreen[None]):
             except NoMatches:
                 pass
             return
-        self._run_search(query)
+        self._run_search(query, generation)
         self._set_line("#search-status", "searching…", "dim")
 
     @work(exclusive=True, group="hf-search", thread=True)
-    def _run_search(self, query: str) -> None:
+    def _run_search(self, query: str, generation: int) -> None:
         try:
             ids = list_results(HfApi(), query)
         except Exception as exc:
-            self.app.call_from_thread(
-                self._set_line,
-                "#search-status",
-                f"search failed: {exc.__class__.__name__}",
-                "red",
-            )
-            self.app.call_from_thread(
-                self.tui.log_app,
-                f"search failed: {exc.__class__.__name__}: {exc}"[:300],
-                "red",
-            )
+            self.app.call_from_thread(self._search_failed, generation, exc)
             return
-        self.app.call_from_thread(self._populate, ids)
+        self.app.call_from_thread(self._populate, generation, ids)
 
-    def _populate(self, ids: list[str]) -> None:
+    def _search_failed(self, generation: int, exc: Exception) -> None:
+        if not self._is_current(generation):
+            return
+        self._set_line(
+            "#search-status", f"search failed: {exc.__class__.__name__}", "red"
+        )
+        self.tui.log_app(f"search failed: {exc.__class__.__name__}: {exc}"[:300], "red")
+
+    def _populate(self, generation: int, ids: list[str]) -> None:
+        if not self._is_current(generation):
+            return
         try:
             table = self.query_one("#search-results", ResultsTable)
         except NoMatches:
             return
         self._repo_ids = ids
         self._sizes.clear()
-        self._revisions.clear()
+        self._revisions = {
+            repo_id: self._pinned_revisions[repo_id]
+            for repo_id in ids
+            if repo_id in self._pinned_revisions
+        }
         table.clear()
         for rid in ids:
             table.add_row(rid, quant_label(rid), "—", key=rid)
@@ -169,39 +190,87 @@ class SearchScreen(ModalScreen[None]):
             return
         if self._downloading is not None:
             return
-        self._fetch_size(repo_id)
+        self._fetch_size(
+            repo_id,
+            self._search_generation,
+            self._pinned_revisions.get(repo_id),
+        )
 
     @work(exclusive=True, group="hf-size", thread=True)
-    def _fetch_size(self, repo_id: str) -> None:
+    def _fetch_size(
+        self, repo_id: str, generation: int, revision: str | None = None
+    ) -> None:
         try:
-            snapshot = repo_snapshot(HfApi(), repo_id)
-            size = filtered_download_size(snapshot.files)
+            cached = self._verified_pinned_snapshot(repo_id, revision)
+            if cached is not None:
+                size = sum(path.stat().st_size for path in cached.rglob("*"))
+                resolved_revision = revision
+            elif revision is None:
+                snapshot = repo_snapshot(HfApi(), repo_id)
+                size = filtered_download_size(snapshot.files)
+                resolved_revision = snapshot.revision
+            else:
+                snapshot = repo_snapshot(HfApi(), repo_id, revision=revision)
+                size = filtered_download_size(snapshot.files)
+                resolved_revision = snapshot.revision
         except Exception as exc:
-            self.app.call_from_thread(self._size_failed, repo_id, exc)
+            self.app.call_from_thread(self._size_failed, generation, repo_id, exc)
             return
         glyph_map: dict[bool | None, str] = {True: "✓", False: "⚠", None: "—"}
         glyph = glyph_map[fits_disk(size, free_disk_bytes())]
         self.app.call_from_thread(
-            self._fill_size_cell, repo_id, size, glyph, snapshot.revision
+            self._fill_size_cell, generation, repo_id, size, glyph, resolved_revision
         )
 
-    def _size_failed(self, repo_id: str, exc: Exception) -> None:
+    def _verified_pinned_snapshot(
+        self, repo_id: str, revision: str | None
+    ) -> Path | None:
+        if revision is None:
+            return None
+        entry = next(
+            (
+                entry
+                for entry in self.tui.profile_entries
+                if entry.profile.repo_id == repo_id
+                and entry.profile.revision == revision
+            ),
+            None,
+        )
+        if entry is None:
+            return None
+        try:
+            snapshot = resolve_cached_snapshot(repo_id, revision)
+            verify_cached_assets(snapshot, entry.profile.template_assets)
+        except (OSError, ValueError):
+            return None
+        return snapshot
+
+    def _size_failed(self, generation: int, repo_id: str, exc: Exception) -> None:
+        if not self._is_current(generation) or repo_id not in self._repo_ids:
+            return
         try:
             self.tui.log_error_once(f"size {repo_id}", exc)
         except NoMatches:
             pass
 
     def _fill_size_cell(
-        self, repo_id: str, size: int, glyph: str, revision: str | None = None
+        self,
+        generation: int,
+        repo_id: str,
+        size: int,
+        glyph: str,
+        revision: str | None = None,
     ) -> None:
-        # Mutate only on the UI thread to avoid a worker/UI dict race.
-        self.tui.clear_error(f"size {repo_id}")
-        self._sizes[repo_id] = size
-        self._revisions[repo_id] = revision
+        if not self._is_current(generation) or repo_id not in self._repo_ids:
+            return
         try:
             table = self.query_one("#search-results", ResultsTable)
         except NoMatches:
             return
+        # Mutate only on the UI thread to avoid a worker/UI dict race.
+        self.tui.clear_error(f"size {repo_id}")
+        self._sizes[repo_id] = size
+        self._revisions[repo_id] = revision
         table.update_cell(repo_id, "download", f"{_format_size(size)} {glyph}")
 
     def start_download(self) -> None:
@@ -215,6 +284,11 @@ class SearchScreen(ModalScreen[None]):
             self._set_line("#dl-progress", "no result selected", "dim")
             return
         repo_id = self._repo_ids[table.cursor_row]
+        if not self.tui.operations.try_acquire(OperationKind.DOWNLOADING):
+            self._set_line(
+                "#dl-progress", "another operation is already running", "yellow"
+            )
+            return
         size = self._sizes.get(repo_id)
         free = free_disk_bytes()
         if size is not None and fits_disk(size, free) is False:
@@ -276,6 +350,7 @@ class SearchScreen(ModalScreen[None]):
         widget.update(Text(text))
 
     def _finish(self, outcome: str, detail: str | None = None) -> None:
+        self.tui.operations.release(OperationKind.DOWNLOADING)
         repo_id = self._downloading
         self._downloading = None
         self._cancel_event = None

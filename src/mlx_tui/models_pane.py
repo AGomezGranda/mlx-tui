@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import os
-import shlex
-import subprocess
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, override
 
 from textual import work
@@ -14,19 +12,20 @@ from textual.css.query import NoMatches
 from textual.widgets import Static
 
 from mlx_tui import process, serverctl
-from mlx_tui.app.operations import OperationKind
+from mlx_tui.boot import execute_boot
 from mlx_tui.confirm import ConfirmScreen
 from mlx_tui.models import (
     CacheNotFound,
     ModelRow,
     delete_repos,
+    model_identity_matches,
+    resolve_cached_snapshot,
     scan_models,
 )
-from mlx_tui.serverctl import build_start_command
+from mlx_tui.operations import OperationKind
 from mlx_tui.status import ServerProbe
 from mlx_tui.swap import (
     BootPlan,
-    _refuse_reason,
     boot_plan_for,
     health_timeout,
     resolve_swap_action,
@@ -39,6 +38,12 @@ if TYPE_CHECKING:
 
 class ModelsPane(Vertical):
     """Owns #swap-progress and #models-table plus the rescan/delete/boot workers."""
+
+    DEFAULT_CSS = """
+    #swap-progress {
+        height: auto;
+    }
+    """
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -83,8 +88,7 @@ class ModelsPane(Vertical):
             return
         table.set_rows(
             rows,
-            effective_model=self.tui.effective_model(),
-            avail_gib=self.tui.latest_avail_gib,
+            selected_model=self.tui.effective_model(),
         )
         self.rows = rows
 
@@ -97,8 +101,7 @@ class ModelsPane(Vertical):
             return
         table.refresh_markers(
             self.rows,
-            effective_model=self.tui.effective_model(),
-            avail_gib=self.tui.latest_avail_gib,
+            selected_model=self.tui.effective_model(),
         )
 
     def row_size(self, repo_id: str | None) -> int:
@@ -142,7 +145,18 @@ class ModelsPane(Vertical):
         elif action == "cold":
             self._start_boot(row, stop_first=False)
         else:
-            reason = _refuse_reason(status_state, policy, has_start, has_stop)
+            if status_state == "amber":
+                reason = (
+                    "endpoint is amber (unexpected service on port) — refusing swap"
+                )
+            elif policy == "warm":
+                reason = (
+                    'swap_policy is "warm" but endpoint is not green (requires green)'
+                )
+            elif policy == "restart":
+                reason = 'swap_policy is "restart" but start_cmd/stop_cmd are not both configured'
+            else:
+                reason = "server unreachable and no start_cmd configured"
             self.tui.log_app(f"cannot load {row.repo_id}: {reason}", "red")
 
     def _start_warm(self, row: ModelRow) -> None:
@@ -152,8 +166,9 @@ class ModelsPane(Vertical):
             self._reject_if_busy()
             return
         try:
+            self.tui.select_model(row.repo_id)
             self.tui.set_operation_ui(True)
-            self.tui.log_app(f"loading {row.repo_id} (in-server load)…")
+            self.tui.log_app(f"requesting {row.repo_id} (in-server generation)…")
             self.run_warm_swap(row)
         except Exception:
             self.tui.operations.release(OperationKind.LOADING)
@@ -166,10 +181,14 @@ class ModelsPane(Vertical):
             return
         if self._reject_if_busy():
             return
+        if self.tui.config.runtime_mode == "managed":
+            self._start_managed(row)
+            return
         if not self.tui.operations.try_acquire(OperationKind.RESTARTING):
             self._reject_if_busy()
             return
         try:
+            self.tui.select_model(row.repo_id)
             self.tui.set_operation_ui(True)
             self.run_boot(boot_plan_for(row, stop_first=stop_first))
         except Exception:
@@ -177,54 +196,90 @@ class ModelsPane(Vertical):
             self.tui.set_operation_ui(False)
             raise
 
+    def _start_managed(self, row: ModelRow) -> None:
+        if not self.tui.operations.try_acquire(OperationKind.RESTARTING):
+            self._reject_if_busy()
+            return
+        try:
+            snapshot = resolve_cached_snapshot(row.repo_id, row.revision_hashes[-1])
+            self.tui.select_model(str(snapshot))
+            self.tui.set_operation_ui(True)
+            self.run_managed_boot(snapshot, row.repo_id)
+        except Exception as exc:
+            self.tui.operations.release(OperationKind.RESTARTING)
+            self.tui.set_operation_ui(False)
+            self.tui.log_app(f"managed load failed: {exc}", "red")
+
+    @work(exclusive=True, group="swap", thread=True)
+    def run_managed_boot(self, snapshot: Path, model_label: str) -> None:
+        def stream(line: str) -> None:
+            try:
+                self.tui.call_from_thread(self.tui.log_app, f"[managed] {line}")
+            except Exception:
+                pass
+
+        try:
+            probe = self.tui.start_managed(snapshot, on_line=stream)
+        except Exception as exc:
+            self.tui.call_from_thread(
+                self.tui.record_generation_failure,
+            )
+            self.tui.call_from_thread(
+                self.tui.log_app, f"managed load failed: {exc}", "red"
+            )
+        else:
+            self.tui.call_from_thread(
+                self.tui.update_server_identity,
+                probe,
+                self.tui.managed_runtime.identity if self.tui.managed_runtime else None,
+            )
+            self.tui.call_from_thread(
+                self.tui.log_app,
+                f"✓ managed server ready for {model_label}; residency unknown",
+            )
+            self.tui.call_from_thread(self.tui.refresh_models)
+        finally:
+            self.tui.call_from_thread(
+                self.tui.operations.release, OperationKind.RESTARTING
+            )
+            self.tui.call_from_thread(self.tui.set_operation_ui, False)
+
     @work(exclusive=True, group="swap", thread=True)
     def run_warm_swap(self, row: ModelRow) -> None:
         try:
             full_timeout = health_timeout(row.size_on_disk)
-            result = serverctl.warm_load(
-                f"http://{self.tui.host}:{self.tui.port}/v1/chat/completions",
+            rendered = f"[{self.tui.host}]" if ":" in self.tui.host else self.tui.host
+            response_model = serverctl.warm_load(
+                f"http://{rendered}:{self.tui.port}/v1/chat/completions",
                 row.repo_id,
                 timeout_s=full_timeout,
             )
-            if (
-                result.response_model is not None
-                and result.response_model != row.repo_id
-            ):
+            if response_model != row.repo_id:
+                self.tui.call_from_thread(self.tui.record_generation_failure)
                 self.tui.call_from_thread(
                     self.tui.log_app,
-                    f"load failed: server reports model {result.response_model!r}, "
+                    f"request unverified: server reports model {response_model!r}, "
                     f"expected {row.repo_id!r}",
                     "red",
                 )
                 return
-            probe = (
-                ServerProbe(state="green", model_id=result.response_model)
-                if result.response_model == row.repo_id
-                else serverctl.wait_healthy(
-                    f"http://{self.tui.host}:{self.tui.port}/v1/models",
-                    target_model=row.repo_id,
-                    timeout_s=full_timeout,
-                )
-            )
-            if probe is None:
-                self.tui.call_from_thread(
-                    self.tui.log_app,
-                    f"load failed: endpoint did not report {row.repo_id}",
-                    "red",
-                )
-                return
-            proc_ident = process.find_server_process(
-                self.tui.host, self.tui.port, self.tui.config.pidfile
-            )
+            probe = ServerProbe(state="green", model_id=response_model)
+            proc_ident = process.find_server_process(self.tui.host, self.tui.port)
             self.tui.call_from_thread(
                 self.tui.update_server_identity, probe, proc_ident
             )
-            self.tui.call_from_thread(self.tui.log_app, f"✓ {row.repo_id} loaded")
+            self.tui.call_from_thread(
+                self.tui.log_app,
+                f"✓ request succeeded for {row.repo_id}; residency unknown",
+            )
             self.tui.call_from_thread(self.tui.refresh_models)
             self.tui.call_from_thread(self.tui._refresh_metrics)
         except Exception as exc:
+            self.tui.call_from_thread(self.tui.record_generation_failure)
             detail = f"{exc.__class__.__name__}: {exc}"[:200]
-            self.tui.call_from_thread(self.tui.log_app, f"load failed: {detail}", "red")
+            self.tui.call_from_thread(
+                self.tui.log_app, f"request failed: {detail}", "red"
+            )
         finally:
             self.tui.call_from_thread(
                 self.tui.operations.release, OperationKind.LOADING
@@ -232,7 +287,7 @@ class ModelsPane(Vertical):
             self.tui.call_from_thread(self.tui.set_operation_ui, False)
 
     @work(exclusive=True, group="swap", thread=True)
-    def run_boot(self, plan: BootPlan) -> None:  # noqa: PLR0912,PLR0915
+    def run_boot(self, plan: BootPlan) -> None:  # noqa: PLR0915
         def stream(line: str) -> None:
             try:
                 self.tui.call_from_thread(self.tui.log_app, f"[swap] {line}")
@@ -248,153 +303,30 @@ class ModelsPane(Vertical):
                 except NoMatches:
                     pass
 
-        proc: subprocess.Popen[str] | None = None
-        monitor = False
         try:
             cfg = self.tui.config
             host = self.tui.host
             port = self.tui.port
-            pidfile = cfg.pidfile
-            target = plan.model_id
-            shell = cfg.command_shell
-            start_raw = cfg.start_cmd
-            stop_raw = cfg.stop_cmd
-            if start_raw is None:
-                raise RuntimeError("[swap] start_cmd vanished from config")
-            if plan.stop_first and stop_raw is None:
-                raise RuntimeError("[swap] stop_cmd vanished from config")
-            env: dict[str, str] | None = None
-            if shell:
-                if "{model}" in start_raw or (
-                    plan.stop_first and stop_raw is not None and "{model}" in stop_raw
-                ):
-                    raise RuntimeError(
-                        "[swap] start/stop_cmd uses {model}; shell mode requires "
-                        '"$MLX_TUI_MODEL" (e.g., --model "$MLX_TUI_MODEL")'
-                    )
-                if not start_raw.strip():
-                    raise RuntimeError("[swap] invalid start_cmd: empty command")
-                if plan.stop_first and stop_raw is not None and not stop_raw.strip():
-                    raise RuntimeError("[swap] invalid stop_cmd: empty command")
-                if target is not None:
-                    # Shell contract: --model "$MLX_TUI_MODEL". The reference is
-                    # required but never treated as proof; endpoint verification
-                    # remains the final check. Do not rewrite shell syntax.
-                    if "MLX_TUI_MODEL" not in start_raw:
-                        raise RuntimeError(
-                            '[swap] shell start_cmd must reference "$MLX_TUI_MODEL" '
-                            '(e.g., --model "$MLX_TUI_MODEL")'
-                        )
-                    env = {**os.environ, "MLX_TUI_MODEL": target}
-                start_cmd_run: str | list[str] = start_raw
-                stop_cmd_run: str | list[str] | None = stop_raw
-                start_display = start_raw
-            else:
-                try:
-                    start_argv = build_start_command(start_raw, target)
-                except ValueError as exc:
-                    raise RuntimeError(f"[swap] invalid start_cmd: {exc}") from exc
-                stop_argv: list[str] | None = None
-                if plan.stop_first:
-                    assert stop_raw is not None
-                    try:
-                        parsed_stop = shlex.split(stop_raw)
-                    except ValueError as exc:
-                        raise RuntimeError(f"[swap] invalid stop_cmd: {exc}") from exc
-                    if not parsed_stop:
-                        raise RuntimeError("[swap] invalid stop_cmd: empty command")
-                    if any("{model}" in arg for arg in parsed_stop):
-                        if target is None:
-                            raise RuntimeError(
-                                "[swap] stop_cmd contains {model} but no model target"
-                            )
-                        parsed_stop = [
-                            arg.replace("{model}", target) for arg in parsed_stop
-                        ]
-                    stop_argv = parsed_stop
-                start_cmd_run = start_argv
-                stop_cmd_run = stop_argv
-                start_display = shlex.join(start_argv)
             if plan.stop_first:
-                assert stop_cmd_run is not None
+                # Keep the existing pre-stop refresh: the server identity may be
+                # stale while the configured stop command is doing its work.
                 try:
                     self.tui.call_from_thread(self.tui.refresh_models)
                 except Exception:
                     pass
-                try:
-                    stop_rc = serverctl.run_command(
-                        stop_cmd_run, on_line=stream, shell=shell, env=env
-                    )
-                except subprocess.TimeoutExpired as exc:
-                    raise RuntimeError("[swap] stop_cmd timed out") from exc
-                except ValueError as exc:
-                    raise RuntimeError(f"[swap] invalid stop_cmd: {exc}") from exc
-                if stop_rc != 0:
-                    raise RuntimeError(f"[swap] stop_cmd exited {stop_rc}")
-
-            try:
-                self.tui.call_from_thread(
-                    self.tui.log_app, f"[swap] starting: {start_display}"
-                )
-            except Exception:
-                pass
-            try:
-                proc, monitor = serverctl.spawn_with_grace(
-                    start_cmd_run,
-                    on_line=stream,
-                    grace_s=2.0,
-                    poll_s=0.05,
-                    shell=shell,
-                    env=env,
-                )
-            except ValueError as exc:
-                raise RuntimeError(f"[swap] invalid start_cmd: {exc}") from exc
-            start_rc = proc.poll()
-            if start_rc is not None and start_rc != 0:
-                raise RuntimeError(f"[swap] start_cmd exited {start_rc}")
-
-            deadline = health_timeout(plan.size_on_disk)
-
-            def tick(seconds: int) -> None:
-                try:
-                    self.tui.call_from_thread(
-                        self._progress_line, plan.model_id or "server", seconds
-                    )
-                except Exception:
-                    pass
-
-            ok = serverctl.wait_healthy(
-                f"http://{host}:{port}/v1/models",
-                target_model=target,
-                is_running=(lambda: proc is not None and proc.poll() is None)
-                if monitor
-                else None,
-                timeout_s=deadline,
-                on_tick=tick,
+            probe = execute_boot(
+                plan,
+                cfg,
+                host=host,
+                port=port,
+                on_line=stream,
+                on_tick=lambda seconds: self._progress_line(
+                    plan.model_id or "server", seconds
+                ),
             )
-            if ok is None:
-                if monitor and proc is not None and proc.poll() is not None:
-                    raise RuntimeError(f"[swap] start_cmd exited {proc.returncode}")
-                message = (
-                    f"swap timed out after {int(deadline)}s — check the log pane"
-                    if plan.stop_first
-                    else "server did not come up in time — check the log pane"
-                )
-                raise RuntimeError(message)
-
-            proc_ident = process.find_server_process(host, port, pidfile)
-            try:
-                self.tui.call_from_thread(
-                    self.tui.update_server_identity, ok, proc_ident
-                )
-                self.tui.call_from_thread(self.tui.log_app, plan.success_line)
-                self.tui.call_from_thread(self.tui.refresh_models)
-                self.tui.call_from_thread(self.tui._refresh_metrics)
-            except Exception as exc:
-                raise RuntimeError(f"[swap] UI update failed: {exc}") from exc
         except Exception as exc:
             try:
-                serverctl._terminate_failed_process(proc)
+                self.tui.call_from_thread(self.tui.record_generation_failure)
             except Exception:
                 pass
             detail = f"{exc.__class__.__name__}: {exc}"[:240]
@@ -402,6 +334,21 @@ class ModelsPane(Vertical):
                 self.tui.call_from_thread(self.tui.log_app, detail, "red")
             except Exception:
                 pass
+        else:
+            try:
+                proc_ident = process.find_server_process(host, port)
+                self.tui.call_from_thread(
+                    self.tui.update_server_identity, probe, proc_ident
+                )
+                self.tui.call_from_thread(self.tui.log_app, plan.success_line)
+                self.tui.call_from_thread(self.tui.refresh_models)
+                self.tui.call_from_thread(self.tui._refresh_metrics)
+            except Exception as exc:
+                detail = f"[swap] UI update failed: {exc}"[:240]
+                try:
+                    self.tui.call_from_thread(self.tui.log_app, detail, "red")
+                except Exception:
+                    pass
         finally:
             try:
                 self.tui.call_from_thread(finish_ui)
@@ -420,15 +367,18 @@ class ModelsPane(Vertical):
             self.tui.log_app("no model selected to delete", "dim")
             return
         row = self.rows[table.cursor_row]
-        # Deleting the model that is currently backing the server leaves the
-        # green dot and loaded marker stale (the process keeps the weights in
-        # RAM while the files vanish), breaks the next warm-load (effective
-        # model still points at the deleted id), and makes the next chat
-        # re-download the deleted repo. Block it with a hint.
-        effective = self.tui.effective_model()
-        if effective is not None and row.repo_id == effective:
+        protected = {
+            model
+            for model in (
+                self.tui.server_identity.selected_model,
+                self.tui.server_identity.last_response_model,
+            )
+            if model is not None
+        }
+        if any(model_identity_matches(row.repo_id, model) for model in protected):
             self.tui.log_app(
-                f"cannot delete {row.repo_id}: it is currently loaded — swap first",
+                f"cannot delete {row.repo_id}: selected or last observed; "
+                "external use is unknown — select and verify another model first",
                 "yellow",
             )
             return
@@ -437,7 +387,7 @@ class ModelsPane(Vertical):
         self._pending_delete_row = row
         self.app.push_screen(
             ConfirmScreen(
-                f"delete {row.repo_id} ({row.size_on_disk / 2**30:.1f} GB)? y/n"
+                f"delete {row.repo_id} ({row.size_on_disk / 2**30:.1f} GiB)? y/n"
             ),
             self._on_delete_confirmed,
         )
@@ -468,11 +418,15 @@ class ModelsPane(Vertical):
             # Race: the loaded model may have changed between confirmation and
             # worker execution. Re-check on the UI thread immediately before
             # touching the cache.
-            effective_now = self.tui.call_from_thread(self.tui.effective_model)
-            if effective_now is not None and row.repo_id == effective_now:
+            identity = self.tui.call_from_thread(lambda: self.tui.server_identity)
+            if any(
+                model_identity_matches(row.repo_id, model)
+                for model in (identity.selected_model, identity.last_response_model)
+            ):
                 self.tui.call_from_thread(
                     self.tui.log_app,
-                    f"cannot delete {row.repo_id}: it became active — swap first",
+                    f"cannot delete {row.repo_id}: now selected or last observed; "
+                    "external use is unknown",
                     "yellow",
                 )
                 return
@@ -492,7 +446,7 @@ class ModelsPane(Vertical):
         else:
             self.tui.call_from_thread(
                 self.tui.log_app,
-                f"deleted {row.repo_id} — freed {freed / 2**30:.1f} GB",
+                f"deleted {row.repo_id} — freed {freed / 2**30:.1f} GiB",
             )
             self.tui.call_from_thread(self.rescan)
         finally:

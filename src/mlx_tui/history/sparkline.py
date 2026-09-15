@@ -21,8 +21,12 @@ def _braille_char(bits: int) -> str:
 def sparkline_visible(
     records: list[TurnRecord], width: int = SPARKLINE_WIDTH
 ) -> list[TurnRecord]:
-    """Filtered + width-capped turns for the sparkline (shared with app.py)."""
-    visible = [r for r in records if not r.cold and not r.cancelled]
+    """Successful turns with a known client request rate, width-capped."""
+    visible = [
+        r
+        for r in records
+        if r.outcome == "success" and not r.cancelled and r.req_tok_s is not None
+    ]
     return visible[-(width * 2) :] if visible else visible
 
 
@@ -70,6 +74,14 @@ def _render_braille(levels: list[int | None], height_rows: int) -> str:
     return "\n".join(lines)
 
 
+def _braille_for(values: list[float | None], height_rows: int) -> str:
+    return _render_braille(_braille_levels(values, height_rows * 4), height_rows)
+
+
+def _width_capped[T](records: list[T], width: int) -> list[T]:
+    return records[-(width * 2) :] if len(records) > width * 2 else records
+
+
 def render_sparkline(
     records: list[TurnRecord],
     *,
@@ -78,22 +90,25 @@ def render_sparkline(
 ) -> tuple[str, str]:
     """Braille sparkline for the sparkline strip.
 
-    Filters ``cold``/``cancelled`` turns, buckets ``tok_s`` into
-    ``height_rows * 4`` dot rows, encodes 2×4 dots per braille char
-    (U+2800 base), shade is caller-applied via ctx quartiles (see
-    app.py helper). Returns ``(braille_lines, legend)`` where
-    ``braille_lines`` is ``height_rows`` lines joined by ``\\n`` and
-    ``legend`` is ``f"{tok_s:.1f} tok/s · ctx {ctx_len} · {n} turns"``
+    Filters to successful turns with a known client request rate, buckets
+    ``req_tok_s`` into ``height_rows * 4`` dot rows, encodes 2×4 dots per
+    braille char (U+2800 base), shade is caller-applied via ctx quartiles.
+    Returns ``(braille_lines, legend)`` where ``braille_lines`` is
+    ``height_rows`` lines joined by ``\\n`` and ``legend`` is
+    ``f"{req_tok_s:.1f} client request tok/s · ctx {ctx_len} · {n} turns"``
     for the latest visible turn. Empty/filtered input →
     ``("", "no history yet — chat to build it")``.
     """
     visible = sparkline_visible(records, width)
     if not visible:
         return ("", "no history yet — chat to build it")
-    dot_rows = height_rows * 4
-    levels = _braille_levels([r.tok_s for r in visible], dot_rows)
-    braille = _render_braille(levels, height_rows)
-    legend = f"{visible[-1].tok_s:.1f} tok/s · ctx {visible[-1].ctx_len} · {len(visible)} turns"
+    braille = _braille_for([r.req_tok_s for r in visible], height_rows)
+    last = visible[-1]
+    assert last.req_tok_s is not None
+    legend = (
+        f"{last.req_tok_s:.1f} client request tok/s · "
+        f"ctx {last.ctx_len} · {len(visible)} turns"
+    )
     return (braille, legend)
 
 
@@ -109,38 +124,42 @@ def render_memory_sparkline(  # noqa: PLR0912
     per braille char (U+2800 base). ``None`` rss produces a blank column so
     legend ``· {n} samples`` counts all records including no-pid ticks.
     Returns ``(braille_lines, legend)`` where ``braille_lines`` is
-    ``height_rows`` lines joined by ``\\n`` and ``legend`` is
-    ``f"{rss:.1f} GB RSS · avail {avail:.1f}/{total:.1f} · {n} samples"``
-    for the latest non-``None`` rss. Empty or all-``None`` →
+    ``height_rows`` lines joined by ``\\n``. When the latest sample is
+    unknown, the legend says ``RSS unknown`` instead of silently showing an
+    older sample as current. Empty or all-``None`` →
     ``("", "no memory samples yet")``.
     """
     if not records:
         return ("", "no memory samples yet")
-    visible = records[-(width * 2) :] if len(records) > width * 2 else records
+    visible = _width_capped(records, width)
     rss_vals = [r.rss_gib for r in visible]
     if all(v is None for v in rss_vals):
         return ("", "no memory samples yet")
-    dot_rows = height_rows * 4
-    levels = _braille_levels(rss_vals, dot_rows)
-    braille = _render_braille(levels, height_rows)
+    braille = _braille_for(rss_vals, height_rows)
     n = len(visible)
-    latest: MemoryRecord | None = None
-    for r in reversed(visible):
-        if r.rss_gib is not None:
-            latest = r
-            break
-    assert latest is not None
-    legend = f"{latest.rss_gib:.1f} GB RSS · avail {latest.avail_gib:.1f}/{latest.total_gib:.1f} · {n} samples"
+    latest = visible[-1]
+    if latest.rss_gib is None:
+        legend = (
+            f"RSS unknown · avail {latest.avail_gib:.1f}/"
+            f"{latest.total_gib:.1f} GiB · {n} samples"
+        )
+        return (braille, legend)
+    legend = (
+        f"{latest.rss_gib:.1f} GiB RSS · avail {latest.avail_gib:.1f}/"
+        f"{latest.total_gib:.1f} GiB · {n} samples"
+    )
     return (braille, legend)
 
 
 def _shade_for_ctx(ctx_lens: list[int]) -> list[str]:
-    """Map ctx lengths to Rich styles via quartiles: dim / \"\" / bold."""
-    if not ctx_lens:
+    """Map ctx lengths to Rich styles via quartiles: dim / "" / bold."""
+    s = sorted(ctx_lens)
+    if not s:
         return []
+    if len(s) < 2:  # noqa: PLR2004
+        return [""] * len(ctx_lens)
     try:
-        q1, _, q3 = statistics.quantiles(sorted(ctx_lens), n=4)
+        q1, _, q3 = statistics.quantiles(s, n=4)
     except statistics.StatisticsError:
-        s = sorted(ctx_lens)
         q1, q3 = s[len(s) // 4], s[3 * len(s) // 4]
     return ["dim" if c <= q1 else "bold" if c >= q3 else "" for c in ctx_lens]

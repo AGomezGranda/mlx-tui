@@ -18,11 +18,9 @@ class BootPlan:
     success_line: str
 
 
-def health_timeout(
-    size_on_disk: int, base_s: float = 60.0, per_gib_s: float = 10.0
-) -> float:
+def health_timeout(size_on_disk: int) -> float:
     """Health-wait deadline: ~60s base plus margin per GiB of weights."""
-    return base_s + per_gib_s * (size_on_disk / 2**30)
+    return 60.0 + 10.0 * (size_on_disk / 2**30)
 
 
 SwapAction = Literal["warm", "restart", "cold", "refuse"]
@@ -57,25 +55,10 @@ def resolve_swap_action(
     return "cold" if (status_state == "red" and has_start) else "refuse"
 
 
-def _refuse_reason(
-    status_state: str,
-    swap_policy: str,
-    has_start: bool,
-    has_stop: bool,
-) -> str:
-    if status_state == "amber":
-        return "endpoint is amber (unexpected service on port) — refusing swap"
-    if swap_policy == "warm":
-        return 'swap_policy is "warm" but endpoint is not green (requires green)'
-    if swap_policy == "restart":
-        return 'swap_policy is "restart" but start_cmd/stop_cmd are not both configured'
-    return "server unreachable and no start_cmd configured"
-
-
 def boot_plan_for(row: ModelRow, *, stop_first: bool = True) -> BootPlan:
     return BootPlan(
         model_id=row.repo_id,
         size_on_disk=row.size_on_disk,
         stop_first=stop_first,
-        success_line=f"✓ {row.repo_id} is serving",
+        success_line=f"✓ request succeeded for {row.repo_id}; residency unknown",
     )

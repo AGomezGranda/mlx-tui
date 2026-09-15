@@ -39,7 +39,9 @@ class HubApi(Protocol):
         self, *, author: str, search: str, limit: int
     ) -> Iterable[ModelInfo]: ...
 
-    def model_info(self, repo_id: str, *, files_metadata: bool) -> ModelInfo: ...
+    def model_info(
+        self, repo_id: str, *, files_metadata: bool, revision: str | None = None
+    ) -> ModelInfo: ...
 
 
 class CancelledDownload(Exception):
@@ -64,24 +66,26 @@ def filtered_download_size(files: Iterable[tuple[str, int]]) -> int:
     return sum(entry["size"] for entry in kept)
 
 
-def repo_files_with_sizes(api: HubApi, repo_id: str) -> list[tuple[str, int]]:
-    info = api.model_info(repo_id, files_metadata=True)
-    return [(s.rfilename, s.size or 0) for s in info.siblings or []]
-
-
 @dataclass(frozen=True)
 class RepoSnapshot:
     revision: str | None
     files: tuple[tuple[str, int], ...]
 
 
-def repo_snapshot(api: HubApi, repo_id: str) -> RepoSnapshot:
-    info = api.model_info(repo_id, files_metadata=True)
+def repo_snapshot(
+    api: HubApi, repo_id: str, *, revision: str | None = None
+) -> RepoSnapshot:
+    requested_revision = revision
+    info = api.model_info(repo_id, files_metadata=True, revision=requested_revision)
     sha = getattr(info, "sha", None)
-    revision = sha if isinstance(sha, str) else None
+    resolved_revision = sha if isinstance(sha, str) else None
+    if requested_revision is not None and sha != requested_revision:
+        raise ValueError(
+            f"Hub returned {sha!r}, expected pinned revision {requested_revision!r}"
+        )
     siblings = info.siblings or []
     files = tuple((s.rfilename, s.size or 0) for s in siblings)
-    return RepoSnapshot(revision=revision, files=files)
+    return RepoSnapshot(revision=resolved_revision, files=files)
 
 
 def free_disk_bytes(cache_dir: Path | None = None) -> int | None:

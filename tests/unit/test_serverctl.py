@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 import httpx
+import psutil
 import pytest
 
 from mlx_tui import serverctl
+from mlx_tui.process import ProcessIdentity
 from mlx_tui.serverctl import build_start_command
 from tests.unit.test_chat import install_transport
 
@@ -224,13 +229,13 @@ def test_run_command_tolerates_callback_failure() -> None:
 
 
 def test_terminate_failed_process_handles_exited_and_none() -> None:
-    serverctl._terminate_failed_process(None)
+    serverctl.terminate_failed_process(None)
     proc = serverctl.spawn_command(
         [sys.executable, "-c", "pass"],
         on_line=lambda _line: None,
     )
     proc.wait(timeout=5)
-    serverctl._terminate_failed_process(proc)
+    serverctl.terminate_failed_process(proc)
 
 
 def test_terminate_failed_process_kills_sleeping_child() -> None:
@@ -238,23 +243,95 @@ def test_terminate_failed_process_kills_sleeping_child() -> None:
         [sys.executable, "-c", "import time; time.sleep(30)"],
         on_line=lambda _line: None,
     )
-    serverctl._terminate_failed_process(proc)
+    serverctl.terminate_failed_process(proc)
     assert proc.poll() is not None
 
 
-def test_terminate_failed_process_cleans_grandchild() -> None:
+def test_terminate_owned_process_reaps_only_matching_child() -> None:
+    owned = serverctl.spawn_command(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        on_line=lambda _line: None,
+    )
+    foreign = serverctl.spawn_command(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        on_line=lambda _line: None,
+    )
+    try:
+        identity = ProcessIdentity(owned.pid, psutil.Process(owned.pid).create_time())
+        serverctl.terminate_owned_process(owned, identity)
+        assert owned.poll() is not None
+        assert foreign.poll() is None
+    finally:
+        if foreign.poll() is None:
+            foreign.terminate()
+        foreign.wait(timeout=5)
+
+
+def test_terminate_owned_process_escalates_within_owned_session() -> None:
+    proc = serverctl.spawn_command(
+        [
+            sys.executable,
+            "-c",
+            "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)",
+        ],
+        on_line=lambda _line: None,
+    )
+    try:
+        identity = ProcessIdentity(proc.pid, psutil.Process(proc.pid).create_time())
+        serverctl.terminate_owned_process(proc, identity)
+        assert proc.poll() is not None
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=5)
+
+
+def test_terminate_owned_process_rejects_recycled_identity() -> None:
+    proc = serverctl.spawn_command(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        on_line=lambda _line: None,
+    )
+    try:
+        wrong = ProcessIdentity(proc.pid, os.times().elapsed)
+        with pytest.raises(RuntimeError, match="identity"):
+            serverctl.terminate_owned_process(proc, wrong)
+        assert proc.poll() is None
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+def test_terminate_failed_process_cleans_term_ignoring_grandchild(
+    tmp_path: Path,
+) -> None:
+    pid_file = tmp_path / "grandchild.pid"
     grandchild_code = (
-        "import subprocess, sys, time; "
-        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
-        "time.sleep(30)"
+        "import signal, subprocess, sys, time; "
+        "child=subprocess.Popen([sys.executable, '-c', "
+        "'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)']); "
+        f"open({str(pid_file)!r}, 'w').write(str(child.pid)); "
+        "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0)); time.sleep(30)"
     )
     proc = serverctl.spawn_command(
         [sys.executable, "-c", grandchild_code],
         on_line=lambda _line: None,
     )
-    time.sleep(0.5)
-    serverctl._terminate_failed_process(proc)
-    assert proc.poll() is not None
+    try:
+        deadline = time.monotonic() + 5.0
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert pid_file.exists()
+        grandchild_pid = int(pid_file.read_text())
+        serverctl.terminate_failed_process(proc)
+        assert proc.poll() is not None
+        deadline = time.monotonic() + 5.0
+        while psutil.pid_exists(grandchild_pid) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not psutil.pid_exists(grandchild_pid)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=5)
 
 
 def test_spawn_command_returns_before_exit_and_streams() -> None:
@@ -328,6 +405,25 @@ def test_wait_healthy_bails_when_spawned_command_dies(
     assert time.monotonic() - start < 5
 
 
+def test_wait_healthy_honors_cancellation_before_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cancel = threading.Event()
+    cancel.set()
+
+    def unexpected_probe(*_args: object, **_kwargs: object) -> object:
+        pytest.fail("cancelled wait performed a probe")
+
+    monkeypatch.setattr(serverctl.httpx.Client, "get", unexpected_probe)
+
+    assert (
+        serverctl.wait_healthy(
+            MODELS_URL, target_model="m", timeout_s=5, cancel_event=cancel
+        )
+        is None
+    )
+
+
 def test_warm_load_sends_probe_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     requests: list[httpx.Request] = []
 
@@ -349,7 +445,7 @@ def test_warm_load_sends_probe_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     assert payload["model"] == "repo/a"
     assert payload["max_tokens"] == 1
     assert "stream" not in payload
-    assert result.response_model is None
+    assert result is None
 
 
 def test_warm_load_returns_response_model(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -366,7 +462,7 @@ def test_warm_load_returns_response_model(monkeypatch: pytest.MonkeyPatch) -> No
 
     result = serverctl.warm_load("http://stub/x", "repo/a", timeout_s=5)
 
-    assert result.response_model == "repo/a"
+    assert result == "repo/a"
 
 
 def test_warm_load_non_string_model_yields_none(
@@ -385,7 +481,7 @@ def test_warm_load_non_string_model_yields_none(
 
     result = serverctl.warm_load("http://stub/x", "repo/a", timeout_s=5)
 
-    assert result.response_model is None
+    assert result is None
 
 
 def test_warm_load_http_error_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -437,9 +533,19 @@ def test_warm_load_connect_error_propagates(monkeypatch: pytest.MonkeyPatch) -> 
 def test_wait_healthy_green_first_poll_with_matching_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": [{"id": "m"}]})
+        return httpx.Response(200, json={"model": "m", "choices": [{}]})
+
     install_transport(
         monkeypatch,
-        lambda request: httpx.Response(200, json={"data": [{"id": "m"}]}),
+        handler,
     )
 
     probe = serverctl.wait_healthy(
@@ -451,18 +557,23 @@ def test_wait_healthy_green_first_poll_with_matching_model(
     assert probe is not None
     assert probe.state == "green"
     assert probe.model_id == "m"
+    assert [request.method for request in requests] == ["GET", "GET", "POST"]
 
 
 def test_wait_healthy_wrong_model_then_right(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls = 0
+    generation_calls = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        model = "other" if calls <= 2 else "m"
-        return httpx.Response(200, json={"data": [{"id": model}]})
+        nonlocal generation_calls
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": [{"id": "other"}]})
+        generation_calls += 1
+        model = "other" if generation_calls == 1 else "m"
+        return httpx.Response(200, json={"model": model, "choices": [{}]})
 
     install_transport(monkeypatch, handler)
 
@@ -474,7 +585,7 @@ def test_wait_healthy_wrong_model_then_right(
 
     assert probe is not None
     assert probe.model_id == "m"
-    assert calls >= 3
+    assert generation_calls == 2
 
 
 def test_wait_healthy_catalog_verifies_target_with_completion(
@@ -484,6 +595,8 @@ def test_wait_healthy_catalog_verifies_target_with_completion(
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
         if request.method == "GET":
             return httpx.Response(200, json={"data": [{"id": "a"}, {"id": "b"}]})
         assert str(request.url) == "http://stub/v1/chat/completions"
@@ -493,7 +606,7 @@ def test_wait_healthy_catalog_verifies_target_with_completion(
     install_transport(monkeypatch, handler)
     probe = serverctl.wait_healthy(MODELS_URL, target_model="b", timeout_s=5)
     assert probe is not None and probe.model_id == "b"
-    assert len(requests) == 2
+    assert len(requests) == 3
 
 
 def test_wait_healthy_times_out_when_always_red(
@@ -521,10 +634,12 @@ def test_wait_healthy_times_out_when_always_red(
 def test_wait_healthy_target_none_accepts_any_green(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    install_transport(
-        monkeypatch,
-        lambda request: httpx.Response(200, json={"data": [{"id": "someone"}]}),
-    )
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        return httpx.Response(200, json={"data": [{"id": "someone"}]})
+
+    install_transport(monkeypatch, handler)
 
     probe = serverctl.wait_healthy(
         MODELS_URL,
@@ -534,16 +649,21 @@ def test_wait_healthy_target_none_accepts_any_green(
 
     assert probe is not None
     assert probe.state == "green"
-    assert probe.model_id == "someone"
+    assert probe.model_id is None
+    assert probe.available_models == ("someone",)
 
 
 def test_wait_healthy_wrong_endpoint_model_times_out(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    install_transport(
-        monkeypatch,
-        lambda request: httpx.Response(200, json={"data": [{"id": "other"}]}),
-    )
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": [{"id": "other"}]})
+        return httpx.Response(200, json={"model": "other", "choices": [{}]})
+
+    install_transport(monkeypatch, handler)
 
     probe = serverctl.wait_healthy(
         MODELS_URL,
@@ -554,13 +674,17 @@ def test_wait_healthy_wrong_endpoint_model_times_out(
     assert probe is None
 
 
-def test_wait_healthy_missing_target_id_times_out(
+def test_wait_healthy_missing_response_identity_times_out(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    install_transport(
-        monkeypatch,
-        lambda request: httpx.Response(200, json={"data": [{"id": ""}]}),
-    )
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": [{"id": ""}]})
+        return httpx.Response(200, json={"choices": [{}]})
+
+    install_transport(monkeypatch, handler)
 
     probe = serverctl.wait_healthy(
         MODELS_URL,

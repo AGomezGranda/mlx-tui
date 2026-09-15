@@ -1,6 +1,6 @@
 [project]
 name = "mlx-tui"
-version = "0.1.0"
+version = "0.3.0"
 description = "mlx tui"
 readme = "README.md"
 license = "MIT"
@@ -53,5 +53,6 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
+addopts = ["-q", "--tb=short"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"

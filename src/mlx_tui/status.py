@@ -1,9 +1,11 @@
-"""Status-bar domain logic: liveness classification, cold tracking, rendering."""
+"""Status-bar domain logic: liveness classification and rendering."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import NamedTuple
+from typing import Literal, NamedTuple
+
+GenerationState = Literal["unknown", "succeeded", "failed", "client_cancelled"]
 
 
 class MemorySnapshot(NamedTuple):
@@ -13,16 +15,24 @@ class MemorySnapshot(NamedTuple):
 
 @dataclass(frozen=True)
 class ServerProbe:
+    """One endpoint observation plus optional request-scoped model evidence."""
+
     state: str
     model_id: str | None
     available_models: tuple[str, ...] = ()
+    catalogue_state: str = "unknown"
 
 
 @dataclass(frozen=True)
 class ServerIdentity:
     host: str
     port: int
-    model_id: str | None = None
+    selected_model: str | None = None
+    last_response_model: str | None = None
+    last_success_at: float | None = None
+    generation_state: GenerationState = "unknown"
+    available_models: tuple[str, ...] = ()
+    catalogue_state: str = "unknown"
     pid: int | None = None
     pid_create_time: float | None = None
 
@@ -34,82 +44,33 @@ def probe_from_response(status_code: int, body: object) -> ServerProbe:
     """Pure probe for a completed ``GET /v1/models`` response.
 
     green ⇔ 200 AND body parses to a dict whose ``data`` is a non-empty
-    list; every other complete HTTP response is amber. The model is the
-    sole valid model ID when unambiguous. Multiple IDs are a catalog, not
-    evidence that its first entry is loaded.
+    list; every other complete HTTP response is amber. Catalogue entries are
+    availability only and never become response or residency evidence.
     """
     data = body.get("data") if isinstance(body, dict) else None
     if status_code == _HTTP_OK and isinstance(data, list) and len(data) > 0:
-        model_ids: list[str] = []
-        for entry in data:
-            if isinstance(entry, dict):
-                mid = entry.get("id")
-                if isinstance(mid, str) and mid:
-                    model_ids.append(mid)
+        model_ids = [
+            mid
+            for entry in data
+            if isinstance(entry, dict)
+            and isinstance((mid := entry.get("id")), str)
+            and mid
+        ]
         return ServerProbe(
             state="green",
-            model_id=model_ids[0] if len(model_ids) == 1 else None,
+            model_id=None,
             available_models=tuple(model_ids),
+            catalogue_state="green",
         )
-    return ServerProbe(state="amber", model_id=None)
+    return ServerProbe(state="amber", model_id=None, catalogue_state="amber")
 
 
-def classify_liveness(status_code: int, body: object) -> str:
-    """Pure classifier for a completed ``GET /v1/models`` response.
-
-    'red' is reserved for transport failure and is decided by the caller's
-    exception path — this function never sees one. green ⇔ 200 AND body parses
-    to a dict whose ``data`` is a non-empty list; every other complete HTTP
-    response (junk JSON, wrong shape, 502 HTML proxy squatting on the port)
-    is 'amber'.
-    """
-    return probe_from_response(status_code, body).state
-
-
-class ColdTracker:
-    """Tracks whether a turn deserves the ``· cold`` stamp.
-
-    Arming rule: a cold stamp is justified **only** by a true
-    green→red→green cycle — a green must have been observed before the red —
-    so the first turn after TUI startup against an hours-warm server is never
-    mislabelled cold.
-    """
-
-    def __init__(self) -> None:
-        self.ever_green = False
-        self.red_since_green = False
-        self.cold_pending = False
-
-    def observe(self, state: str) -> None:
-        if state == "green":
-            self.ever_green = True
-            if self.red_since_green:
-                self.cold_pending = True
-                self.red_since_green = False
-        elif state == "red":
-            if self.ever_green:
-                self.red_since_green = True
-
-    def consume_cold(self) -> bool:
-        """Return whether a cold stamp is armed, resetting it in the same breath."""
-        cold = self.cold_pending
-        self.cold_pending = False
-        return cold
-
-
-def format_status_line(
-    *,
-    state: str,
-    model: str | None,
-    rss_gib: float | None,
-    memory: MemorySnapshot,
-    port: int,
-) -> str:
-    """Render the status bar line; em-dashes stand in for missing pieces."""
-    colour = "yellow" if state == "amber" else state
-    model_part = model if model else "—"
-    rss_part = f"{rss_gib:.1f}" if rss_gib is not None else "—"
-    return (
-        f"[{colour}]●[/] {model_part} · RSS {rss_part} GB · "
-        f"avail {memory.avail_gib:.1f}/{memory.total_gib:.1f} GB · :{port}"
-    )
+def health_state_from_response(status_code: int, body: object) -> str:
+    """Classify the pinned runtime's independent ``GET /health`` response."""
+    if (
+        status_code == _HTTP_OK
+        and isinstance(body, dict)
+        and body.get("status") == "ok"
+    ):
+        return "green"
+    return "amber"

@@ -10,7 +10,7 @@ def _frame(chunk: dict[str, object], *, no_space: bool = False) -> bytes:
     return f"{prefix}{json.dumps(chunk)}\n\n".encode()
 
 
-def sse_frames(  # noqa: PLR0913
+def sse_frames(  # noqa: PLR0913, PLR0912
     deltas: list[str] | None = None,
     *,
     finish: str | None = "stop",
@@ -19,6 +19,11 @@ def sse_frames(  # noqa: PLR0913
     usage: tuple[int, int] | None = None,
     done: bool = True,
     no_space: bool = False,
+    model: str = "test-model",
+    reasoning: list[str] | None = None,
+    tool_calls: list[dict[str, object]] | None = None,
+    cached: int | None = None,
+    raw_usage: dict[str, object] | None = None,
 ) -> bytes:
     """One-liner for builder uses; covers malformed/keepalive/usage/done."""
     frames: list[bytes] = []
@@ -29,36 +34,74 @@ def sse_frames(  # noqa: PLR0913
     # role frame
     frames.append(
         _frame(
-            {"choices": [{"delta": {"role": "assistant"}, "finish_reason": None}]},
+            {
+                "model": model,
+                "choices": [{"delta": {"role": "assistant"}, "finish_reason": None}],
+            },
             no_space=no_space,
         )
     )
     for d in deltas or []:
         frames.append(
             _frame(
-                {"choices": [{"delta": {"content": d}, "finish_reason": None}]},
+                {
+                    "model": model,
+                    "choices": [{"delta": {"content": d}, "finish_reason": None}],
+                },
+                no_space=no_space,
+            )
+        )
+    for r in reasoning or []:
+        frames.append(
+            _frame(
+                {
+                    "model": model,
+                    "choices": [{"delta": {"reasoning": r}, "finish_reason": None}],
+                },
+                no_space=no_space,
+            )
+        )
+    if tool_calls is not None:
+        frames.append(
+            _frame(
+                {
+                    "model": model,
+                    "choices": [
+                        {"delta": {"tool_calls": tool_calls}, "finish_reason": None}
+                    ],
+                },
                 no_space=no_space,
             )
         )
     if finish is not None:
         frames.append(
             _frame(
-                {"choices": [{"delta": {}, "finish_reason": finish}]},
+                {
+                    "model": model,
+                    "choices": [{"delta": {}, "finish_reason": finish}],
+                },
                 no_space=no_space,
             )
         )
-    if usage is not None:
-        pt, ct = usage
+    if raw_usage is not None:
         frames.append(
             _frame(
-                {
-                    "choices": [],
-                    "usage": {
-                        "prompt_tokens": pt,
-                        "completion_tokens": ct,
-                        "total_tokens": pt + ct,
-                    },
-                },
+                {"model": model, "choices": [], "usage": raw_usage},
+                no_space=no_space,
+            )
+        )
+    elif usage is not None:
+        pt, ct = usage
+        usage_obj: dict[str, object] = {
+            "prompt_tokens": pt,
+            "completion_tokens": ct,
+            "total_tokens": pt + ct,
+        }
+        if cached is not None:
+            usage_obj["prompt_tokens_details"] = {"cached_tokens": cached}
+        frames.append(
+            _frame(
+                {"model": model, "choices": [], "usage": usage_obj},
                 no_space=no_space,
             )
         )

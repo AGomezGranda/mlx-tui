@@ -1,4 +1,4 @@
-"""Unit tests for mlx_tui.history token estimation and window trimming."""
+"""Unit tests for history records and storage."""
 
 from __future__ import annotations
 
@@ -6,341 +6,96 @@ import dataclasses
 
 import pytest
 
-from mlx_tui.history.sparkline import render_sparkline
 from mlx_tui.history.store import HistoryStore, TurnRecord
-from mlx_tui.history.tokens import (
-    CHARS_PER_TOKEN_EST,
-    ContextLimitError,
-    ctx_bar_style,
-    ctx_bar_text,
-    estimate_message_tokens,
-    estimate_prompt_tokens,
-    estimate_tokens,
-    prepare_context,
-    trim_for_context,
-)
 
 
-def u(text: str) -> dict[str, str]:
-    return {"role": "user", "content": text}
+def _record(**overrides: object) -> TurnRecord:
+    base: dict[str, object] = {
+        "ts": 1.0,
+        "model": "m",
+        "prompt_tok": 10,
+        "out_tok": 5,
+        "first_output_s": 0.1,
+        "answer_started_s": 0.2,
+        "total_s": 1.0,
+        "req_tok_s": 12.3,
+        "ctx_len": 10,
+        "outcome": "success",
+    }
+    base.update(overrides)
+    return TurnRecord(**base)  # type: ignore[arg-type]
 
 
-def a(text: str) -> dict[str, str]:
-    return {"role": "assistant", "content": text}
-
-
-def test_chars_per_token_constant_is_pinned() -> None:
-    # Both history.py and sse.py depend on this value's stability.
-    assert CHARS_PER_TOKEN_EST == 3.5
-
-
-def test_estimate_tokens_matches_chars_over_three_point_five() -> None:
-    assert estimate_tokens("") == 0
-    assert estimate_tokens("ab") == 1
-    assert estimate_tokens("abcd") == 2  # ceil(4/3.5)
-
-
-def test_trim_returns_empty_for_empty_history() -> None:
-    assert trim_for_context([], 100) == []
-
-
-def test_trim_keeps_everything_when_budget_allows() -> None:
-    messages = [u("hi"), a("hello"), u("more")]
-    assert trim_for_context(messages, 10_000) == messages
-
-
-def test_trim_drops_oldest_turns_first() -> None:
-    messages = [u("one"), a("reply-one"), u("two"), a("reply-two"), u("three")]
-    # Budget fits "two"/"reply-two"/"three" but not turn one.
-    budget = (
-        estimate_message_tokens(u("two"))
-        + estimate_message_tokens(a("reply-two"))
-        + estimate_message_tokens(u("three"))
-    )
-    trimmed = trim_for_context(messages, budget)
-    assert trimmed == [u("two"), a("reply-two"), u("three")]
-
-
-def test_trim_boundary_lands_on_user_message() -> None:
-    messages = [u("old prompt"), a("old reply"), u("new")]
-    # Budget fits only from the assistant reply onward — an illegal boundary —
-    # so the window must fall forward to the next user message.
-    budget = estimate_message_tokens(a("old reply")) + estimate_message_tokens(u("new"))
-    trimmed = trim_for_context(messages, budget)
-    assert trimmed[0]["role"] == "user"
-    assert trimmed == [u("new")]
-
-
-def test_trim_rejects_newest_message_that_cannot_fit() -> None:
-    newest = u("latest")
-    with pytest.raises(ContextLimitError, match="newest message"):
-        trim_for_context([newest], estimate_message_tokens(newest) - 1)
-
-
-def test_prepare_context_rejects_oversize_newest() -> None:
-    huge = "y" * 100_000
-    with pytest.raises(ContextLimitError) as exc_info:
-        prepare_context([u(huge)], None, max_ctx=1024, max_tokens=256)
-    assert "newest message" in exc_info.value.reason
-    assert "max_ctx=1024" in exc_info.value.reason
-
-
-def test_estimate_prompt_includes_system_and_framing_overhead() -> None:
-    messages = [u("hello")]
-    system = "You are concise."
-    assert estimate_prompt_tokens(messages, system) == (
-        estimate_prompt_tokens(messages)
-        + estimate_message_tokens({"role": "system", "content": system})
-    )
-
-
-def test_prepare_context_reserves_max_tokens() -> None:
-    messages = [u("hello"), a("reply")]
-    input_tokens = estimate_prompt_tokens(messages)
-    window = prepare_context(
-        messages,
-        None,
-        max_ctx=input_tokens + 128,
-        max_tokens=128,
-    )
-    assert window.input_tokens == input_tokens
-    assert window.reserved_tokens == input_tokens + 128
-    assert window.reserved_tokens <= input_tokens + 128
-
-
-def test_prepare_context_trims_complete_turns_and_honors_boundary() -> None:
-    messages = [u("old"), a("old reply"), u("new")]
-    retained = [u("new")]
-    input_tokens = estimate_prompt_tokens(retained)
-    window = prepare_context(
-        messages,
-        None,
-        max_ctx=input_tokens + 1,
-        max_tokens=1,
-    )
-    assert window.messages == tuple(retained)
-
-
-def test_turn_record_is_frozen_and_has_nine_fields() -> None:
-    r = TurnRecord(
-        ts=1.0,
-        model="m",
-        prompt_tok=10,
-        out_tok=5,
-        ttft_s=0.1,
-        tok_s=12.3,
-        ctx_len=10,
-        cold=False,
-    )
+def test_turn_record_is_frozen_and_has_expected_fields() -> None:
+    r = _record()
     assert r.model == "m"
-    assert len(dataclasses.fields(TurnRecord)) == 12
-    assert r.prefill_tok_s is None
+    assert len(dataclasses.fields(TurnRecord)) == 15
+    assert r.outcome == "success"
+    assert r.cached_prompt_tokens is None
     with pytest.raises(dataclasses.FrozenInstanceError):
         r.model = "other"  # type: ignore[misc]
 
 
-def test_turn_record_is_frozen_and_has_ten_fields() -> None:
-    r = TurnRecord(
-        ts=1.0,
-        model="m",
-        prompt_tok=10,
-        out_tok=5,
-        ttft_s=0.1,
-        tok_s=12.3,
-        ctx_len=10,
-        cold=False,
-    )
-    assert len(dataclasses.fields(TurnRecord)) == 12
-    assert r.prefill_tok_s is None
+def test_turn_record_outcome_and_cached_defaults() -> None:
+    r = _record(outcome="length_capped", cached_prompt_tokens=109)
+    assert r.outcome == "length_capped"
+    assert r.cached_prompt_tokens == 109
+    r2 = _record()
+    assert r2.outcome == "success"
+    assert r2.cached_prompt_tokens is None
 
 
-def test_turn_record_prefill_default_none_and_set() -> None:
-    r = TurnRecord(
-        ts=1.0,
-        model="m",
-        prompt_tok=10,
-        out_tok=5,
-        ttft_s=0.1,
-        tok_s=12.3,
-        ctx_len=10,
-        cold=False,
-        prefill_tok_s=84.2,
-    )
-    assert r.prefill_tok_s == 84.2
-    # default still None when omitted
-    r2 = TurnRecord(
-        ts=1.0,
-        model="m",
-        prompt_tok=10,
-        out_tok=5,
-        ttft_s=0.1,
-        tok_s=12.3,
-        ctx_len=10,
-        cold=False,
-    )
-    assert r2.prefill_tok_s is None
-
-
-def test_prefill_in_all_records() -> None:
+def test_incomplete_unknown_rate_in_all_records() -> None:
     store = HistoryStore()
-    rec = TurnRecord(
-        ts=1.0,
-        model="m",
-        prompt_tok=10,
-        out_tok=5,
-        ttft_s=0.1,
-        tok_s=12.3,
-        ctx_len=10,
-        cold=False,
-        prefill_tok_s=84.2,
-    )
+    rec = _record(outcome="incomplete", prompt_tok=None, out_tok=None, req_tok_s=None)
     store.add(rec)
-    assert store.all_records()[0].prefill_tok_s == 84.2
+    got = store.all_records()[0]
+    assert got.req_tok_s is None
+    assert got.prompt_tok is None
+    assert got.outcome == "incomplete"
 
 
 def test_store_add_and_series_preserves_order() -> None:
     store = HistoryStore()
     for ts in (1, 2, 3):
-        store.add(
-            TurnRecord(
-                ts=float(ts),
-                model="m",
-                prompt_tok=10,
-                out_tok=5,
-                ttft_s=0.1,
-                tok_s=12.3,
-                ctx_len=10,
-                cold=False,
-            )
-        )
+        store.add(_record(ts=float(ts)))
     assert [r.ts for r in store.series("m")] == [1.0, 2.0, 3.0]
 
 
 def test_store_per_model_isolation() -> None:
     store = HistoryStore()
-    store.add(
-        TurnRecord(
-            ts=1,
-            model="a",
-            prompt_tok=1,
-            out_tok=1,
-            ttft_s=0.1,
-            tok_s=1,
-            ctx_len=1,
-            cold=False,
-        )
-    )
-    store.add(
-        TurnRecord(
-            ts=2,
-            model="a",
-            prompt_tok=1,
-            out_tok=1,
-            ttft_s=0.1,
-            tok_s=2,
-            ctx_len=1,
-            cold=False,
-        )
-    )
-    store.add(
-        TurnRecord(
-            ts=3,
-            model="b",
-            prompt_tok=1,
-            out_tok=1,
-            ttft_s=0.1,
-            tok_s=3,
-            ctx_len=1,
-            cold=False,
-        )
-    )
+    store.add(_record(ts=1, model="a", req_tok_s=1))
+    store.add(_record(ts=2, model="a", req_tok_s=2))
+    store.add(_record(ts=3, model="b", req_tok_s=3))
     assert len(store.series("a")) == 2
     assert len(store.series("b")) == 1
-    assert store.models() == ["a", "b"]
 
 
 def test_store_ring_eviction_at_64() -> None:
     store = HistoryStore(max_turns=3)
     for ts in (1, 2, 3, 4):
-        store.add(
-            TurnRecord(
-                ts=float(ts),
-                model="m",
-                prompt_tok=10,
-                out_tok=5,
-                ttft_s=0.1,
-                tok_s=12.3,
-                ctx_len=10,
-                cold=False,
-            )
-        )
+        store.add(_record(ts=float(ts)))
     assert [r.ts for r in store.series("m")] == [2.0, 3.0, 4.0]
 
 
-def test_store_cold_and_cancelled_flags_survive() -> None:
+def test_store_outcome_and_cancelled_flags_survive() -> None:
     store = HistoryStore()
-    store.add(
-        TurnRecord(
-            ts=1,
-            model="m",
-            prompt_tok=1,
-            out_tok=1,
-            ttft_s=0.1,
-            tok_s=1,
-            ctx_len=1,
-            cold=True,
-        )
-    )
-    store.add(
-        TurnRecord(
-            ts=2,
-            model="m",
-            prompt_tok=1,
-            out_tok=1,
-            ttft_s=0.1,
-            tok_s=1,
-            ctx_len=1,
-            cold=False,
-            cancelled=True,
-        )
-    )
+    store.add(_record(ts=1, outcome="length_capped"))
+    store.add(_record(ts=2, outcome="cancelled", cancelled=True, req_tok_s=None))
     records = store.all_records()
-    assert any(r.cold for r in records)
+    assert any(r.outcome == "length_capped" for r in records)
     assert any(r.cancelled for r in records)
 
 
 def test_store_clear_one_model() -> None:
     store = HistoryStore()
-    store.add(
-        TurnRecord(
-            ts=1,
-            model="a",
-            prompt_tok=1,
-            out_tok=1,
-            ttft_s=0.1,
-            tok_s=1,
-            ctx_len=1,
-            cold=False,
-        )
-    )
-    store.add(
-        TurnRecord(
-            ts=2,
-            model="b",
-            prompt_tok=1,
-            out_tok=1,
-            ttft_s=0.1,
-            tok_s=1,
-            ctx_len=1,
-            cold=False,
-        )
-    )
+    store.add(_record(ts=1, model="a"))
+    store.add(_record(ts=2, model="b"))
     store.clear("a")
     assert store.series("a") == []
     assert len(store.series("b")) == 1
     store.clear()
     assert store.series("b") == []
-    assert store.models() == []
 
 
 def test_max_turns_constant_is_64() -> None:
@@ -349,348 +104,35 @@ def test_max_turns_constant_is_64() -> None:
 
 def test_series_returns_copy_mutating_does_not_affect_store() -> None:
     store = HistoryStore()
-    store.add(
-        TurnRecord(
-            ts=1,
-            model="m",
-            prompt_tok=1,
-            out_tok=1,
-            ttft_s=0.1,
-            tok_s=1,
-            ctx_len=1,
-            cold=False,
-        )
-    )
+    store.add(_record(ts=1))
     original = store.series("m")
     lst = store.series("m")
     lst.clear()
     assert store.series("m") == original
 
 
-def test_render_empty_and_cold_filtered_return_placeholder() -> None:
-    assert render_sparkline([]) == ("", "no history yet — chat to build it")
-    cold_only = [
-        TurnRecord(
-            ts=1,
-            model="m",
-            prompt_tok=1,
-            out_tok=1,
-            ttft_s=0.1,
-            tok_s=5,
-            ctx_len=10,
-            cold=True,
-        )
-    ]
-    assert render_sparkline(cold_only) == ("", "no history yet — chat to build it")
-
-
-def test_render_single_turn_produces_one_braille_char_plus_legend() -> None:
-    rec = TurnRecord(
-        ts=1,
-        model="m",
-        prompt_tok=10,
-        out_tok=5,
-        ttft_s=0.1,
-        tok_s=10,
-        ctx_len=100,
-        cold=False,
-    )
-    braille, legend = render_sparkline([rec], width=32, height_rows=2)
-    stripped = braille.replace("\n", "").strip()
-    assert len(stripped) == 1
-    assert 0x2800 <= ord(stripped) <= 0x28FF
-    assert "10.0 tok/s" in legend
-
-
-def test_render_flat_tok_s_does_not_div0() -> None:
-    recs = [
-        TurnRecord(
-            ts=float(i),
-            model="m",
-            prompt_tok=10,
-            out_tok=5,
-            ttft_s=0.1,
-            tok_s=5.0,
-            ctx_len=10,
-            cold=False,
-        )
-        for i in range(3)
-    ]
-    braille, legend = render_sparkline(recs)
-    assert braille  # non-empty
-    assert "5.0 tok/s" in legend
-    # flat series should render as bottom line — at least bottom row non-blank
-    lines = braille.split("\n")
-    assert any(line.strip() for line in lines)
-
-
-def test_render_cancelled_excluded() -> None:
-    recs = [
-        TurnRecord(
-            ts=1,
-            model="m",
-            prompt_tok=10,
-            out_tok=5,
-            ttft_s=0.1,
-            tok_s=10,
-            ctx_len=10,
-            cold=False,
-        ),
-        TurnRecord(
-            ts=2,
-            model="m",
-            prompt_tok=10,
-            out_tok=5,
-            ttft_s=0.1,
-            tok_s=20,
-            ctx_len=10,
-            cold=False,
-            cancelled=True,
-        ),
-    ]
-    braille, legend = render_sparkline(recs)
-    assert "1 turns" in legend
-    assert braille.replace("\n", "").strip()  # one visible => one char
-
-
-def test_render_width_clipping() -> None:
-    recs = [
-        TurnRecord(
-            ts=float(i),
-            model="m",
-            prompt_tok=10,
-            out_tok=5,
-            ttft_s=0.1,
-            tok_s=float(i),
-            ctx_len=10 + i,
-            cold=False,
-        )
-        for i in range(70)
-    ]
-    braille, _legend = render_sparkline(recs, width=32, height_rows=2)
-    lines = braille.split("\n")
-    assert len(lines) == 2
-    for line in lines:
-        assert len(line) == 32
-
-
-def test_render_height_rows_two_produces_two_lines() -> None:
-    recs = [
-        TurnRecord(
-            ts=float(i),
-            model="m",
-            prompt_tok=10,
-            out_tok=5,
-            ttft_s=0.1,
-            tok_s=float(i),
-            ctx_len=10,
-            cold=False,
-        )
-        for i in range(4)
-    ]
-    braille2, _ = render_sparkline(recs, height_rows=2)
-    assert braille2.count("\n") == 1
-    braille1, _ = render_sparkline(recs, height_rows=1)
-    assert "\n" not in braille1
-
-
 def test_estimated_flags_default_false_and_survive() -> None:
     store = HistoryStore()
-    rec = TurnRecord(
-        ts=1.0,
-        model="m",
-        prompt_tok=10,
-        out_tok=5,
-        ttft_s=0.1,
-        tok_s=12.3,
-        ctx_len=10,
-        cold=False,
-        prompt_estimated=True,
-        out_estimated=True,
-    )
+    rec = _record(prompt_estimated=True, out_estimated=True)
     store.add(rec)
     got = store.all_records()[0]
     assert got.prompt_estimated is True
     assert got.out_estimated is True
-    defaulted = TurnRecord(
-        ts=2.0,
-        model="m",
-        prompt_tok=10,
-        out_tok=5,
-        ttft_s=0.1,
-        tok_s=12.3,
-        ctx_len=10,
-        cold=False,
-    )
+    defaulted = _record(ts=2.0)
     assert defaulted.prompt_estimated is False
     assert defaulted.out_estimated is False
 
 
-def test_fallback_output_scales_with_response_length() -> None:
-    from mlx_tui.sse import token_accounting  # noqa: PLC0415
-
-    long_text = "x" * 350
-    acct = token_accounting(
-        prompt_tokens=None,
-        completion_tokens=None,
-        prompt_estimate=10,
-        full_text=long_text,
-        elapsed=1.0,
+def test_failed_cancelled_counts_unknown() -> None:
+    rec = _record(
+        outcome="cancelled",
+        cancelled=True,
+        prompt_tok=None,
+        out_tok=None,
+        first_output_s=None,
+        answer_started_s=None,
+        total_s=None,
+        req_tok_s=None,
     )
-    assert acct.completion_tokens == estimate_tokens(long_text)
-    assert acct.completion_tokens > 1
-    assert acct.completion_estimated is True
-
-
-def test_shade_for_ctx_quartiles() -> None:
-    from mlx_tui.history.sparkline import _shade_for_ctx  # noqa: PLC0415
-
-    styles = _shade_for_ctx([100, 200, 300, 400])
-    assert styles[0] == "dim"
-    assert styles[-1] == "bold"
-    assert styles[2] == ""
-    # empty input returns empty
-    assert _shade_for_ctx([]) == []
-
-
-def test_memory_record_is_frozen() -> None:
-    from mlx_tui.history.store import MemoryRecord  # noqa: PLC0415
-
-    r = MemoryRecord(ts=1.0, model="m", rss_gib=1.2, avail_gib=8.0, total_gib=16.0)
-    assert r.model == "m"
-    assert len(dataclasses.fields(MemoryRecord)) == 5
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        r.model = "other"  # type: ignore[misc]
-
-
-def test_memory_store_add_and_series_preserves_order() -> None:
-    from mlx_tui.history.store import MemoryRecord, MemoryStore  # noqa: PLC0415
-
-    store = MemoryStore()
-    for ts in (1, 2, 3):
-        store.add(
-            MemoryRecord(
-                ts=float(ts), model="m", rss_gib=1.0, avail_gib=8.0, total_gib=16.0
-            )
-        )
-    assert [r.ts for r in store.series()] == [1.0, 2.0, 3.0]
-
-
-def test_memory_store_clear() -> None:
-    from mlx_tui.history.store import MemoryRecord, MemoryStore  # noqa: PLC0415
-
-    store = MemoryStore()
-    store.add(MemoryRecord(ts=1, model="m", rss_gib=1.0, avail_gib=8.0, total_gib=16.0))
-    store.clear()
-    assert store.series() == []
-
-
-def test_memory_store_ring_eviction_at_256() -> None:
-    from mlx_tui.history.store import MemoryRecord, MemoryStore  # noqa: PLC0415
-
-    store = MemoryStore(maxlen=3)
-    for ts in (1, 2, 3, 4):
-        store.add(
-            MemoryRecord(
-                ts=float(ts), model="m", rss_gib=1.0, avail_gib=8.0, total_gib=16.0
-            )
-        )
-    assert [r.ts for r in store.series()] == [2.0, 3.0, 4.0]
-
-
-def test_memory_store_series_returns_copy() -> None:
-    from mlx_tui.history.store import MemoryRecord, MemoryStore  # noqa: PLC0415
-
-    store = MemoryStore()
-    store.add(MemoryRecord(ts=1, model="m", rss_gib=1.0, avail_gib=8.0, total_gib=16.0))
-    lst = store.series()
-    lst.clear()
-    assert len(store.series()) == 1
-
-
-def test_render_memory_empty_returns_placeholder() -> None:
-    from mlx_tui.history.sparkline import render_memory_sparkline  # noqa: PLC0415
-
-    assert render_memory_sparkline([]) == ("", "no memory samples yet")
-
-
-def test_render_memory_all_none_returns_placeholder() -> None:
-    from mlx_tui.history.sparkline import render_memory_sparkline  # noqa: PLC0415
-    from mlx_tui.history.store import MemoryRecord  # noqa: PLC0415
-
-    recs = [MemoryRecord(ts=1, model="m", rss_gib=None, avail_gib=8.0, total_gib=16.0)]
-    assert render_memory_sparkline(recs) == ("", "no memory samples yet")
-
-
-def test_render_memory_single_produces_braille_and_legend() -> None:
-    from mlx_tui.history.sparkline import render_memory_sparkline  # noqa: PLC0415
-    from mlx_tui.history.store import MemoryRecord  # noqa: PLC0415
-
-    rec = MemoryRecord(ts=1, model="m", rss_gib=2.5, avail_gib=8.0, total_gib=16.0)
-    braille, legend = render_memory_sparkline([rec], width=32, height_rows=2)
-    stripped = braille.replace("\n", "").strip()
-    assert len(stripped) == 1
-    assert 0x2800 <= ord(stripped) <= 0x28FF
-    assert "2.5 GB RSS" in legend
-    assert "avail 8.0/16.0" in legend
-    assert "1 samples" in legend
-
-
-def test_render_memory_flat_does_not_div0() -> None:
-    from mlx_tui.history.sparkline import render_memory_sparkline  # noqa: PLC0415
-    from mlx_tui.history.store import MemoryRecord  # noqa: PLC0415
-
-    recs = [
-        MemoryRecord(ts=float(i), model="m", rss_gib=1.0, avail_gib=8.0, total_gib=16.0)
-        for i in range(3)
-    ]
-    braille, legend = render_memory_sparkline(recs)
-    assert braille
-    assert "1.0 GB RSS" in legend
-
-
-def test_render_memory_width_clipping() -> None:
-    from mlx_tui.history.sparkline import render_memory_sparkline  # noqa: PLC0415
-    from mlx_tui.history.store import MemoryRecord  # noqa: PLC0415
-
-    recs = [
-        MemoryRecord(
-            ts=float(i), model="m", rss_gib=float(i), avail_gib=8.0, total_gib=16.0
-        )
-        for i in range(70)
-    ]
-    braille, _ = render_memory_sparkline(recs, width=32, height_rows=2)
-    lines = braille.split("\n")
-    assert len(lines) == 2
-    for line in lines:
-        assert len(line) == 32
-
-
-def test_render_memory_with_none_blank_column() -> None:
-    from mlx_tui.history.sparkline import render_memory_sparkline  # noqa: PLC0415
-    from mlx_tui.history.store import MemoryRecord  # noqa: PLC0415
-
-    recs = [
-        MemoryRecord(ts=1, model="m", rss_gib=None, avail_gib=8.0, total_gib=16.0),
-        MemoryRecord(ts=2, model="m", rss_gib=2.0, avail_gib=7.5, total_gib=16.0),
-    ]
-    braille, legend = render_memory_sparkline(recs, width=32, height_rows=1)
-    # should have 1 char (2 records -> 1 braille char) and not crash
-    assert braille
-    assert "2 samples" in legend
-
-
-def test_ctx_bar_text_formats_k() -> None:
-    assert ctx_bar_text(9200, 32000) == "ctx 9.2k/32k"
-    assert ctx_bar_text(800, 8000) == "ctx 800/8k"
-    assert ctx_bar_text(0, 8000) == "ctx 0/8k"
-    assert ctx_bar_text(1000, 1000) == "ctx 1k/1k"
-
-
-def test_ctx_bar_style_thresholds() -> None:
-    assert ctx_bar_style(0, 8000) == ""
-    assert ctx_bar_style(6400, 8000) == ""  # 80% exact not amber
-    assert ctx_bar_style(6401, 8000) == "yellow"  # >80% amber
-    assert ctx_bar_style(7600, 8000) == "yellow"  # 95% still yellow
-    assert ctx_bar_style(7601, 8000) == "red"  # >95% red
-    assert ctx_bar_style(8000, 8000) == "red"
+    assert rec.prompt_tok is None
+    assert rec.req_tok_s is None

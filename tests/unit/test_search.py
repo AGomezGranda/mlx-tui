@@ -21,7 +21,6 @@ from mlx_tui.search import (
     fits_disk,
     free_disk_bytes,
     list_results,
-    repo_files_with_sizes,
     repo_snapshot,
 )
 
@@ -45,13 +44,17 @@ class _StubApi:
         self.sha = sha
         self.captured_list_kwargs: dict[str, object] | None = None
         self.captured_model_info: tuple[str, bool] | None = None
+        self.captured_revision: str | None = None
 
     def list_models(self, *, author: str, search: str, limit: int):  # type: ignore[no-untyped-def]
         self.captured_list_kwargs = {"author": author, "search": search, "limit": limit}
         return self.list_infos
 
-    def model_info(self, repo_id: str, *, files_metadata: bool):  # type: ignore[no-untyped-def]
+    def model_info(
+        self, repo_id: str, *, files_metadata: bool, revision: str | None = None
+    ):  # type: ignore[no-untyped-def]
         self.captured_model_info = (repo_id, files_metadata)
+        self.captured_revision = revision
         return SimpleNamespace(siblings=self.siblings, sha=self.sha)
 
 
@@ -124,27 +127,6 @@ def test_filtered_download_size_includes_all_supported_extensions() -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# repo_files_with_sizes
-# ---------------------------------------------------------------------------
-
-
-def test_repo_files_with_sizes_maps_siblings() -> None:
-    stub = _StubApi(
-        siblings=_siblings_with_sizes(
-            ("a.safetensors", 100), ("b.json", None), ("c.json", 50)
-        )
-    )
-    pairs = repo_files_with_sizes(stub, "mlx-community/x")  # type: ignore[arg-type]
-    assert pairs == [("a.safetensors", 100), ("b.json", 0), ("c.json", 50)]
-    assert stub.captured_model_info == ("mlx-community/x", True)
-
-
-def test_repo_files_with_sizes_empty_siblings() -> None:
-    stub = _StubApi(siblings=[])
-    assert repo_files_with_sizes(stub, "mlx-community/empty") == []  # type: ignore[arg-type]
-
-
 def test_repo_snapshot_returns_revision_and_files() -> None:
     stub = _StubApi(
         siblings=_siblings_with_sizes(("model.safetensors", 100), ("config.json", 50)),
@@ -165,6 +147,19 @@ def test_repo_snapshot_none_sha_passthrough() -> None:
     snapshot = repo_snapshot(stub, "mlx-community/x")  # type: ignore[arg-type]
     assert snapshot.revision is None
     assert snapshot.files == (("a.safetensors", 10),)
+
+
+def test_repo_snapshot_pins_requested_revision() -> None:
+    stub = _StubApi(sha="rev-a")
+    snapshot = repo_snapshot(stub, "mlx-community/x", revision="rev-a")  # type: ignore[arg-type]
+    assert snapshot.revision == "rev-a"
+    assert stub.captured_revision == "rev-a"
+
+
+def test_repo_snapshot_rejects_hub_revision_mismatch() -> None:
+    stub = _StubApi(sha="rev-other")
+    with pytest.raises(ValueError, match="expected pinned revision"):
+        repo_snapshot(stub, "mlx-community/x", revision="rev-a")  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import pathlib
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -24,16 +22,31 @@ _TOTAL_GIB = 32.0
 
 
 class FakeProcess:
-    def __init__(self, pid: int, cmdline: list[str], create_time: float) -> None:
+    def __init__(
+        self,
+        pid: int,
+        cmdline: list[str],
+        create_time: float,
+        connections: list[SimpleNamespace] | Exception | None = None,
+    ) -> None:
         self.pid = pid
         self._cmdline = cmdline
         self._create_time = create_time
+        self._connections = [] if connections is None else connections
+        self.connection_calls = 0
 
     def cmdline(self) -> list[str]:
         return self._cmdline
 
     def create_time(self) -> float:
         return self._create_time
+
+    def net_connections(self, kind: str = "tcp") -> list[SimpleNamespace]:
+        self.connection_calls += 1
+        assert kind == "tcp"
+        if isinstance(self._connections, Exception):
+            raise self._connections
+        return self._connections
 
     def memory_info(self) -> SimpleNamespace:
         return SimpleNamespace(rss=0)
@@ -56,6 +69,13 @@ def _install(
 ) -> dict[str, int]:
     calls = {"net": 0}
 
+    if isinstance(conns, Exception):
+        for process in procs.values():
+            process._connections = conns
+    else:
+        for process in procs.values():
+            process._connections = [conn for conn in conns if conn.pid == process.pid]
+
     def fake_ctor(pid: int) -> FakeProcess:
         if pid not in procs:
             raise psutil.NoSuchProcess(pid)
@@ -66,7 +86,12 @@ def _install(
         if isinstance(conns, Exception):
             raise conns
         assert kind == "tcp"
-        return conns
+        return [
+            conn
+            for process in procs.values()
+            if not isinstance(process._connections, Exception)
+            for conn in process._connections
+        ]
 
     monkeypatch.setattr(psutil, "Process", fake_ctor)
     monkeypatch.setattr(psutil, "net_connections", fake_conns)
@@ -86,7 +111,7 @@ def test_two_mlx_processes_on_different_ports(
     assert find_server_process(_HOST, _PORT_B) == ProcessIdentity(200, 222.0)
 
 
-def test_denied_global_scan_uses_each_mlx_process_listener(
+def test_denied_global_scan_is_unknown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     procs = {
@@ -96,37 +121,47 @@ def test_denied_global_scan_uses_each_mlx_process_listener(
     _install(monkeypatch, procs, psutil.AccessDenied())
     monkeypatch.setattr(psutil, "process_iter", lambda: iter(procs.values()))
 
-    def connections(self: FakeProcess, kind: str) -> list[SimpleNamespace]:
-        assert kind == "tcp"
-        return [_conn(None, _PORT_A if self.pid == 100 else _PORT_B)]
+    assert find_server_process(_HOST, _PORT_B) is None
 
-    monkeypatch.setattr(FakeProcess, "net_connections", connections, raising=False)
+
+def test_denied_global_scan_verifies_process_listeners(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    procs = {
+        100: FakeProcess(100, MATCHING_CMDLINE, 111.0),
+        200: FakeProcess(200, MATCHING_CMDLINE, 222.0),
+        300: FakeProcess(300, OTHER_CMDLINE, 333.0),
+    }
+    calls = _install(monkeypatch, procs, psutil.AccessDenied())
+    procs[100]._connections = [_conn(None, _PORT_A)]
+    procs[200]._connections = [_conn(None, _PORT_B)]
+    procs[300]._connections = [_conn(None, _PORT_A)]
+    monkeypatch.setattr(psutil, "process_iter", lambda: iter(procs.values()))
+
+    assert find_server_process(_HOST, _PORT_A) == ProcessIdentity(100, 111.0)
     assert find_server_process(_HOST, _PORT_B) == ProcessIdentity(200, 222.0)
+    assert calls["net"] == 1
+    procs[200]._connections = [_conn(None, _PORT_A)]
+    assert find_server_process(_HOST, _PORT_A) is None
 
 
 def test_pidfile_on_wrong_port_falls_through_to_scan(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    pidfile = tmp_path / "server.pid"
-    pidfile.write_text("100\n")
     procs = {
         100: FakeProcess(100, MATCHING_CMDLINE, 111.0),
         200: FakeProcess(200, MATCHING_CMDLINE, 222.0),
     }
     _install(monkeypatch, procs, [_conn(100, _PORT_B), _conn(200, _PORT_A)])
-    assert find_server_process(_HOST, _PORT_A, pidfile=str(pidfile)) == ProcessIdentity(
-        200, 222.0
-    )
+    assert find_server_process(_HOST, _PORT_A) == ProcessIdentity(200, 222.0)
 
 
 def test_pidfile_on_wrong_port_no_other_listener_returns_none(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    pidfile = tmp_path / "server.pid"
-    pidfile.write_text("100\n")
     procs = {100: FakeProcess(100, MATCHING_CMDLINE, 111.0)}
     _install(monkeypatch, procs, [_conn(100, _PORT_B)])
-    assert find_server_process(_HOST, _PORT_A, pidfile=str(pidfile)) is None
+    assert find_server_process(_HOST, _PORT_A) is None
 
 
 def test_recycled_pid_creation_time_not_trusted(
@@ -146,20 +181,22 @@ def test_recycled_pid_with_new_mlx_returns_new_identity(
     procs = {100: FakeProcess(100, MATCHING_CMDLINE, 111.0)}
     _install(monkeypatch, procs, [_conn(100, _PORT_A)])
     assert find_server_process(_HOST, _PORT_A) == ProcessIdentity(100, 111.0)
-    procs[100] = FakeProcess(100, MATCHING_CMDLINE, 222.0)
+    procs[100] = FakeProcess(
+        100, MATCHING_CMDLINE, 222.0, connections=[_conn(100, _PORT_A)]
+    )
     proc_mod._cached_identity = None  # type: ignore[attr-defined]
     # Simulate a fresh poll after cache invalidation: new start time wins.
     assert find_server_process(_HOST, _PORT_A) == ProcessIdentity(100, 222.0)
 
 
-def test_cached_hit_short_circuits_connections(
+def test_cached_hit_checks_local_listener_without_global_scan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     procs = {100: FakeProcess(100, MATCHING_CMDLINE, 111.0)}
     calls = _install(monkeypatch, procs, [_conn(100, _PORT_A)])
     assert find_server_process(_HOST, _PORT_A) == ProcessIdentity(100, 111.0)
     assert calls["net"] == 1
-    # Second poll with same pid/start time must not rescan connections.
+    # Second poll checks the process locally but must not rescan globally.
     calls["net"] = 0
 
     def exploding_conns(kind: str = "tcp") -> list[SimpleNamespace]:
@@ -167,6 +204,49 @@ def test_cached_hit_short_circuits_connections(
 
     monkeypatch.setattr(psutil, "net_connections", exploding_conns)
     assert find_server_process(_HOST, _PORT_A) == ProcessIdentity(100, 111.0)
+    assert procs[100].connection_calls == 1
+
+
+def test_cached_listener_loss_falls_through_to_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    procs = {100: FakeProcess(100, MATCHING_CMDLINE, 111.0)}
+    _install(monkeypatch, procs, [_conn(100, _PORT_A)])
+    assert find_server_process(_HOST, _PORT_A) == ProcessIdentity(100, 111.0)
+
+    procs[100]._connections = []
+    assert find_server_process(_HOST, _PORT_A) is None
+    assert proc_mod._cached_identity is None  # type: ignore[attr-defined]
+
+
+def test_cached_listener_replacement_is_discovered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    procs = {
+        100: FakeProcess(100, MATCHING_CMDLINE, 111.0),
+        200: FakeProcess(200, MATCHING_CMDLINE, 222.0),
+    }
+    _install(monkeypatch, procs, [_conn(100, _PORT_A)])
+    assert find_server_process(_HOST, _PORT_A) == ProcessIdentity(100, 111.0)
+
+    procs[100]._connections = []
+    procs[200]._connections = [_conn(200, _PORT_A)]
+    assert find_server_process(_HOST, _PORT_A) == ProcessIdentity(200, 222.0)
+
+
+def test_cached_listener_inspection_denied_falls_through_to_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    procs = {
+        100: FakeProcess(100, MATCHING_CMDLINE, 111.0),
+        200: FakeProcess(200, MATCHING_CMDLINE, 222.0),
+    }
+    _install(monkeypatch, procs, [_conn(100, _PORT_A)])
+    assert find_server_process(_HOST, _PORT_A) == ProcessIdentity(100, 111.0)
+
+    procs[100]._connections = psutil.AccessDenied(pid=100)
+    procs[200]._connections = [_conn(200, _PORT_A)]
+    assert find_server_process(_HOST, _PORT_A) == ProcessIdentity(200, 222.0)
 
 
 def test_remote_host_returns_none_without_syscall(
@@ -213,23 +293,35 @@ def test_non_mlx_listener_is_not_authority(
 
 
 def test_pidfile_garbage_falls_through_to_scan(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    pidfile = tmp_path / "server.pid"
-    pidfile.write_text("not-a-pid")
     procs = {200: FakeProcess(200, MATCHING_CMDLINE, 222.0)}
     _install(monkeypatch, procs, [_conn(200, _PORT_A)])
-    assert find_server_process(_HOST, _PORT_A, pidfile=str(pidfile)) == ProcessIdentity(
-        200, 222.0
-    )
+    assert find_server_process(_HOST, _PORT_A) == ProcessIdentity(200, 222.0)
 
 
-def test_loopback_variants_resolve(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_localhost_address_family_is_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
     procs = {100: FakeProcess(100, MATCHING_CMDLINE, 111.0)}
     _install(monkeypatch, procs, [_conn(100, _PORT_A)])
-    assert find_server_process("localhost", _PORT_A) is not None
-    proc_mod._cached_identity = None  # type: ignore[attr-defined]
-    assert find_server_process("::1", _PORT_A) is not None
+    assert find_server_process("localhost", _PORT_A) is None
+
+
+def test_listener_address_must_match(monkeypatch: pytest.MonkeyPatch) -> None:
+    procs = {100: FakeProcess(100, MATCHING_CMDLINE, 111.0)}
+    wrong_address = SimpleNamespace(pid=100, status="LISTEN", laddr=("::1", _PORT_A))
+    _install(monkeypatch, procs, [wrong_address])
+    assert find_server_process(_HOST, _PORT_A) is None
+
+
+def test_ambiguous_matching_listeners_are_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    procs = {
+        100: FakeProcess(100, MATCHING_CMDLINE, 111.0),
+        200: FakeProcess(200, MATCHING_CMDLINE, 222.0),
+    }
+    _install(monkeypatch, procs, [_conn(100, _PORT_A), _conn(200, _PORT_A)])
+    assert find_server_process(_HOST, _PORT_A) is None
 
 
 def test_memory_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -250,15 +342,12 @@ _LISTENER_CODE = (
 )
 
 
-def test_real_listener_discovery_and_pidfile_never_trusted(
-    tmp_path: pathlib.Path,
-) -> None:
+def test_real_listener_discovery_and_pidfile_never_trusted() -> None:
     """Disposable python listener with an MLX-matching argv token.
 
     When the platform permits listener inspection the child is discovered;
     when inspection is denied the supported unavailable result (None) is
-    returned instead of an error. A pidfile pointing at a live non-server
-    process is never trusted either way.
+    returned instead of an error.
     """
     child = subprocess.Popen(
         [sys.executable, "-c", _LISTENER_CODE, "mlx_lm.server"],
@@ -270,10 +359,8 @@ def test_real_listener_discovery_and_pidfile_never_trusted(
         line = child.stdout.readline()
         assert line.strip(), "listener child produced no port"
         port = int(line.strip())
-        pidfile = tmp_path / "server.pid"
-        pidfile.write_text(f"{os.getpid()}\n")
-        ident = find_server_process(_HOST, port, pidfile=str(pidfile))
-        # Either discovered (our pidfile decoy must not win) or unavailable.
+        ident = find_server_process(_HOST, port)
+        # Either discovered or unavailable.
         assert ident is None or ident.pid == child.pid
         if ident is not None:
             assert ident.create_time > 0

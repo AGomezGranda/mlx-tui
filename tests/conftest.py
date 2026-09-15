@@ -9,16 +9,33 @@ import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import override
+from pathlib import Path
+from typing import cast, override
 
 import pytest
+from rich.console import RenderableType
+from rich.segment import Segment
 from textual.pilot import Pilot
-from textual.widgets import RichLog
+from textual.widgets import RichLog, Static
 
 from mlx_tui.app import MlxTuiApp
 from mlx_tui.chat_pane import ChatPane
+from mlx_tui.config import AppConfig
 from mlx_tui.models_pane import ModelsPane
 from tests.builders import sse_frames
+
+
+@pytest.fixture(autouse=True)
+def _isolated_state_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """Point XDG state at a per-test directory before any app construction.
+
+    Tests that need persistence across two app lifetimes within one test may
+    override this root with their own ``monkeypatch.setenv`` call.
+    """
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    yield
 
 
 class StubServer(HTTPServer):
@@ -43,7 +60,7 @@ class StubHandler(BaseHTTPRequestHandler):
         assert isinstance(self.server, StubServer)
         return self.server.mode
 
-    def _record_post(self) -> None:
+    def _record_post(self) -> dict[str, object]:
         assert isinstance(self.server, StubServer)
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length)
@@ -52,15 +69,27 @@ class StubHandler(BaseHTTPRequestHandler):
         except ValueError:
             payload = {}
         self.server.requests.append(payload)
+        return payload
 
     def do_GET(self) -> None:
-        if self._mode() == "html":
+        if self._mode() == "html" or (
+            self._mode() == "catalog_html" and self.path != "/health"
+        ):
             self.send_response(502)
             self.send_header("Content-Type", "text/html")
             self.end_headers()
             self.wfile.write(b"<html>proxy</html>")
             return
         assert isinstance(self.server, StubServer)
+        if self.path == "/health":
+            healthy = self._mode() != "health_down"
+            body = b'{"status": "ok"}' if healthy else b'{"status": "down"}'
+            self.send_response(200 if healthy else 503)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         model_id = self.server.model_id
         body = (
             b'{"object": "list", "data": [{"id": "'
@@ -73,12 +102,20 @@ class StubHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def do_POST(self) -> None:
-        self._record_post()
-        if self._mode() == "probe":
+    def do_POST(self) -> None:  # noqa: PLR0915
+        payload = self._record_post()
+        requested_model = payload.get("model")
+        model = requested_model if isinstance(requested_model, str) else "default_model"
+        if self._mode() == "probe" or (
+            self._mode() == "ok"
+            and payload.get("max_tokens") == 1
+            and payload.get("stream") is not True
+        ):
             # The warm-swap probe: a plain OpenAI-shaped completion reply.
             body = (
-                b'{"choices": [{"message": {"role": "assistant", "content": "hi"}}],'
+                b'{"model": '
+                + json.dumps(model).encode()
+                + b', "choices": [{"message": {"role": "assistant", "content": "hi"}}],'
                 b' "usage": {"prompt_tokens": 1, "completion_tokens": 1,'
                 b' "total_tokens": 2}}'
             )
@@ -104,7 +141,7 @@ class StubHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
-            frame = sse_frames(deltas=["Hel"], finish=None, done=False)
+            frame = sse_frames(deltas=["Hel"], finish=None, done=False, model=model)
             self.wfile.write(f"{len(frame):X}\r\n".encode() + frame)
             self.wfile.flush()
             time.sleep(0.15)
@@ -117,17 +154,43 @@ class StubHandler(BaseHTTPRequestHandler):
         if self._mode() == "length_cap":
             # finish_reason "length" with no [DONE]-adjacent stop frame: what
             # mlx-lm emits when the reply hits the max-tokens cap.
-            body = sse_frames(deltas=["Partial ans"], finish="length", usage=(9, 3))
+            body = sse_frames(
+                deltas=["Partial ans"], finish="length", usage=(9, 3), model=model
+            )
         elif self._mode() == "empty":
             # 200 OK but zero content deltas — the silent-no-answer shape.
-            body = sse_frames(finish=None, usage=(12, 0))
+            body = sse_frames(finish=None, usage=(12, 0), model=model)
         elif self._mode() == "no_usage":
-            body = sse_frames(deltas=["Hi"], usage=None)
+            body = sse_frames(deltas=["Hi"], usage=None, model=model)
+        elif self._mode() == "reasoning":
+            body = sse_frames(
+                deltas=["blue"],
+                reasoning=["think step"],
+                usage=(12, 6),
+                model=model,
+            )
+        elif self._mode() == "tools":
+            body = sse_frames(
+                deltas=[],
+                tool_calls=[
+                    {
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"city": "Madrid"}',
+                        },
+                    }
+                ],
+                usage=(12, 3),
+                model=model,
+            )
         elif self._mode() == "multiline":
             from tests.builders import sse_multiline_event  # noqa: PLC0415
 
             body = (
-                sse_frames(deltas=["Hello"], finish=None, done=False)
+                sse_frames(deltas=["Hello"], finish=None, done=False, model=model)
                 + sse_multiline_event(
                     {
                         "choices": [
@@ -135,18 +198,22 @@ class StubHandler(BaseHTTPRequestHandler):
                         ]
                     }
                 )
-                + sse_frames(deltas=[" this", " is", " MLX."], usage=(12, 6))
+                + sse_frames(
+                    deltas=[" this", " is", " MLX."], usage=(12, 6), model=model
+                )
             )
         elif self._mode() == "nospace":
             body = sse_frames(
                 deltas=["Hello", " world", " this", " is", " MLX."],
                 usage=(12, 6),
                 no_space=True,
+                model=model,
             )
         else:
             body = sse_frames(
                 deltas=["Hello", " world", " this", " is", " MLX."],
                 usage=(12, 6),
+                model=model,
             )
         if self._mode() == "slow":
             # Hold back everything after the role frame so the client has an
@@ -197,8 +264,20 @@ class AppHarness:
         return self.app.query_one("#chat-pane", ChatPane)
 
     def log_lines(self) -> list[str]:
-        log = self.app.query_one("#chat-log", RichLog)
-        return [strip.text.rstrip() for strip in log.lines]
+        lines: list[str] = []
+        for widget in self.app.query(".chat-text").results(Static):
+            if not widget.display:
+                continue
+            width = widget.content_size.width or self.app.size.width
+            options = self.app.console.options.update_width(width)
+            segments = self.app.console.render(
+                cast(RenderableType, widget.content), options
+            )
+            lines.extend(
+                "".join(segment.text for segment in line).rstrip()
+                for line in Segment.split_lines(segments)
+            )
+        return lines
 
     def app_log_lines(self) -> list[str]:
         log = self.app.query_one("#app-log", RichLog)
@@ -220,6 +299,10 @@ async def harness(
     stub_server_factory: Callable[[str], StubServer],
 ) -> AsyncIterator[AppHarness]:
     server = stub_server_factory("ok")
-    app = MlxTuiApp(host="127.0.0.1", port=server.server_address[1])
+    app = MlxTuiApp(
+        host="127.0.0.1",
+        port=server.server_address[1],
+        config=AppConfig(model=server.model_id),
+    )
     async with app.run_test() as pilot:
         yield AppHarness(app=app, pilot=pilot, server=server)

@@ -9,16 +9,13 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from contextlib import suppress
 
 import httpx
+import psutil
 
-from mlx_tui.status import ServerProbe, probe_from_response
-
-
-@dataclass(frozen=True)
-class WarmLoadResult:
-    response_model: str | None
+from mlx_tui.process import ProcessIdentity
+from mlx_tui.status import ServerProbe, health_state_from_response, probe_from_response
 
 
 def build_start_command(start_cmd: str, model_id: str | None) -> list[str]:  # noqa: PLR0912
@@ -71,20 +68,6 @@ def build_start_command(start_cmd: str, model_id: str | None) -> list[str]:  # n
     return argv
 
 
-def _argv_from(cmd: str | list[str]) -> list[str]:
-    if isinstance(cmd, list):
-        if not cmd:
-            raise ValueError("empty command")
-        return list(cmd)
-    try:
-        argv = shlex.split(cmd)
-    except ValueError as exc:
-        raise ValueError(f"invalid command: {exc}") from exc
-    if not argv:
-        raise ValueError("empty command")
-    return argv
-
-
 def _pump(proc: subprocess.Popen[str], on_line: Callable[[str], None]) -> None:
     try:
         assert proc.stdout is not None  # guaranteed by stdout=PIPE
@@ -95,8 +78,6 @@ def _pump(proc: subprocess.Popen[str], on_line: Callable[[str], None]) -> None:
                     on_line(stripped)
                 except Exception:
                     continue
-    except ValueError:
-        return
     except Exception:
         return
     finally:
@@ -107,74 +88,167 @@ def _pump(proc: subprocess.Popen[str], on_line: Callable[[str], None]) -> None:
             pass
 
 
-def _kill_group(pgid: int, sig: int) -> None:
+def _descendant_identities(pid: int) -> list[ProcessIdentity]:
     try:
-        os.killpg(pgid, sig)
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
+        return [
+            ProcessIdentity(child.pid, child.create_time())
+            for child in psutil.Process(pid).children(recursive=True)
+        ]
+    except (psutil.Error, OSError):
+        return []
 
 
-def _terminate_failed_process(proc: subprocess.Popen[str] | None) -> None:  # noqa: PLR0911,PLR0912,PLR0915
+def _live_identity(identity: ProcessIdentity) -> psutil.Process | None:
+    try:
+        current = psutil.Process(identity.pid)
+        if current.create_time() != identity.create_time:
+            return None
+        if current.status() == psutil.STATUS_ZOMBIE:
+            return None
+    except (psutil.Error, OSError):
+        return None
+    return current
+
+
+def _terminate_known_processes(identities: list[ProcessIdentity]) -> None:
+    active = [identity for identity in identities if _live_identity(identity)]
+    for identity in active:
+        current = _live_identity(identity)
+        if current is not None:
+            with suppress(psutil.Error, OSError):
+                current.terminate()
+    deadline = time.monotonic() + 5.0
+    while active and time.monotonic() < deadline:
+        active = [identity for identity in active if _live_identity(identity)]
+        if active:
+            time.sleep(0.05)
+    for identity in active:
+        current = _live_identity(identity)
+        if current is not None:
+            with suppress(psutil.Error, OSError):
+                current.kill()
+
+
+def terminate_failed_process(proc: subprocess.Popen[str] | None) -> None:  # noqa: PLR0911,PLR0912,PLR0915
     """Stop an owned failed-boot/stop-timeout process group; never a success."""
     if proc is None:
         return
+
     try:
         pid = proc.pid
     except Exception:
         return
+    descendants = _descendant_identities(pid)
+    owned_group = False
+    pgid: int | None = None
+    leader: ProcessIdentity | None = None
     if os.name == "posix":
         try:
             pgid = os.getpgid(pid)
         except Exception:
-            pgid = pid
-        _kill_group(pgid, signal.SIGTERM)
+            pass
+        try:
+            leader = ProcessIdentity(pid, psutil.Process(pid).create_time())
+            owned_group = pgid == pid
+        except (psutil.Error, OSError):
+            owned_group = False
+        if (
+            owned_group
+            and pgid is not None
+            and leader is not None
+            and _live_identity(leader) is not None
+        ):
+            with suppress(OSError):
+                os.killpg(pgid, signal.SIGTERM)
         try:
             if proc.poll() is None:
-                proc.terminate()
+                if not owned_group:
+                    proc.terminate()
         except Exception:
             pass
         try:
             proc.wait(timeout=5.0)
         except subprocess.TimeoutExpired:
-            _kill_group(pgid, signal.SIGKILL)
-            try:
+            if (
+                owned_group
+                and pgid is not None
+                and leader is not None
+                and _live_identity(leader) is not None
+            ):
+                with suppress(OSError):
+                    os.killpg(pgid, signal.SIGKILL)
+            with suppress(Exception):
                 if proc.poll() is None:
                     proc.kill()
-            except Exception:
-                pass
-            try:
+            with suppress(Exception):
                 proc.wait(timeout=5.0)
-            except Exception:
-                pass
         except Exception:
             pass
-        # Shell-exits-first: direct child reaped but descendants survive.
-        _kill_group(pgid, signal.SIGKILL)
-        try:
+        with suppress(Exception):
             if proc.poll() is None:
                 proc.wait(timeout=1.0)
-        except Exception:
-            pass
+        if owned_group:
+            _terminate_known_processes(descendants)
         return
     try:
         if proc.poll() is not None:
             return
         proc.terminate()
-    except Exception:
-        return
-    try:
         proc.wait(timeout=5.0)
     except subprocess.TimeoutExpired:
-        try:
+        with suppress(Exception):
             proc.kill()
-        except Exception:
-            return
-        try:
             proc.wait(timeout=5.0)
-        except Exception:
-            return
     except Exception:
         return
+
+
+def terminate_owned_process(  # noqa: PLR0912
+    proc: subprocess.Popen[str], identity: ProcessIdentity
+) -> None:
+    """Terminate only a child whose PID and create time still match."""
+    if proc.pid != identity.pid:
+        raise RuntimeError("owned process PID changed before shutdown")
+    try:
+        current = psutil.Process(identity.pid)
+        if current.create_time() != identity.create_time:
+            raise RuntimeError("owned process identity changed before shutdown")
+    except psutil.NoSuchProcess:
+        proc.wait(timeout=1.0)
+        return
+    except (psutil.AccessDenied, psutil.ZombieProcess) as exc:
+        raise RuntimeError("could not validate owned process before shutdown") from exc
+
+    if proc.poll() is not None:
+        proc.wait(timeout=1.0)
+        return
+    owned_group = False
+    if os.name == "posix":
+        with suppress(OSError):
+            owned_group = os.getpgid(identity.pid) == identity.pid
+    if owned_group:
+        with suppress(OSError):
+            os.killpg(identity.pid, signal.SIGTERM)
+    else:
+        proc.terminate()
+    try:
+        proc.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        try:
+            current = psutil.Process(identity.pid)
+            if current.create_time() != identity.create_time:
+                raise RuntimeError("owned process identity changed before kill")
+        except psutil.NoSuchProcess:
+            proc.wait(timeout=1.0)
+            return
+        if owned_group:
+            with suppress(OSError):
+                os.killpg(identity.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+        proc.wait(timeout=5.0)
+    if proc.poll() is None:
+        raise RuntimeError("owned process did not exit")
 
 
 def _popen(
@@ -191,8 +265,17 @@ def _popen(
                 raise ValueError("empty command")
         elif not launch_cmd:
             raise ValueError("empty command")
+    elif isinstance(cmd, list):
+        if not cmd:
+            raise ValueError("empty command")
+        launch_cmd = list(cmd)
     else:
-        launch_cmd = _argv_from(cmd)
+        try:
+            launch_cmd = shlex.split(cmd)
+        except ValueError as exc:
+            raise ValueError(f"invalid command: {exc}") from exc
+        if not launch_cmd:
+            raise ValueError("empty command")
     return subprocess.Popen(
         launch_cmd,
         shell=shell,
@@ -221,7 +304,7 @@ def run_command(
     try:
         rc = proc.wait(timeout=timeout_s)
     except subprocess.TimeoutExpired:
-        _terminate_failed_process(proc)
+        terminate_failed_process(proc)
         raise
     pump.join(timeout=1.0)
     return rc
@@ -259,9 +342,14 @@ def spawn_with_grace(  # noqa: PLR0913
     return proc, proc.poll() is None
 
 
-def warm_load(url: str, repo_id: str, *, timeout_s: float) -> WarmLoadResult:
+def warm_load(url: str, repo_id: str, *, timeout_s: float) -> str | None:
     """Synchronous one-token probe-load; raises on any non-2xx/odd body."""
-    timeout = httpx.Timeout(connect=5.0, read=timeout_s, write=5.0, pool=5.0)
+    timeout = httpx.Timeout(
+        connect=min(5.0, max(0.1, timeout_s)),
+        read=min(5.0, max(0.1, timeout_s)),
+        write=5.0,
+        pool=5.0,
+    )
     with httpx.Client(timeout=timeout) as client:
         response = client.post(
             url,
@@ -280,49 +368,82 @@ def warm_load(url: str, repo_id: str, *, timeout_s: float) -> WarmLoadResult:
         raise RuntimeError("unexpected probe response")
     raw_model = body.get("model")
     response_model = raw_model if isinstance(raw_model, str) and raw_model else None
-    return WarmLoadResult(response_model=response_model)
+    return response_model
 
 
-def wait_healthy(  # noqa: PLR0913
+def wait_healthy(  # noqa: PLR0911,PLR0912,PLR0913
     url: str,
     *,
     target_model: str | None = None,
     is_running: Callable[[], bool] | None = None,
     timeout_s: float,
     on_tick: Callable[[int], None] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> ServerProbe | None:
-    """Poll ``GET /v1/models`` until green (and optionally model-matched)."""
+    """Wait for health and verify an explicit target with real generation."""
     deadline = time.monotonic() + timeout_s
-    with httpx.Client(timeout=0.5) as client:
+    health_url = url.removesuffix("/v1/models") + "/health"
+    completion_url = url.removesuffix("/models") + "/chat/completions"
+    with httpx.Client(timeout=httpx.Timeout(0.5)) as client:
         while True:
+            if cancel_event is not None and cancel_event.is_set():
+                return None
             elapsed = int(timeout_s - (deadline - time.monotonic()))
             if on_tick is not None:
                 on_tick(elapsed)
-            probe: ServerProbe | None = None
+            probe = ServerProbe(state="red", model_id=None, catalogue_state="red")
+            health_state = "red"
+            try:
+                health = client.get(health_url)
+                if cancel_event is not None and cancel_event.is_set():
+                    return None
+                health_body: object = health.json()
+                health_state = health_state_from_response(
+                    health.status_code, health_body
+                )
+            except (httpx.HTTPError, ValueError):
+                pass
             try:
                 resp = client.get(url)
+                if cancel_event is not None and cancel_event.is_set():
+                    return None
                 body: object = resp.json()
                 probe = probe_from_response(resp.status_code, body)
             except (httpx.HTTPError, ValueError):
                 pass
-            if probe is not None and probe.state == "green":
-                if target_model is None or probe.model_id == target_model:
-                    return probe
-                if target_model in probe.available_models:
-                    # MLX-LM lists cached models. Verify serving with a completion.
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        return None
-                    result = warm_load(
-                        url.removesuffix("/models") + "/chat/completions",
+            if health_state == "green":
+                if target_model is None:
+                    return ServerProbe(
+                        state="green",
+                        model_id=None,
+                        available_models=probe.available_models,
+                        catalogue_state=probe.catalogue_state,
+                    )
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                if cancel_event is not None and cancel_event.is_set():
+                    return None
+                try:
+                    response_model = warm_load(
+                        completion_url,
                         target_model,
                         timeout_s=remaining,
                     )
-                    if result.response_model == target_model:
-                        return ServerProbe(state="green", model_id=target_model)
-                    return None
+                except (httpx.HTTPError, RuntimeError):
+                    response_model = None
+                if response_model == target_model:
+                    return ServerProbe(
+                        state="green",
+                        model_id=target_model,
+                        available_models=probe.available_models,
+                        catalogue_state=probe.catalogue_state,
+                    )
             if is_running is not None and not is_running():
                 return None
             if time.monotonic() >= deadline:
                 return None
-            time.sleep(1.0)
+            if cancel_event is not None:
+                cancel_event.wait(1.0)
+            else:
+                time.sleep(1.0)

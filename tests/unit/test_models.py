@@ -18,8 +18,10 @@ from mlx_tui.models import (
     ModelRow,
     collect_rows,
     delete_repos,
-    fits_headroom,
+    model_identity_matches,
     quant_label,
+    resolve_cached_snapshot,
+    verify_cached_assets,
 )
 
 _MLX_FILES = ["config.json", "tokenizer_config.json", "model.safetensors"]
@@ -112,20 +114,6 @@ def test_is_mlx_model_rejects_json_only_no_weights() -> None:
     assert not models_mod._is_mlx_model(_repo("foo/bar", 1, files))
 
 
-@pytest.mark.parametrize(
-    ("size_on_disk", "avail_gib", "expected"),
-    [
-        (5_000_000_000, 10.0, True),
-        (9_000_000_000, 10.0, False),
-        (100, None, None),
-    ],
-)
-def test_fits_headroom(
-    size_on_disk: int, avail_gib: float | None, expected: bool | None
-) -> None:
-    assert fits_headroom(size_on_disk, avail_gib) is expected
-
-
 def test_collect_rows_filters_and_sorts_big_first() -> None:
     big = _repo("mlx-community/big-4bit", 9_000_000_000, _MLX_FILES)
     small = _repo("mlx-community/small-8bit", 1_000_000_000, _MLX_FILES)
@@ -138,7 +126,6 @@ def test_collect_rows_filters_and_sorts_big_first() -> None:
         "mlx-community/small-8bit",
     ]
     assert rows[0].quant == "4bit"
-    assert rows[0].fits is None
 
 
 def test_collect_rows_revision_hashes_sorted() -> None:
@@ -203,10 +190,77 @@ def test_delete_repos_passes_hashes_and_returns_freed_size(
 
 
 def test_row_dataclass_shape() -> None:
-    row = ModelRow("m", 1, "4bit", True, ("h",))
-    assert (row.repo_id, row.size_on_disk, row.quant, row.fits) == (
+    row = ModelRow("m", 1, "4bit", ("h",))
+    assert (row.repo_id, row.size_on_disk, row.quant, row.revision_hashes) == (
         "m",
         1,
         "4bit",
-        True,
+        ("h",),
     )
+
+
+def test_cached_snapshot_resolution_is_exact_and_offline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot = tmp_path / "models--org--model" / "snapshots" / ("a" * 40)
+    snapshot.mkdir(parents=True)
+    revision = CachedRevisionInfo(
+        commit_hash="a" * 40,
+        snapshot_path=snapshot,
+        size_on_disk=0,
+        files=frozenset(),
+        refs=frozenset(),
+        last_modified=0.0,
+    )
+    repo = CachedRepoInfo(
+        repo_id="org/model",
+        repo_type="model",
+        repo_path=snapshot.parent.parent,
+        size_on_disk=0,
+        nb_files=0,
+        revisions=frozenset({revision}),
+        last_accessed=0.0,
+        last_modified=0.0,
+    )
+    monkeypatch.setattr(models_mod, "scan_cache_dir", lambda: _info(repo))
+    assert resolve_cached_snapshot("org/model", "a" * 40) == snapshot
+
+
+@pytest.mark.parametrize(
+    ("identity", "expected"),
+    [
+        ("org/model", True),
+        ("/cache/models--org--model/snapshots/" + "a" * 40, True),
+        ("/cache/models--other--model/snapshots/" + "a" * 40, False),
+        ("/cache/models--org--model/blobs/abc", False),
+        (None, False),
+    ],
+)
+def test_model_identity_matches_repository_path(
+    identity: str | None, expected: bool
+) -> None:
+    assert model_identity_matches("org/model", identity) is expected
+
+
+def test_verify_cached_assets_requires_complete_weights(tmp_path: Path) -> None:
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    (snapshot / "config.json").write_text("{}")
+    (snapshot / "tokenizer_config.json").write_text("{}")
+    with pytest.raises(ValueError, match="safetensors"):
+        verify_cached_assets(snapshot)
+    (snapshot / "model.safetensors").write_bytes(b"weights")
+    (snapshot / "tokenizer.json").write_text("{}")
+    verify_cached_assets(snapshot, ("tokenizer.json",))
+
+
+def test_verify_cached_assets_rejects_traversing_weight_shards(tmp_path: Path) -> None:
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    for name in ("config.json", "tokenizer_config.json"):
+        (snapshot / name).write_text("{}")
+    (snapshot / "model.safetensors.index.json").write_text(
+        '{"weight_map": {"layer": "../outside.safetensors"}}'
+    )
+    with pytest.raises(ValueError, match="invalid snapshot asset"):
+        verify_cached_assets(snapshot)

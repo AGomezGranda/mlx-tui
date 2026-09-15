@@ -11,7 +11,7 @@ from typing import Any, override
 import httpx
 import pytest
 
-from mlx_tui.chat import error_detail, stream_turn
+from mlx_tui.chat import TurnProgress, error_detail, stream_turn
 from tests.builders import sse_frames, sse_multiline_event
 
 SyncHandler = Callable[[httpx.Request], httpx.Response]
@@ -65,9 +65,22 @@ def stream_response(body: bytes) -> httpx.Response:
     )
 
 
+def _install_clock(monkeypatch: pytest.MonkeyPatch, times: list[float]) -> None:
+    it = iter(times)
+
+    def _now() -> float:
+        try:
+            return next(it)
+        except StopIteration:
+            return times[-1]
+
+    monkeypatch.setattr("mlx_tui.chat.time.monotonic", _now)
+
+
 async def test_happy_path_with_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     body = sse_frames(deltas=["Hello", " world", " this"], usage=(12, 6))
     install_transport(monkeypatch, lambda request: stream_response(body))
+    _install_clock(monkeypatch, [100.0, 100.5, 100.6, 100.7, 101.0])
     flushes: list[str] = []
 
     result = await stream_turn(
@@ -84,11 +97,111 @@ async def test_happy_path_with_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.accounting.completion_tokens == 6
     assert result.accounting.prompt_estimated is False
     assert result.accounting.completion_estimated is False
-    assert 0 <= result.ttft
-    assert result.accounting.tok_s > 0
+    assert result.first_output_s == pytest.approx(0.5)
+    assert result.answer_started_s == pytest.approx(0.6)
+    assert result.total_s == pytest.approx(1.0)
+    assert result.accounting.tok_s == pytest.approx(6.0)
+    assert result.stream_complete is True
     assert result.finish_reason == "stop"
     assert result.skipped_frames == 0
     assert flushes == ["Hello", "Hello world", "Hello world this"]
+
+
+async def test_reasoning_before_answer_sets_first_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = sse_frames(
+        deltas=["answer"], reasoning=["think step"], usage=(12, 6), finish="stop"
+    )
+    install_transport(monkeypatch, lambda request: stream_response(body))
+    _install_clock(monkeypatch, [50.0, 50.2, 50.4, 50.9])
+    activities: list[str] = []
+    result = await stream_turn(
+        URL,
+        {"messages": []},
+        prompt_estimate=20,
+        on_flush=_noop_flush,
+        flush_interval=0.0,
+        on_activity=activities.append,
+    )
+    assert result.reasoning_text == "think step"
+    assert result.full_text == "answer"
+    assert result.first_output_s == pytest.approx(0.2)
+    assert result.answer_started_s == pytest.approx(0.4)
+    assert result.stream_complete is True
+    assert activities and "think step" in activities[0]
+
+
+async def test_tool_fragments_merge_by_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frags: list[dict[str, object]] = [
+        {
+            "index": 0,
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "get_weather", "arguments": '{"city": "'},
+        },
+        {
+            "index": 0,
+            "function": {"arguments": 'Madrid"}'},
+        },
+    ]
+    body = sse_frames(deltas=[], tool_calls=frags, usage=(12, 6), finish="stop")
+    install_transport(monkeypatch, lambda request: stream_response(body))
+    result = await stream_turn(URL, {}, prompt_estimate=1, on_flush=_noop_flush)
+    assert len(result.tool_calls) == 1
+    call = result.tool_calls[0]
+    assert call["name"] == "get_weather"
+    assert call["arguments"] == '{"city": "Madrid"}'
+    assert result.full_text == ""
+    assert result.stream_complete is False
+
+
+async def test_empty_output_is_incomplete(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = sse_frames(finish=None, usage=(12, 0), model="test-model")
+    install_transport(monkeypatch, lambda request: stream_response(body))
+    result = await stream_turn(URL, {}, prompt_estimate=1, on_flush=_noop_flush)
+    assert result.full_text == ""
+    assert result.stream_complete is False
+    assert result.first_output_s is None
+    assert result.answer_started_s is None
+
+
+async def test_missing_done_is_premature_eof(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = sse_frames(deltas=["Hi"], finish="stop", done=False)
+    install_transport(monkeypatch, lambda request: stream_response(body))
+    result = await stream_turn(URL, {}, prompt_estimate=1, on_flush=_noop_flush)
+    assert result.full_text == "Hi"
+    assert result.stream_complete is False
+
+
+async def test_invalid_usage_rejected_and_cached_inconsistent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = sse_frames(
+        deltas=["Hi"],
+        raw_usage={
+            "prompt_tokens": 10,
+            "completion_tokens": True,
+            "prompt_tokens_details": {"cached_tokens": 999},
+        },
+    )
+    install_transport(monkeypatch, lambda request: stream_response(body))
+    result = await stream_turn(URL, {}, prompt_estimate=7, on_flush=_noop_flush)
+    assert result.accounting.prompt_tokens == 10
+    assert result.accounting.prompt_estimated is False
+    assert result.accounting.completion_estimated is True
+    assert result.cached_prompt_tokens is None
+    assert result.stream_complete is True
+
+
+async def test_cached_usage_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = sse_frames(deltas=["Hi"], usage=(110, 5), cached=109)
+    install_transport(monkeypatch, lambda request: stream_response(body))
+    result = await stream_turn(URL, {}, prompt_estimate=1, on_flush=_noop_flush)
+    assert result.cached_prompt_tokens == 109
+    assert result.accounting.cached_prompt_tokens == 109
 
 
 async def test_estimate_fallback_without_usage(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -269,3 +382,64 @@ async def test_cancel_before_headers_closes_within_deadline(
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(asyncio.shield(task), timeout=2)
     assert time.monotonic() - start < 2
+
+
+async def test_progress_deltas_carry_answer_reasoning_tools_and_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frags: list[dict[str, object]] = [
+        {
+            "index": 0,
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "get_weather", "arguments": '{"city": "'},
+        },
+        {"index": 0, "function": {"arguments": 'Madrid"}'}},
+    ]
+    body = sse_frames(
+        deltas=["Hello", " world"],
+        reasoning=["think "],
+        tool_calls=frags,
+        usage=(12, 6),
+        model="resp-model",
+    )
+    install_transport(monkeypatch, lambda request: stream_response(body))
+    seen: list[TurnProgress] = []
+    result = await stream_turn(
+        URL, {}, prompt_estimate=1, on_flush=_noop_flush, on_progress=seen.append
+    )
+    answers = "".join(p.answer_delta for p in seen)
+    reasoning = "".join(p.reasoning_delta for p in seen)
+    assert "Hello" in answers and "world" in answers
+    assert "think" in reasoning
+    assert any(p.tool_fragments for p in seen)
+    assert any(p.response_model == "resp-model" for p in seen)
+    # Final success still comes only from TurnResult, never from progress.
+    assert result.full_text == "Hello world"
+    assert result.reasoning_text == "think "
+    assert result.response_model == "resp-model"
+    assert result.stream_complete is True
+
+
+async def test_progress_survives_cancellation_and_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = sse_frames(deltas=["partial"], finish=None, done=False, model="m")
+    install_transport(monkeypatch, lambda request: stream_response(body))
+    seen: list[TurnProgress] = []
+    result = await stream_turn(
+        URL, {}, prompt_estimate=1, on_flush=_noop_flush, on_progress=seen.append
+    )
+    assert "".join(p.answer_delta for p in seen) == "partial"
+    assert result.stream_complete is False
+
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("boom")
+
+    install_transport(monkeypatch, boom)
+    seen.clear()
+    with pytest.raises(httpx.ConnectError):
+        await stream_turn(
+            URL, {}, prompt_estimate=0, on_flush=_noop_flush, on_progress=seen.append
+        )
+    assert seen == []

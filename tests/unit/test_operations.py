@@ -2,9 +2,43 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import threading
 
-from mlx_tui.app.operations import OperationCoordinator, OperationKind
+import pytest
+
+from mlx_tui.operations import OperationCoordinator, OperationKind
+
+
+@pytest.mark.parametrize(
+    "module",
+    (
+        "mlx_tui.chat_pane",
+        "mlx_tui.models_pane",
+        "mlx_tui.operations",
+        "mlx_tui.app",
+    ),
+)
+def test_modules_import_in_fresh_interpreters(module: str) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import importlib, sys; "
+                "module = importlib.import_module(sys.argv[1]); "
+                "assert sys.argv[1] == 'mlx_tui.app' or 'mlx_tui.app' "
+                "not in sys.modules"
+            ),
+            module,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def _current(coordinator: OperationCoordinator) -> OperationKind:
@@ -41,6 +75,7 @@ def test_each_non_idle_kind_is_distinct() -> None:
 
     for kind in (
         OperationKind.CHATTING,
+        OperationKind.COMPARING,
         OperationKind.LOADING,
         OperationKind.RESTARTING,
         OperationKind.DELETING,

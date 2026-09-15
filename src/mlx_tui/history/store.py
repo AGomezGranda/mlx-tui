@@ -1,9 +1,10 @@
-"""History ring buffers — HistoryStore + MemoryStore."""
+"""History ring buffer and records."""
 
 from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+from itertools import chain
 
 _MAX_TURNS = 64
 
@@ -17,36 +18,23 @@ class MemoryRecord:
     total_gib: float
 
 
-class MemoryStore:
-    """Ring buffer for memory samples; deque(maxlen=256)."""
-
-    def __init__(self, maxlen: int = 256) -> None:
-        self._dq: deque[MemoryRecord] = deque(maxlen=maxlen)
-
-    def add(self, item: MemoryRecord) -> None:
-        self._dq.append(item)
-
-    def series(self) -> list[MemoryRecord]:
-        return list(self._dq)
-
-    def clear(self) -> None:
-        self._dq.clear()
-
-
 @dataclass(frozen=True)
 class TurnRecord:
     ts: float
     model: str
-    prompt_tok: int
-    out_tok: int
-    ttft_s: float
-    tok_s: float
+    prompt_tok: int | None
+    out_tok: int | None
+    first_output_s: float | None
+    answer_started_s: float | None
+    total_s: float | None
+    req_tok_s: float | None
     ctx_len: int
-    cold: bool
+    outcome: str = "success"
     cancelled: bool = False
-    prefill_tok_s: float | None = None
+    cached_prompt_tokens: int | None = None
     prompt_estimated: bool = False
     out_estimated: bool = False
+    excluded_turns: int = 0
 
 
 class HistoryStore:
@@ -63,19 +51,11 @@ class HistoryStore:
         ring = self._by_model.get(model)
         return list(ring) if ring is not None else []
 
-    def models(self) -> list[str]:
-        return sorted(self._by_model)
-
     def all_records(self) -> list[TurnRecord]:
-        flat: list[TurnRecord] = []
-        for ring in self._by_model.values():
-            flat.extend(ring)
-
-        def _ts(r: TurnRecord) -> float:
-            return r.ts
-
-        flat.sort(key=_ts)
-        return flat
+        return sorted(
+            chain.from_iterable(self._by_model.values()),
+            key=lambda r: r.ts,  # type: ignore[implicit-any-lambda]
+        )
 
     def clear(self, model: str | None = None) -> None:
         if model is None:

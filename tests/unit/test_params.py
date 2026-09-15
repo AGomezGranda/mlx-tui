@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from textual.widgets import Input
+from textual.widgets import Input, TabbedContent
 
+from mlx_tui.chat_pane import ChatInput
 from mlx_tui.config import AppConfig
+from mlx_tui.params import ParamsPane
 from tests.conftest import AppHarness
 
 
@@ -37,4 +39,69 @@ async def test_apply_config_params_uses_parser_defaults(harness: AppHarness) -> 
     )
     await harness.pilot.pause()
 
-    assert pane._parse_params() == (0.7, 1.0, 1024)
+    assert harness.app.query_one(ParamsPane).read_values() == (0.7, 1.0, 1024)
+
+
+async def test_params_pane_applies_partial_values(harness: AppHarness) -> None:
+    params = harness.app.query_one(ParamsPane)
+    params.apply_values(0.2, None, 512)
+    await harness.pilot.pause()
+
+    assert params.read_values() == (0.2, 1.0, 512)
+    assert harness.app.query_one("#param-top-p", Input).value == "1.0"
+
+
+async def test_params_pane_normalizes_nonfinite_and_out_of_range_values(
+    harness: AppHarness,
+) -> None:
+    params = harness.app.query_one(ParamsPane)
+    harness.app.query_one("#param-temp", Input).value = "nan"
+    harness.app.query_one("#param-top-p", Input).value = "-inf"
+    harness.app.query_one("#param-max-tokens", Input).value = "0"
+    await harness.pilot.pause()
+
+    assert params.read_values() == (0.7, 1.0, 1)
+
+
+async def test_params_submission_stays_with_params_pane(harness: AppHarness) -> None:
+    params = harness.app.query_one(ParamsPane)
+    harness.app.query_one(TabbedContent).active = "chat"
+    params.collapsed = False
+    await harness.pilot.pause()
+    temp = harness.app.query_one("#param-temp", Input)
+    temp.value = "nan"
+    temp.focus()
+    await harness.pilot.press("enter")
+
+    assert params.read_values() == (0.7, 1.0, 1024)
+    assert not harness.app.query_one("#chat-input", ChatInput).disabled
+    assert not harness.server.requests
+
+
+async def test_native_params_collapse_retains_values(harness: AppHarness) -> None:
+    harness.app.query_one(TabbedContent).active = "chat"
+    params = harness.app.query_one(ParamsPane)
+    temp = params.query_one("#param-temp", Input)
+    await harness.pilot.pause()
+    assert params.size.height == 1
+    title = params.query_one("CollapsibleTitle")
+    title.focus()
+    await harness.pilot.press("tab")
+    assert harness.app.focused is not temp
+    assert temp not in harness.app.screen.focus_chain
+    title.focus()
+    await harness.pilot.press("enter")
+    temp.value = "0.25"
+    await harness.pilot.pause()
+    assert "temp 0.25" in params.title
+    params.collapsed = True
+    await harness.pilot.pause()
+    params.collapsed = False
+    await harness.pilot.pause()
+    assert temp.value == "0.25"
+    title.focus()
+    for field in ("#param-temp", "#param-top-p", "#param-max-tokens"):
+        await harness.pilot.press("tab")
+        assert harness.app.focused is params.query_one(field)
+        assert harness.app.screen.can_view_entire(params.query_one(field))
+    assert not harness.server.requests

@@ -6,7 +6,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from mlx_tui.config import _clamp, _clamp_int, _coerce_float_strict, config_path
+from mlx_tui.config import _clamp, _coerce_float_strict, config_path
 
 
 @dataclass(frozen=True)
@@ -56,7 +56,7 @@ def _preset_from_mapping(d: dict[str, object]) -> Preset | None:  # noqa: PLR091
     if top_p is not None:
         top_p = _clamp(top_p, 0.0, 1.0)
     if max_tok is not None:
-        max_tok = _clamp_int(max_tok, 1, 16384)
+        max_tok = _clamp(max_tok, 1, 16384)
     return Preset(
         name=name, system=system, temperature=temp, top_p=top_p, max_tokens=max_tok
     )

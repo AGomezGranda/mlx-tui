@@ -23,11 +23,13 @@ class ContextLimitError(ValueError):
 
 @dataclass(frozen=True)
 class ContextWindow:
-    """The retained request messages and its conservative token reservation."""
+    """Retained messages and reservation; ``excluded_turns`` counts messages."""
 
     messages: tuple[Message, ...]
     input_tokens: int
     reserved_tokens: int
+    # Kept for the existing Metrics schema; the value is a message count.
+    excluded_turns: int = 0
 
 
 def estimate_tokens(text: str) -> int:
@@ -81,7 +83,11 @@ def prepare_context(
     max_ctx: int,
     max_tokens: int,
 ) -> ContextWindow:
-    """Prepare one bounded request, reserving the complete response allowance."""
+    """Prepare one bounded request, reserving the complete response allowance.
+
+    The returned ``excluded_turns`` is the number of input messages omitted
+    from this request window, not the number of conversational turns.
+    """
     framing_tokens = TEMPLATE_OVERHEAD_TOKENS + RESPONSE_OVERHEAD_TOKENS
     if system_prompt:
         framing_tokens += estimate_message_tokens(
@@ -110,6 +116,7 @@ def prepare_context(
         messages=prepared,
         input_tokens=input_tokens,
         reserved_tokens=reserved_tokens,
+        excluded_turns=len(messages) - len(retained),
     )
 
 
@@ -122,8 +129,16 @@ def _format_k(n: int) -> str:  # noqa: PLR2004
     return f"{s}k"
 
 
-def ctx_bar_text(ctx_len: int, max_ctx: int) -> str:
-    return f"ctx {_format_k(ctx_len)}/{_format_k(max_ctx)}"
+def ctx_bar_text(ctx_len: int, max_ctx: int, *, excluded: int = 0) -> str:
+    """Estimated input plus reserved output against the configured budget.
+
+    Estimates use character heuristics, not the runtime tokenizer. ``excluded``
+    counts prior messages left out of the next request window.
+    """
+    base = f"ctx {_format_k(ctx_len)}/{_format_k(max_ctx)} est"
+    if excluded > 0:
+        return f"{base} · {excluded} excl"
+    return base
 
 
 def ctx_bar_style(ctx_len: int, max_ctx: int) -> str:  # noqa: PLR2004

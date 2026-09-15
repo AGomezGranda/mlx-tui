@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, cast, override
 
 from rich.text import Text
 from textual.app import ComposeResult
-from textual.containers import Vertical
+from textual.containers import VerticalScroll
 from textual.css.query import NoMatches
 from textual.widgets import DataTable, Static
 
@@ -22,25 +22,21 @@ from mlx_tui.history.store import TurnRecord
 if TYPE_CHECKING:
     from mlx_tui.app import MlxTuiApp
 
-_MAX_RECENT = 64
 
-
-def _per_col_styles(styles: list[str]) -> list[str]:
-    """Collapse per-turn dim/\"\"/bold into per-braille-col styles (bold wins)."""
-    out: list[str] = []
-    for k in range((len(styles) + 1) // 2):
-        pair = styles[2 * k : 2 * k + 2]
-        if "bold" in pair:
-            out.append("bold")
-        elif "" in pair:
-            out.append("")
-        else:
-            out.append("dim")
-    return out
-
-
-class MetricsPane(Vertical):
+class MetricsPane(VerticalScroll):
     """Owns two sparklines and the metrics DataTable."""
+
+    DEFAULT_CSS = """
+    MetricsPane { height: 1fr; padding: 0 1; }
+    #metrics-sparkline, #metrics-memory-sparkline {
+        height: 3;
+        border-bottom: solid $primary;
+        padding: 0 1;
+    }
+    #metrics-table {
+        height: 16;
+    }
+    """
 
     @property
     def tui(self) -> MlxTuiApp:
@@ -56,9 +52,10 @@ class MetricsPane(Vertical):
         table = self.query_one("#metrics-table", DataTable)
         table.add_column("time", key="time")
         table.add_column("model", key="model")
-        table.add_column("prefill", key="prefill")
-        table.add_column("decode", key="toks")
-        table.add_column("TTFT", key="ttft")
+        table.add_column("first", key="first")
+        table.add_column("answer", key="answer")
+        table.add_column("total", key="total")
+        table.add_column("req", key="req")
         table.add_column("ctx", key="ctx")
         table.add_column("prompt", key="prompt")
         table.add_column("out", key="out")
@@ -72,11 +69,7 @@ class MetricsPane(Vertical):
         except NoMatches:
             return
         all_records = self.tui.history.all_records()
-        recent = (
-            all_records[-_MAX_RECENT:]
-            if len(all_records) > _MAX_RECENT
-            else all_records
-        )
+        recent = all_records[-64:]
         self._update_chat_sparkline(spark_chat, recent)
         self._update_memory_sparkline(spark_mem)
         self._populate_metrics_table(table, recent)
@@ -91,7 +84,15 @@ class MetricsPane(Vertical):
         visible = sparkline_visible(recent)
         ctx_lens = [r.ctx_len for r in visible]
         styles = _shade_for_ctx(ctx_lens)
-        col_styles = _per_col_styles(styles)
+        col_styles: list[str] = []
+        for k in range((len(styles) + 1) // 2):
+            pair = styles[2 * k : 2 * k + 2]
+            if "bold" in pair:
+                col_styles.append("bold")
+            elif "" in pair:
+                col_styles.append("")
+            else:
+                col_styles.append("dim")
         lines = braille.split("\n")
         text = Text()
         for row_idx, line in enumerate(lines):
@@ -107,7 +108,7 @@ class MetricsPane(Vertical):
         spark_chat.update(text)
 
     def _update_memory_sparkline(self, spark_mem: Static) -> None:
-        mem_records = self.tui.memory_store.series()
+        mem_records = list(self.tui.memory_store)
         mem_braille, mem_legend = render_memory_sparkline(mem_records)
         if not mem_braille:
             spark_mem.update(Text(mem_legend, style="dim"))
@@ -117,25 +118,36 @@ class MetricsPane(Vertical):
     def _populate_metrics_table(
         self, table: DataTable[Any], recent: list[TurnRecord]
     ) -> None:
+        def fmt(v: float | None, spec: str) -> str:
+            return f"{v:{spec}}" if v is not None else "—"
+
+        def fmt_tok(v: int | None, estimated: bool) -> str:
+            if v is None:
+                return "—"
+            return f"{v}~" if estimated else str(v)
+
         table.clear()
         for r in recent:
             t_str = time.strftime("%H:%M:%S", time.localtime(r.ts))
             model_str = r.model or "—"
-            prefill = f"{r.prefill_tok_s:.0f}" if r.prefill_tok_s is not None else "—"
-            toks = f"{r.tok_s:.1f}"
-            ttft = f"{r.ttft_s:.2f}"
+            first = fmt(r.first_output_s, ".2f")
+            answer = fmt(r.answer_started_s, ".2f")
+            total = fmt(r.total_s, ".2f")
+            req = fmt(r.req_tok_s, ".1f")
             ctx = str(r.ctx_len)
-            prompt = f"{r.prompt_tok}~" if r.prompt_estimated else str(r.prompt_tok)
-            out = f"{r.out_tok}~" if r.out_estimated else str(r.out_tok)
+            prompt = fmt_tok(r.prompt_tok, r.prompt_estimated)
+            out = fmt_tok(r.out_tok, r.out_estimated)
             suffix = ""
             style: str | None = None
-            if r.cancelled:
+            if r.cancelled or r.outcome == "cancelled":
                 suffix = " · cancelled"
                 style = "dim"
-            elif r.cold:
-                suffix = " · cold"
+            elif r.outcome != "success":
+                suffix = f" · {r.outcome}"
                 style = "dim"
             out_cell = (
                 Text(f"{out}{suffix}", style=style) if style else f"{out}{suffix}"
             )
-            table.add_row(t_str, model_str, prefill, toks, ttft, ctx, prompt, out_cell)
+            table.add_row(
+                t_str, model_str, first, answer, total, req, ctx, prompt, out_cell
+            )

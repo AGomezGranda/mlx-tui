@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import tomllib
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Literal, cast
 
 SwapPolicy = Literal["auto", "warm", "restart"]
+RuntimeMode = Literal["attach", "managed"]
 
 
 @dataclass(frozen=True)
@@ -21,13 +23,15 @@ class AppConfig:
     start_cmd: str | None = None
     stop_cmd: str | None = None
     command_shell: bool = False
-    pidfile: str | None = None
     temperature: float | None = None
     top_p: float | None = None
     max_tokens: int | None = None
+    seed: int | None = None
+    enable_thinking: bool | None = None
     system: str | None = None
     max_ctx: int = 8192
     swap_policy: SwapPolicy = "auto"
+    runtime_mode: RuntimeMode = "attach"
 
 
 def config_path() -> Path:
@@ -37,17 +41,19 @@ def config_path() -> Path:
 
 
 CONFIG_TEMPLATE = """\
-# mlx-tui config — model/host/port/start_cmd/stop_cmd/pidfile
+# mlx-tui config — model/host/port/runtime_mode/start_cmd/stop_cmd
+# runtime_mode = "attach"  # "attach" (default) | "managed"
 # model = "ornith-ai/Ornith-1.5-9B-MLX-4bit"
 # start_cmd = "mlx_lm.server --port 8080"
 # stop_cmd = "pkill -f mlx_lm.server"
 # command_shell = false  # true: run start_cmd/stop_cmd via shell with $MLX_TUI_MODEL
 # shell example: command_shell = true
 # start_cmd = "mlx_lm.server --model \\"$MLX_TUI_MODEL\\" --port 8080"
-# pidfile = "/tmp/mlx-server.pid"
 # temperature = 0.7
 # top_p = 1.0
 # max_tokens = 1024
+# seed = 7
+# enable_thinking = false
 # system = "You are a helpful assistant."
 # max_ctx = 8192
 # max_context = 8192  # alias for max_ctx
@@ -61,6 +67,21 @@ def write_template(path: Path) -> None:
     path.write_text(CONFIG_TEMPLATE)
 
 
+def create_config(
+    path: Path, *, runtime_mode: RuntimeMode, host: str, port: int
+) -> bool:
+    """Create only a missing config; an existing user's file is untouched."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("x", encoding="utf-8") as handle:
+            handle.write(
+                f'runtime_mode = "{runtime_mode}"\nhost = "{host}"\nport = {port}\n'
+            )
+    except FileExistsError:
+        return False
+    return True
+
+
 _KEY_TYPES: dict[str, type] = {
     "model": str,
     "host": str,
@@ -68,10 +89,11 @@ _KEY_TYPES: dict[str, type] = {
     "start_cmd": str,
     "stop_cmd": str,
     "command_shell": bool,
-    "pidfile": str,
     "temperature": float,
     "top_p": float,
     "max_tokens": int,
+    "seed": int,
+    "enable_thinking": bool,
     "system": str,
     "max_ctx": int,
 }
@@ -81,19 +103,19 @@ class ConfigParseError(Exception):
     """Raised by :func:`parse_config` when the file is unreadable or invalid."""
 
 
-def _clamp(v: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, v))
-
-
-def _clamp_int(v: int, lo: int, hi: int) -> int:
+def _clamp[T: (int, float)](v: T, lo: T, hi: T) -> T:
     return max(lo, min(hi, v))
 
 
 def _coerce_float_strict(v: object) -> float | None:
     if type(v) is float:
-        return v
+        return v if math.isfinite(v) else None
     if type(v) is int:
-        return float(v)
+        try:
+            coerced = float(v)
+        except OverflowError:
+            return None
+        return coerced if math.isfinite(coerced) else None
     return None
 
 
@@ -101,11 +123,12 @@ def _from_mapping(data: dict[str, object]) -> AppConfig:
     found: dict[str, object] = {}
     for key, expected_type in _KEY_TYPES.items():
         value = data.get(key)
-        if type(value) is expected_type:
+        if expected_type is float:
+            coerced = _coerce_float_strict(value)
+            if coerced is not None:
+                found[key] = coerced
+        elif type(value) is expected_type:
             found[key] = value
-        elif expected_type is float and type(value) is int:
-            # TOML may emit 1 not 1.0 for temperature/top_p; coerce int->float but reject bool
-            found[key] = float(value)
     host = found.get("host")
     port = found.get("port")
     temp = cast("float | None", found.get("temperature"))
@@ -116,7 +139,7 @@ def _from_mapping(data: dict[str, object]) -> AppConfig:
         tp = _clamp(tp, 0.0, 1.0)
     mt = cast("int | None", found.get("max_tokens"))
     if mt is not None:
-        mt = _clamp_int(mt, 1, 16384)
+        mt = _clamp(mt, 1, 16384)
     raw_mc: int | None
     if type(data.get("max_context")) is int:
         raw_mc = data.get("max_context")  # type: ignore[assignment]
@@ -124,12 +147,16 @@ def _from_mapping(data: dict[str, object]) -> AppConfig:
         raw_mc = data.get("max_ctx")  # type: ignore[assignment]
     else:
         raw_mc = None
-    mc = _clamp_int(raw_mc, 1024, 131072) if raw_mc is not None else None
+    mc = _clamp(raw_mc, 1024, 131072) if raw_mc is not None else None
     raw_policy = data.get("swap_policy")
     if raw_policy in ("auto", "warm", "restart"):
         policy = cast("SwapPolicy", raw_policy)
     else:
         policy = cast("SwapPolicy", "auto")
+    raw_mode = data.get("runtime_mode")
+    mode = cast(
+        "RuntimeMode", raw_mode if raw_mode in ("attach", "managed") else "attach"
+    )
     return AppConfig(
         model=cast("str | None", found.get("model")),
         host=cast("str", host if host is not None else "127.0.0.1"),
@@ -137,13 +164,15 @@ def _from_mapping(data: dict[str, object]) -> AppConfig:
         start_cmd=cast("str | None", found.get("start_cmd")),
         stop_cmd=cast("str | None", found.get("stop_cmd")),
         command_shell=found.get("command_shell") is True,
-        pidfile=cast("str | None", found.get("pidfile")),
         temperature=temp,
         top_p=tp,
         max_tokens=mt,
+        seed=cast("int | None", found.get("seed")),
+        enable_thinking=cast("bool | None", found.get("enable_thinking")),
         system=cast("str | None", found.get("system")),
         max_ctx=mc if mc is not None else 8192,
         swap_policy=policy,
+        runtime_mode=mode,
     )
 
 

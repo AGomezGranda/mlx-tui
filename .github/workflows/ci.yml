@@ -25,6 +25,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --dev
 
+      - name: Record platform
+        run: uv run python -c 'import platform, sys; print(f"os={platform.system()} {platform.release()}; arch={platform.machine()}; python={sys.version}")'
+
       - name: Lint
         run: uv run ruff check .
 
@@ -52,8 +55,8 @@ jobs:
           enable-cache: true
           python-version: "3.13"
 
-      - name: Report architecture
-        run: uname -m
+      - name: Record platform
+        run: uv run python -c 'import platform, sys; print(f"os={platform.system()} {platform.release()}; arch={platform.machine()}; python={sys.version}")'
 
       - name: Install dependencies
         run: uv sync --locked --dev
@@ -69,6 +72,9 @@ jobs:
 
       - name: Test
         run: uv run pytest -q
+
+      - name: Verify built artifacts
+        run: uv run python tests/artifact_smoke.py
 
   compat-highest:
     runs-on: ubuntu-latest
@@ -134,6 +140,9 @@ jobs:
         with:
           enable-cache: true
           python-version: "3.13"
+
+      - name: Record platform
+        run: uv run python -c 'import platform, sys; print(f"os={platform.system()} {platform.release()}; arch={platform.machine()}; python={sys.version}")'
 
       - name: Verify built artifacts
         run: uv run python tests/artifact_smoke.py

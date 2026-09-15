@@ -1,4 +1,4 @@
-# MLX TUI — Part 3: The best way to run local models on a Mac
+# MLX TUI — Part 3: An evidence-first MLX workflow for Apple Silicon
 
 > Product direction for the next phase, following [idea.md](idea.md) and
 > [part2.md](part2.md). Written 2026-09-06 against the current working tree.
@@ -8,27 +8,25 @@
 
 ## Goal
 
-**Make MLX TUI the local inference tool that Mac users trust to choose a model,
-run it well, and understand what is happening.**
+**Help existing MLX operators on Apple Silicon choose between two supported
+coding configurations on their own Mac, understand the tradeoff, and run the
+choice through a local endpoint whose status they can trust.**
 
-The foundation answered: “Is my server up, and can I swap the model?”
-The next phase should answer: “What should I run on this Mac, with these settings,
-for this task — and can I rely on it every day?”
+The first audience is developers already running MLX-LM who are comfortable with
+a terminal and want evidence for a model/profile decision without abandoning
+their setup. Their primary job is: **choose and operate the right local model on
+this Mac for a small coding workload with a checkable result**.
 
-Our promise should be concrete:
+The first validation cycle uses attach mode: one task, two pinned configurations,
+sequential runs, an understandable result, and a “keep this profile” action.
+Success means the evidence informs a choice and the user returns to use it.
+A faster configuration need not win if its answer fails the task or its memory
+cost is unacceptable.
 
-- Get from a fresh installation to a useful response without assembling a server command.
-- Choose a model and context budget with a credible explanation of the tradeoffs.
-- Benefit from MLX optimizations without learning every runtime flag.
-- Resume real work, including files and long conversations.
-- Point another local application at the same dependable endpoint.
-- Diagnose a slow response or failed load without guessing.
-
-“Best” cannot mean fastest on every model, largest feature list, and easiest
-interface for every person simultaneously. Start with **developers and technically
-comfortable Mac users who want local models for daily work**. A terminal interface
-is an advantage for that audience. Winning the broader Mac audience may eventually
-need another interface; it does not require one in this phase.
+Managed installation is an acquisition expansion after this workflow proves
+valuable. Durable chat, files and broader workloads follow observed needs.
+First-time local-model users and the broader Mac audience are not the initial
+beachhead; their onboarding and support needs require separate validation.
 
 ## What we have, and what changes
 
@@ -38,16 +36,16 @@ uncommitted work. This inventory describes code inspected, not release status.
 | Foundation | Current implementation | Next responsibility |
 |---|---|---|
 | Status and memory | Polling, endpoint-associated process identity, RSS/available memory and memory bar | Distinguish reachable, ready, selected and actually observed model state |
-| Model lifecycle | HF cache table, search/download, warm/restart policies, serialized operations | A supported managed runtime and recovery that needs no shell editing |
-| Chat | Async SSE, cancellation, rendered transcript, basic parameters and presets | Complete response handling, durable conversations and file context |
+| Model lifecycle | HF cache table, search/download, warm/restart policies, serialized operations | Truthful attach-mode control and recovery; managed setup after validation |
+| Chat | Async SSE, cancellation, rendered transcript, basic parameters and presets | Complete response handling for comparison; persistence and files when needed |
 | Context | Configurable `max_ctx`, estimated framing, output reservation and bounded message trimming | Model-aware limits, tokenizer-backed counts where supported, visible trimming |
-| Metrics | Per-model rings, context/memory displays and estimated-token labels | Correct metric definitions and reproducible comparisons |
+| Metrics | Per-model rings, context/memory displays and estimated-token labels | Keep ordinary history visible; comparison setup and decisions live in Compare |
 
 Relevant implementation: [app](../src/mlx_tui/app/__init__.py),
 [process identity](../src/mlx_tui/process.py),
-[model operations](../src/mlx_tui/models_pane/swap_ops.py),
+[model operations](../src/mlx_tui/models_pane.py),
 [chat transport](../src/mlx_tui/chat.py),
-[chat pane](../src/mlx_tui/chat_pane/__init__.py),
+[chat pane](../src/mlx_tui/chat_pane.py),
 [context preparation](../src/mlx_tui/history/tokens.py), and
 [history records](../src/mlx_tui/history/store.py).
 
@@ -68,38 +66,51 @@ Three corrections to carry forward:
 
 | Earlier constraint | Decision for this phase |
 |---|---|
-| Control plane around a separately configured server | Keep attach mode; make managed setup the recommended new-user path |
-| Chat only as a load generator | Make it good enough for daily work; retain instrumentation |
+| Control plane around a separately configured server | Validate in attach mode first; add managed setup after the comparison gate |
+| Chat only as a load generator | Support the coding comparison first; earn investment in daily-work features |
 | Config is always an editor problem | Keep TOML and the editor; provide a short setup flow and selectable profiles |
-| Optimizations parked until a user asks | Actively evaluate them; enable only demonstrated improvements |
-| In-memory metrics only | Persist conversations and comparison results for separate purposes |
-| No A/B comparison | Compare sequential runs in Metrics; avoid two resident models by default |
+| Optimizations parked until a user asks | Evaluate changes needed for the first decision; expand only with evidence |
+| In-memory metrics only | Persist comparison results and chosen profiles first; conversations later |
+| No dedicated comparison tab | Compare sequential runs in Compare; avoid two resident models by default |
 | No public distribution until a personal usage gate passes | Add external onboarding and reliability gates, then publish |
 | Vision excluded | Later, explicit milestone; text reliability comes first |
 
 Keep MLX-only, local operation, keyboard-first interaction and reuse of upstream
-inference code. Drop arbitrary line-count budgets and “used by one person for a
-week” as the only evidence that a feature matters.
+inference code. MLX-only is an internal scope constraint: it should enable more
+accurate Apple-Silicon guidance and inspectable runtime behavior. Users must value
+those outcomes; the engine name is not itself a reason to choose the app.
+Drop arbitrary line-count budgets. Retain the personal one-week real-use gate,
+and add external activation, decision-value and return-use evidence.
 
 ## The competitive reality
 
-MLX alone is not a differentiator. LM Studio already supports it, Ollama has
-announced an MLX preview, and projects such as oMLX and vllm-mlx explicitly pursue
-Mac inference, caching and serving. Their existence invalidates the earlier
-assumption that nobody addresses this territory. These are product descriptions,
-not independently verified performance comparisons.
-[LM Studio](https://lmstudio.ai/docs/app),
-[Ollama](https://ollama.com/blog),
+Snapshot checked 2026-09-06. MLX support and terminal access are already available
+elsewhere. LM Studio documents MLX, model downloads, document chat, local APIs,
+headless operation and CLI control. [LM Studio documentation](https://lmstudio.ai/docs/app).
+Ollama has published further MLX releases and improvements since its March preview;
+calling it only an announcement understates the alternative. [Ollama blog](https://ollama.com/blog).
+oMLX documents model lifecycle and persistent caching, while vllm-mlx documents
+Apple-Silicon serving, batching and developer integrations.
 [oMLX](https://github.com/jundot/omlx),
 [vllm-mlx](https://github.com/waybarrios/vllm-mlx).
+These are documented capabilities, not independent performance or usability tests.
 
-Our proposed distinction is **an excellent terminal workflow with recommendations
-backed by measurements on your own Mac**. The combination matters: a profile you
-can understand, a runtime you can recover, and evidence explaining why one model
-or configuration is better for your workload.
+Compare alternatives on the same job: **choose and operate the right local model
+on this Mac for this coding workload**. The proposed advantage is an integrated
+choice backed by local evidence. Every advantage below remains a hypothesis.
 
-If users still choose another product after trying that workflow, investigate
-why. Do not interpret a longer feature checklist as progress toward winning.
+| Dimension | Alternative to compare against | MLX TUI hypothesis and evidence needed | Behavior that would falsify the advantage |
+|---|---|---|---|
+| Time to first useful response | Existing MLX-LM setup; LM Studio downloads/chat; Ollama model workflows | An operator reaches a useful comparison quickly; observe elapsed time and interventions on the same task, separating downloads | Users finish sooner in their existing workflow and abandon comparison as overhead |
+| Explanation of fit | Users' existing model advice and settings in their preferred app | Local quality, latency and memory evidence makes the choice understandable; ask users to explain the tradeoff | Users ignore the evidence or cannot explain their choice |
+| Observability and truthfulness | Direct MLX-LM output; oMLX and vllm-mlx serving information | Verified/estimated/unknown labels reduce mistaken conclusions; observe diagnosis of identical failures | Users still misread readiness or metrics, or diagnose more reliably elsewhere |
+| Reproducibility | Existing scripts, saved settings and CLI workflows | A saved comparison/profile makes rerunning the decision easier; observe a later rerun with matching metadata | Users must reconstruct settings manually or prefer their existing scripts |
+| Recovery | Current server restart workflow and competing lifecycle controls | Accurate failure state and next actions shorten recovery; observe failed load and cancellation cases | Users return to another tool to recover or distrust the displayed state |
+| Terminal workflow | Direct MLX-LM commands, LM Studio CLI, Ollama and serving-project workflows | Compare, inspect and keep a profile in one keyboard flow reduces effort; observe task completion and return use | Users keep their CLI or GUI because this flow adds steps without value |
+
+Record why participants stay with or return to an alternative, including when it
+already solves the job. Feature count and unsupported claims about competitors'
+missing capabilities are not evidence of an advantage.
 
 ## What upstream gives us
 
@@ -139,15 +150,17 @@ unknown; never silently present an unsupported optimization as enabled.
 
 ## Product shape
 
-Keep Models, Chat and Metrics, the always-visible status area, and the shared
-log pane. Add depth to those surfaces before adding more tabs.
+Keep Models, Compare and Chat, plus the Metrics history tab, the always-visible
+status area, and the shared log pane. The Compare tab owns two configurations,
+readiness, results and “keep this profile”; Metrics remains history-only. The broader chat layout below is a later
+possibility, conditional on daily-use evidence; it is not Milestone B scope.
 
 Illustrative layout; values and labels are proposed, not measurements:
 
 ```text
 ● Ready · model-name · Balanced · Local :8080
 Server RSS 7.2 GiB · available ~9.1 GiB · context ~6k + 2k reserved / 16k
-[ Models ] [ Chat ] [ Metrics ]
+[ Models ] [ Compare ] [ Chat ] [ Metrics ]
 
 Chat: Project notes                              Session saved locally
 ...conversation...
@@ -165,15 +178,16 @@ discoverable without requiring users to memorize another key for every feature.
 
 ## Pillar 1 — A runtime users can trust
 
-**Question:** can someone use the app without becoming their own server operator?
+**Question:** can an existing operator trust what the app says about their runtime?
 
-Offer two clear modes:
+Use attach mode for the first validation cycle. Managed mode follows only after
+Milestone B proves decision value and return use. The ownership boundary is:
 
+- **Attach:** connect to an existing local server with honest limits on control
+  and observability. Do not claim ownership of an arbitrary discovered process.
 - **Managed:** the app launches a tested MLX-LM installation, owns the process,
   records its version and effective launch settings, and handles start, stop,
   reload and failure recovery.
-- **Attach:** connect to an existing local server with honest limits on control
-  and observability. Do not claim ownership of an arbitrary discovered process.
 
 The initial managed implementation should launch upstream `mlx_lm.server` as a
 subprocess. Keep inference out of Textual's process. Start with one resident target
@@ -206,18 +220,36 @@ and remains cheap to maintain. Do not create a new scheduler or generation loop
 just to expose a counter. Features that need missing instrumentation remain
 explicitly unavailable until that integration is justified.
 
-**Done when:** a new user starts, switches, cancels and recovers without editing
-commands, and no failure produces a false ready/loaded indicator.
+**Done when:** an attached operator can distinguish reachable, ready and last
+observed state, including after failure or cancellation. The later managed gate
+adds startup, switching and recovery without command editing.
 
 ## Pillar 2 — Choose a useful model for this Mac
 
 **Question:** can we replace trial-and-error downloads with a defensible choice?
 
 The Models tab should help users answer “which one?” as well as “what is cached?”
-Start with a small maintained set of recommendations for general chat, coding and
-long-document work. Include a direct repository/path escape hatch. Recommend
-specific revisions and quantizations, with the source and date of the advice.
+Start with one job: small coding tasks with a deterministic check. Bound the
+initial catalogue to two or three pinned model revisions, one tested MLX-LM
+runtime and two named memory tiers. Milestone A selects the exact revisions and
+tiers from available test hardware; untested combinations remain unknown.
+Include a direct repository/path escape hatch without implying a recommendation.
 Do not infer compatibility or quality from a repository name alone.
+
+The project maintainer owns recommendation freshness and must name an owner for
+each entry before publication. Each entry records model revision, quantization,
+runtime/template/profile identity, tested Mac and memory tier, task/check version,
+results, test date and expiry date. Test it with the same coding comparison on
+each claimed tier, including load failures and memory observations. Publish both
+quality failures and cases where the baseline wins.
+
+Initially expire advice after 30 days, or invalidate it immediately when a pinned
+dependency or profile changes or a reproducible incompatibility is reported.
+Withdraw invalid advice from the recommended shortlist; retain dated results for
+inspection and label the combination unknown pending revalidation. Revalidation
+reruns the same checks on every claimed tier and renews the date only after review.
+If maintenance capacity is insufficient, shrink the catalogue rather than extend
+untested claims. This is ongoing product work, not a one-time UI feature.
 
 For each candidate, show download size, required runtime support, supported task,
 context budget and memory-fit confidence. Explain a recommendation: “smaller
@@ -241,15 +273,20 @@ sliding windows, hybrid recurrent state and MoE models do not justify one univer
 bytes-per-token constant. Prefer measurements from matching model/profile runs;
 otherwise show an estimate or unknown. Never describe a model as guaranteed to fit.
 
-First-run flow: detect supported Apple Silicon/macOS/runtime conditions, select a
-task and memory/context preference, show a small shortlist, download, load, send a
-useful prompt. Reuse the HF cache and downloader. Make partial downloads, required
+The first attach flow checks the runtime, offers two supported coding profiles,
+runs the comparison and saves a choice. If launch settings require a restart,
+show the operator the required change and verify it before continuing; never
+silently take ownership of the attached server.
+
+The later managed first-run flow detects supported Apple Silicon/macOS/runtime
+conditions, asks for a memory/context preference, shows the coding shortlist,
+downloads and loads models, then reaches the same comparison. Reuse the HF cache and downloader. Make partial downloads, required
 tokenizer files, gated repositories and disk exhaustion understandable. Loading a
 fully cached model should work offline.
 
-**Done when:** users can explain their choice and complete the flow without
-external setup instructions. Recommendations cover tested memory tiers rather
-than advertising support based only on our development machine.
+**Done when:** target users complete the comparison, explain an evidence-backed
+choice and later reuse it, meeting Milestone B's gates. Every active recommendation
+has an owner and current evidence for its claimed memory tiers.
 
 ## Pillar 3 — Make MLX optimizations useful and measurable
 
@@ -274,8 +311,10 @@ switch is a promise we cannot defend.
 | Batching/concurrency | Serve another local client without poor interactive latency | Measure per-request latency and aggregate throughput together |
 | Sampler/template controls | Appropriate behavior for a particular model and task | Verify effective parameters and preserve model-specific defaults |
 
-Prioritize prefix reuse and prefill behavior, then evaluate KV quantization and
-speculation. Keep this evaluation separate from a commitment to ship every knob.
+These are later evaluation options, not prerequisites for the first comparison.
+Start with two baseline coding configurations. Investigate prefix reuse or prefill
+behavior only when it addresses an observed tradeoff, then consider KV quantization
+and speculation. Keep this evaluation separate from a commitment to ship every knob.
 Interactions matter: a configuration good for one interactive request may be bad
 for concurrency. A fixed seed is useful experimental metadata, not a guarantee of
 identical output across runtimes or execution paths.
@@ -297,6 +336,7 @@ where the baseline wins too.
 
 **Question:** does the user come back to continue a task, rather than to test a model?
 
+After Milestone B, select session features from observed return-use obstacles.
 Persist conversations locally with model revision, system prompt, effective
 profile, messages, attachments and completion/cancellation state. Use a simple
 versioned file format initially; handle interrupted writes and provide clear/delete
@@ -320,8 +360,20 @@ available; otherwise label estimates and handle context rejection gracefully.
 Summarizing old context is a later, explicit action because it changes the evidence
 available to the model.
 
-**Done when:** someone resumes yesterday's file-based task after a restart, knows
-what context the model received, and recovers from cancellation without lost work.
+**Done when:** returning target users resume real coding work after restart,
+understand the supplied context and recover without lost work. Compare their
+return use before and after the selected session features; a successful demo alone
+does not justify adding the rest of the chat/file scope.
+
+### Milestone D status (2026-09-13)
+
+The session, multiline/copy/retry, and selected-file snapshot subset in the
+[Milestone D implementation plan](plans/2026-09-13-part3-milestone-d-earn-daily-use.md)
+is implemented and automated checks pass. Product validation remains deferred:
+the [Milestone D evidence record](compatibility/milestone-d.md) contains no
+consented baseline/follow-up observations or qualifying named-Mac recovery
+exercise. Milestones B and C remain unvalidated; implementation does not claim
+adoption, restore a warm KV cache, or prove model readiness.
 
 ## Pillar 5 — A local endpoint worth building on
 
@@ -349,42 +401,55 @@ LAN exposure and multi-user serving require their own design.
 **Done when:** an external client and the TUI coexist without unexplained switches,
 lost requests or misleading status.
 
+### UX follow-up (2026-09-10)
+
+The dedicated Compare tab and its complete operational journey are now described
+in the [comparison guide](comparison.md) and implemented in the
+[unified comparison pane plan](plans/2026-09-10-unified-comparison-pane.md).
+This follow-up updates the product shape; it does not change Milestone B's unmet
+live qualification or product gates.
+
 ## Measurement is part of the product
 
-Metrics should help users choose a model or setting. Build a small “Compare” action
-inside the existing Metrics tab: pick two configurations, run sequentially, inspect
-latency/memory and answer quality, then keep one. Sequential comparison avoids
-requiring enough memory for both models at once.
+The Compare tab should help users choose a model or setting. Pick two pinned
+configurations, check readiness, run sequentially, inspect latency/memory and
+answer quality, then keep one. Metrics remains a history view. Sequential
+comparison avoids requiring enough memory for both models at once.
 
-Use a modest workload pack: short chat, a long prompt, repeated-prefix follow-ups,
-a coding task with a checkable result, and a two-client contention case. Add a
-long-context retrieval task when evaluating cache changes. Synthetic token tests
-measure engine behavior; realistic prompts measure usefulness.
+The first decision is: **which of two pinned coding profiles offers the better
+latency/memory tradeoff on this Mac while passing one deterministic coding check?**
+Use one fixed prompt and check, sequential runs and the same context/output budget.
+A passing check supports this task only; it is not evidence of general coding quality.
 
-Proposed protocol:
+Keep only evidence needed for that decision:
 
-- Record chip, RAM, macOS, MLX/MLX-LM versions, model revision, quantization,
-  profile, prompt/template identity and actual token counts.
-- Record power mode/source and relevant concurrent load where available; compare
-  sustained runs on laptops as well as brief runs on a desktop.
-- Report cold runs separately. Run at least five warm trials and show median plus
-  range; collect a larger sample before claiming tail-latency improvements.
-- Distinguish first generated output, first answer text, total completion time,
-  engine prefill/decode and client-observed throughput. Missing values stay missing.
-- Record cache state/reuse, process RSS, engine allocation peak where exposed,
-  failures, cancellation and quality checks. Do not drop failed configurations
-  from the result table.
-- Store results locally with a schema version. Export enough metadata to reproduce
-  a result; include prompt content only when the user chooses to share it.
+- Record chip/RAM, macOS, MLX/MLX-LM versions, pinned model and effective profile,
+  prompt/template/check identity, and any settings that could not be verified.
+- Separate first-after-load from repeated runs. Use five warm trials per profile
+  with median and range; distinguish warm residency from verified cache reuse.
+  Flag changed power conditions or concurrent load that make the comparison suspect.
+- Show client-observed first-output and completion latency, sampled server RSS
+  when process attribution is verified, quality pass/fail and all failed runs.
+  Missing memory or engine timing stays unknown; sampled RSS is not an allocator
+  peak. An incomplete comparison may support a limited choice but cannot establish
+  a memory advantage.
+- Save versioned results and the chosen profile locally. Let the user keep either
+  profile, retain the baseline or reject both; record their reason during research.
+  Prompt content enters diagnostic exports only by explicit choice.
 
-For throughput, document numerator and interval, especially when usage includes
-reasoning tokens that arrived before answer text. Do not divide all output tokens
-by an answer-only interval. Allocator peaks must also identify their scope; a
-process-wide peak under concurrency is not per-request memory.
+Do not rank a failed quality check as a speed win. Small or inconsistent differences
+should produce an inconclusive result. Document timing intervals if throughput is
+shown; all output tokens must not be divided by an answer-only interval. “Keep this
+profile” saves a reproducible choice, applies supported settings and makes any
+operator-managed restart explicit.
 
-Use upstream benchmarking for engine baselines and a small HTTP workload runner
-for app behavior. Do not build a benchmarking platform or public leaderboard.
-The first comparison only needs to answer one real model/profile decision.
+Defer the broad protocol to a future optimization implementation plan: short chat,
+long prompts, repeated prefixes, long-context retrieval, two-client contention,
+sustained power/load trials, engine prefill/decode, cache instrumentation and
+allocator peaks. That plan must define token accounting and measurement scope,
+including process-wide versus per-request memory. Reuse upstream benchmarking
+for engine baselines and a small HTTP runner for app behavior. A benchmark platform
+or public leaderboard is outside this strategy.
 
 ## Build order
 
@@ -394,12 +459,30 @@ estimates before runtime compatibility and maintenance costs are established.
 
 | Milestone | Deliverable | Acceptance evidence | Defer if |
 |---|---|---|---|
-| **A — Trust the facts** | Capability snapshot, honest state labels, corrected metrics, richer stream handling | Real-server checks for catalogue vs residency, reasoning, cache usage, errors and cancellation | Never defer correctness; hide measurements we cannot substantiate |
-| **B — Own the first run** | Managed upstream process, setup flow, small model shortlist and recovery | Five fresh-install testers across at least two memory tiers; four reach a response without developer intervention | An integration requires an inference-engine rewrite; keep the supported subprocess path |
-| **C — Make it daily** | Durable sessions, multiline/file workflow and visible context management | Testers resume real work after restart and recover from interrupted turns | Extra session features do not improve that workflow |
-| **D — Prove optimization** | Baseline comparison plus first validated performance profile | Reproducible speed/memory results and quality checks; easy rollback | Improvements disappear in realistic workloads |
-| **E — Serve real clients** | Verified client setup, contention and model-switch policy | TUI plus one external client pass a repeated mixed-workload run | Required lifecycle guarantees cannot be enforced yet |
-| **F — Ship a supported release** | Packaging, tested version matrix, diagnostics and upgrade recovery | Clean install/upgrade/offline-start checks, no orphaned managed process after shutdown, two-week external use | Reliability or onboarding gates remain open |
+| **A — Trust the facts** | One pinned-runtime compatibility report, honest state labels, corrected metrics and stream handling needed for the coding task | Real-server checks on a named Mac; no unsupported state or metric presented as fact in the comparison path | Never defer correctness; hide measurements we cannot substantiate |
+| **B — Prove the choice** | Attach-mode comparison: one coding task, two pinned profiles, sequential results and “keep this profile” | Five existing MLX operators across two named memory tiers: at least four complete a trustworthy comparison without external instructions or developer intervention, at least three make and explain an evidence-backed choice, and at least three return in a separate session within 14 days to inspect, compare or run the choice | Decision value or return use is absent; revise the workflow or job before funding C/D |
+| **C — Own activation** | Minimum install artifact, pinned managed runtime, version detection, coding shortlist and recovery | Five fresh-install target users across two tiers; at least four reach the same comparison without manual server setup or developer intervention; verify ownership and shutdown | B is unproven, or runtime integration requires an inference-engine rewrite |
+| **D — Earn daily use** | Only session, file and context features that address observed obstacles | Returning users complete real tasks after restart without lost work; observed repeat use improves from their pre-feature baseline and users attribute value to the added workflow | Persistence passes a demo but does not change return use |
+| **E — Serve real clients** | Verified client setup, contention and explicit model-switch policy | TUI plus one external client pass repeated mixed workloads; target users actually reuse that endpoint | Required lifecycle guarantees cannot be enforced or client demand is absent |
+| **F — Ship a supported release** | Broader packaging/version matrix, diagnostics, upgrades and recovery | Clean install/upgrade/offline-start checks, no orphaned managed process, personal one-week use and two-week real use by multiple external target users | Reliability or adoption gates remain open |
+
+These are proposed decision thresholds, not measured results or population-level
+proof. Recruit beyond the maintainer's own usage. With participants' consent,
+record completion, assistance, decision/reason, later use and reasons for choosing
+an alternative through observed sessions and follow-up; no background analytics
+is required. Count dropouts and failures, and examine reasons even when the numeric
+gate passes. Confirming the baseline is a valid decision if the evidence explains
+it. A failed B gate triggers another focused validation cycle, not automatic
+expansion into managed setup or chat parity.
+
+Milestone C must include one documented, versioned TUI installation artifact and
+one reproducible way to obtain its pinned MLX-LM runtime in an app-owned isolated
+environment. Its implementation plan must select the exact artifact and resolver
+before recruiting fresh-install testers. Detect versions before startup, report
+mismatches with a recovery action and never overwrite the operator's attach-mode
+environment. Tie the managed subprocess lifetime to the TUI. Auto-update, release
+channels, broad compatibility and upgrade recovery remain in F. This minimum
+packaging work is part of activation, not something deferred until release polish.
 
 Suggested release targets, to validate rather than advertise now: warm interactive
 latency within 5% of a matching direct upstream baseline over repeated batches;
@@ -439,6 +522,104 @@ compatibility report from real requests on a named Mac. Verify health/model-stat
 semantics, usage and reasoning/tool streams, cache reuse, sampler behavior,
 concurrent requests and cancellation. Record unsupported surfaces explicitly.
 
-Then plan the managed first-run experience around those findings. The next
-release should make one complete promise believable: **choose a suitable model,
-get useful work done locally, and know that the app is telling the truth.**
+Then plan Milestone B around those findings and recruit existing MLX operators
+for the attach-mode coding comparison. Validate activation, an explainable choice
+and later reuse before planning managed acquisition or durable chat. The first
+promise is narrow and observable: **compare two supported configurations on this
+Mac, understand the evidence, and use the chosen profile with truthful status.**
+
+## Milestone A — result and B readiness (2026-09-08)
+
+Milestone A is implemented per `docs/plans/2026-09-07-part3-milestone-a-trust-the-facts.md`.
+Evidence: [compatibility/milestone-a.md](compatibility/milestone-a.md) on
+`local-m4-16gib` (MLX-LM `74e7cf9`, MLX 0.32.2, Qwen3-1.7B-4bit
+`3b1b1768`, coding-check-v1). Historical research dates above are retained;
+this section records what live requests proved.
+
+Evidence-based corrections: `/health` and `/v1/models` are independent;
+catalogue entries are availability only and never imply selection or
+residency. Selection is explicit; response `model` echoes the request and
+`default_model` on missing-`model` requests is not attributable, so
+unselected requests stay refused. Completion requires `[DONE]` plus finish
+`stop` plus non-empty answer; reasoning is preserved separately, tools stay
+unexecuted, and length-capped/reasoning-only output is incomplete. Metrics
+are client-observed first-output/answer/total plus client request tok/s;
+no prefill/decode speed, no cold claims, cached tokens mean server reuse.
+Memory is GiB process RSS plus avail/total; context numbers are character
+estimates with excluded-turn counts. Cancellation is client-side only.
+
+B readiness: runtime `74e7cf9`, model revision `3b1b1768`, and
+coding-check-v1 are pinned identities for the comparison input. Two larger
+cached revisions (`Qwen3.5-4B-MLX-4bit@32f3e8e`, `Ornith-1.5-9B-MLX-4bit@a48173b`)
+are unqualified resources, not recommendations. Only `local-m4-16gib` has
+real evidence; a second named, physically available memory tier is still
+missing and remains an explicit B-entry blocker. Structured tool output for
+this model/settings, KV quantization, allocator peaks, prefill timing,
+residency, and engine cancellation remain unknown.
+
+## Milestone B — implementation and validation status (2026-09-09)
+
+The attach-mode two-profile comparison, durable results, explicit Keep/Retain/
+Reject decision, saved-profile reuse, and opt-in real-runtime contract are
+implemented. Automated implementation evidence is tracked in
+[`plans/2026-09-09-part3-milestone-b-prove-the-choice.md`](plans/2026-09-09-part3-milestone-b-prove-the-choice.md).
+
+Qualification and product validation are not complete. No live B run has been
+performed, the second physical tier is still unknown, the proposed owner is not
+confirmed for publication, and the five-operator/14-day observation gate has
+not started. The exact qualification inputs, retained-evidence table,
+consent-based observation sheet, and focused next question are in
+[`compatibility/milestone-b.md`](compatibility/milestone-b.md). Milestone B is
+therefore not achieved, and Milestones C/D remain gated.
+
+## Milestone C — implementation versus validation status (2026-09-12)
+
+The managed implementation is present behind explicit `--managed`/setup
+selection. It includes an app-owned pinned runtime, retained child identity,
+verified offline snapshot loading, setup-to-Compare navigation, saved-choice
+activation recovery, and opt-in live contract tests. Attach mode remains the
+default for existing configurations and never adopts or stops discovered
+processes. Automated implementation evidence is tracked in
+[`plans/2026-09-12-part3-milestone-c-own-activation.md`](plans/2026-09-12-part3-milestone-c-own-activation.md).
+
+Validation is not complete: Milestone B still has no qualified second physical
+tier or product observations, and no fresh-install users have been recruited.
+The opt-in C contract requires exact runtime/model inputs and a retained output
+record before it can run. C is not achieved until at least four of five
+consenting fresh-install users reach the trustworthy comparison without manual
+server setup or developer intervention, and ownership/shutdown checks pass.
+No recommendation, tier claim, or user result is inferred from this
+implementation checkpoint.
+
+## Milestone E — qualification only; shared serving blocked (2026-09-13)
+
+Phase 3 implements the opt-in HTTP plus OpenCode 1.18.28 qualification
+suite (`tests/runtime/test_milestone_e.py`) and the client recipes in the
+[client guide](clients.md). No live runs are retained yet, so the
+[Milestone E evidence record](compatibility/milestone-e.md) stays
+qualification-only: supported shared serving stays blocked because stock
+upstream `74e7cf9` cannot reject wrong-target requests before loading or
+coordinate lifecycle changes across external clients. Pi receives no
+compatibility claim from OpenCode results.
+
+The full E gate is enforceable wrong-target rejection plus lifecycle
+coordination, repeated TUI-plus-client workloads, and consenting
+target-user separate-session reuse. A completed implementation plan
+substitutes for none of these. Milestones B, C, and D remain unvalidated
+per their sections above.
+
+## Milestone F — implementation versus release qualification (2026-09-15)
+
+The 0.3.0 candidate has retained wheel/sdist bytes, private diagnostics,
+isolated predecessor upgrade/rollback evidence, and the opt-in installed
+qualification contract in `tests/runtime/test_milestone_f.py`. The contract is
+fail-closed and records package/runtime/profile identity, managed chat and
+recovery, session attachment preservation, and owned cleanup outcomes without
+collecting prompts or other conversation content.
+
+F is not achieved. No live contract, clean-account install, genuinely offline
+restart, real-MLX shutdown run, seven-day personal observation, or fourteen-day
+two-user observation is retained. The current host is macOS 27.0 while the
+managed matrix is pinned to macOS 26.6.2; broader hardware remains unsupported.
+The release decision stays **blocked**, and no publishing, tagging, uploading,
+or participant messaging is authorized.

@@ -58,6 +58,17 @@ def test_temperature_int_coerced_to_float(tmp_path: Path) -> None:
     assert presets[0].top_p == 0.0
 
 
+@pytest.mark.parametrize("value", ["nan", "inf", "+inf", "-inf"])
+@pytest.mark.parametrize("key", ["temperature", "top_p"])
+def test_nonfinite_float_entry_filters_preset(
+    tmp_path: Path, key: str, value: str
+) -> None:
+    p = tmp_path / "presets.toml"
+    p.write_text(f'[[preset]]\nname = "bad"\n{key} = {value}\n')
+
+    assert parse_presets(p) == []
+
+
 def test_invalid_bool_for_max_tokens_filtered(tmp_path: Path) -> None:
     p = tmp_path / "presets.toml"
     p.write_text('[[preset]]\nname = "bad"\nmax_tokens = true\n')

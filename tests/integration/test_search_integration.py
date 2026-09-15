@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 
 import pytest
@@ -100,7 +101,7 @@ async def test_open_query_and_browse(
     )
     # allow fill to propagate to table
     assert await harness.wait_for(
-        lambda app: table.get_cell_at(Coordinate(0, 2)) == "1.9 GB ✓"
+        lambda app: table.get_cell_at(Coordinate(0, 2)) == "1.9 GiB ✓"
     ), f"download cell not updated; got {table.get_cell_at(Coordinate(0, 2))!r}"
 
     await harness.pilot.press("escape")
@@ -354,7 +355,7 @@ async def test_low_disk_warns_then_proceeds(
             plain = _static_plain(screen.query_one("#dl-progress", Static))
         except Exception:
             return False
-        return "warning: needs 1.9 GB" in plain
+        return "warning: needs 1.9 GiB" in plain
 
     assert await harness.wait_for(warning_present), (
         f"warning not found; plain={_static_plain(screen.query_one('#dl-progress', Static))!r}"
@@ -683,22 +684,228 @@ async def test_size_lookup_failure_logs_once_with_repo_id(
 
     monkeypatch.setattr("mlx_tui.search_screen.repo_snapshot", failing_snapshot)
     del screen._sizes[ROW]
-    screen._fetch_size(ROW)
+    screen._fetch_size(ROW, screen._search_generation)
     assert await harness.wait_for(size_failed), harness.app_log_lines()
     assert ROW not in screen._sizes
     # A repeated identical failure stays silent.
-    screen._fetch_size(ROW)
+    screen._fetch_size(ROW, screen._search_generation)
     await harness.pilot.pause()
     await harness.pilot.pause()
     assert len(size_failed_lines()) == 1
 
     # A successful fetch clears the source; recurrence becomes visible again.
     monkeypatch.setattr("mlx_tui.search_screen.repo_snapshot", working_snapshot)
-    screen._fetch_size(ROW)
+    screen._fetch_size(ROW, screen._search_generation)
     assert await harness.wait_for(lambda app: ROW in screen._sizes)
     monkeypatch.setattr("mlx_tui.search_screen.repo_snapshot", failing_snapshot)
     del screen._sizes[ROW]
-    screen._fetch_size(ROW)
+    screen._fetch_size(ROW, screen._search_generation)
     assert await harness.wait_for(lambda app: len(size_failed_lines()) == 2), (
         harness.app_log_lines()
     )
+
+
+async def test_old_search_completion_cannot_replace_new_results(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_started = threading.Event()
+    release_old = threading.Event()
+
+    def delayed_list(api: object, query: str) -> list[str]:
+        if query == "old":
+            old_started.set()
+            assert release_old.wait(timeout=5)
+            return ["old/repo"]
+        return ["new/repo"]
+
+    screen = await open_search(harness, monkeypatch)
+    monkeypatch.setattr("mlx_tui.search_screen.list_results", delayed_list)
+    search_input = screen.query_one("#search-input", Input)
+
+    search_input.focus()
+    await harness.pilot.press(*"old", "enter")
+    assert await harness.wait_for(lambda app: old_started.is_set())
+
+    search_input.value = ""
+    search_input.focus()
+    await harness.pilot.press(*"new", "enter")
+    assert await harness.wait_for(lambda app: screen._repo_ids == ["new/repo"])
+
+    release_old.set()
+    assert await harness.wait_for(lambda app: screen._repo_ids == ["new/repo"])
+    table = screen.query_one("#search-results", ResultsTable)
+    assert table.row_count == 1
+    assert table.get_cell_at(Coordinate(0, 0)) == "new/repo"
+
+
+async def test_empty_submit_invalidates_pending_search(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_started = threading.Event()
+    release_old = threading.Event()
+
+    def delayed_list(api: object, query: str) -> list[str]:
+        old_started.set()
+        assert release_old.wait(timeout=5)
+        return ["old/repo"]
+
+    screen = await open_search(harness, monkeypatch)
+    monkeypatch.setattr("mlx_tui.search_screen.list_results", delayed_list)
+    search_input = screen.query_one("#search-input", Input)
+
+    search_input.focus()
+    await harness.pilot.press(*"old", "enter")
+    assert await harness.wait_for(lambda app: old_started.is_set())
+
+    search_input.value = ""
+    search_input.focus()
+    await harness.pilot.press("enter")
+    release_old.set()
+    assert await harness.wait_for(lambda app: screen._repo_ids == [])
+    table = screen.query_one("#search-results", ResultsTable)
+    assert table.row_count == 0
+    assert "type a search" in _static_plain(screen.query_one("#search-status", Static))
+
+
+async def test_removed_row_ignores_pending_size_completion(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    size_started = threading.Event()
+    release_size = threading.Event()
+
+    def delayed_snapshot(api: object, rid: str) -> RepoSnapshot:
+        size_started.set()
+        assert release_size.wait(timeout=5)
+        return RepoSnapshot(revision="rev-old", files=tuple(SIZE_PAIRS))
+
+    screen = await open_search(harness, monkeypatch)
+    monkeypatch.setattr("mlx_tui.search_screen.repo_snapshot", delayed_snapshot)
+
+    await harness.pilot.press(*"qwen", "enter")
+    assert await harness.wait_for(lambda app: size_started.is_set())
+    search_input = screen.query_one("#search-input", Input)
+    search_input.value = ""
+    search_input.focus()
+    await harness.pilot.press("enter")
+    release_size.set()
+    assert await harness.wait_for(lambda app: ROW not in screen._sizes)
+    assert screen._revisions == {}
+    assert screen.query_one("#search-results", ResultsTable).row_count == 0
+
+
+async def test_same_repo_new_generation_keeps_new_metadata(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_started = threading.Event()
+    release_old = threading.Event()
+    calls = 0
+    old_pairs = (("old.safetensors", 2_000_000_000),)
+    new_pairs = (("new.safetensors", 3_000_000_000),)
+
+    def snapshots(api: object, rid: str) -> RepoSnapshot:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            old_started.set()
+            assert release_old.wait(timeout=5)
+            return RepoSnapshot(revision="rev-old", files=old_pairs)
+        return RepoSnapshot(revision="rev-new", files=new_pairs)
+
+    screen = await open_search(harness, monkeypatch)
+    monkeypatch.setattr("mlx_tui.search_screen.repo_snapshot", snapshots)
+    search_input = screen.query_one("#search-input", Input)
+
+    await harness.pilot.press(*"qwen", "enter")
+    assert await harness.wait_for(lambda app: old_started.is_set())
+    search_input.value = ""
+    search_input.focus()
+    await harness.pilot.press(*"qwen again", "enter")
+    assert await harness.wait_for(lambda app: screen._revisions.get(ROW) == "rev-new")
+
+    release_old.set()
+    assert await harness.wait_for(lambda app: screen._revisions.get(ROW) == "rev-new")
+    assert screen._sizes[ROW] == 3_000_000_000
+
+
+async def test_stale_search_error_does_not_replace_current_status(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_started = threading.Event()
+    release_old = threading.Event()
+
+    def delayed_list(api: object, query: str) -> list[str]:
+        if query == "old":
+            old_started.set()
+            assert release_old.wait(timeout=5)
+            raise RuntimeError("old search")
+        return ["new/repo"]
+
+    screen = await open_search(harness, monkeypatch)
+    monkeypatch.setattr("mlx_tui.search_screen.list_results", delayed_list)
+    search_input = screen.query_one("#search-input", Input)
+
+    search_input.focus()
+    await harness.pilot.press(*"old", "enter")
+    assert await harness.wait_for(lambda app: old_started.is_set())
+    search_input.value = ""
+    search_input.focus()
+    await harness.pilot.press(*"new", "enter")
+    assert await harness.wait_for(lambda app: screen._repo_ids == ["new/repo"])
+
+    release_old.set()
+    await harness.pilot.pause()
+    status = _static_plain(screen.query_one("#search-status", Static))
+    assert status == "1 results"
+    assert not any("old search" in line for line in harness.app_log_lines())
+
+
+async def test_stale_size_error_does_not_clear_new_metadata(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_started = threading.Event()
+    release_old = threading.Event()
+    calls = 0
+
+    def snapshots(api: object, rid: str) -> RepoSnapshot:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            old_started.set()
+            assert release_old.wait(timeout=5)
+            raise OSError("old metadata")
+        return RepoSnapshot(revision="rev-new", files=tuple(SIZE_PAIRS))
+
+    screen = await open_search(harness, monkeypatch)
+    monkeypatch.setattr("mlx_tui.search_screen.repo_snapshot", snapshots)
+    search_input = screen.query_one("#search-input", Input)
+
+    await harness.pilot.press(*"qwen", "enter")
+    assert await harness.wait_for(lambda app: old_started.is_set())
+    search_input.value = ""
+    search_input.focus()
+    await harness.pilot.press(*"qwen again", "enter")
+    assert await harness.wait_for(lambda app: screen._revisions.get(ROW) == "rev-new")
+
+    release_old.set()
+    await harness.pilot.pause()
+    assert screen._revisions.get(ROW) == "rev-new"
+    assert f"size {ROW} failed" not in "\n".join(harness.app_log_lines())
+
+
+async def test_modal_escape_owns_key_even_with_chat_active(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pane = harness.chat_pane()
+    pane._turn_active = True
+    try:
+        screen = await open_search(harness, monkeypatch)
+        assert harness.app.screen is screen
+        await harness.pilot.press(*"d/query")
+        assert screen.query_one("#search-input", Input).value == "d/query"
+        await harness.pilot.press("escape")
+        assert await harness.wait_for(
+            lambda app: not isinstance(app.screen, SearchScreen)
+        )
+        assert not pane._cancel_requested
+    finally:
+        pane._turn_active = False

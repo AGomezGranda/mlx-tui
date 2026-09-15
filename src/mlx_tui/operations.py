@@ -9,8 +9,11 @@ from enum import Enum
 class OperationKind(Enum):
     IDLE = "idle"
     CHATTING = "chatting"
+    COMPARING = "comparing"
     LOADING = "loading"
     RESTARTING = "restarting"
+    INSTALLING = "installing"
+    DOWNLOADING = "downloading"
     DELETING = "deleting"
 
 
@@ -18,7 +21,14 @@ class OperationCoordinator:
     """Own exactly one operation for the complete worker lifetime."""
 
     _SWAP_KINDS = frozenset(
-        {OperationKind.LOADING, OperationKind.RESTARTING, OperationKind.DELETING}
+        {
+            OperationKind.COMPARING,
+            OperationKind.LOADING,
+            OperationKind.RESTARTING,
+            OperationKind.INSTALLING,
+            OperationKind.DOWNLOADING,
+            OperationKind.DELETING,
+        }
     )
 
     def __init__(self) -> None:

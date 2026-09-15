@@ -1,0 +1,8 @@
+{
+  "created_at": "2026-09-08T17:15:08.398976+00:00",
+  "endpoint": "http://127.0.0.1:18080",
+  "model": "/Users/alvarogomez/.cache/huggingface/hub/models--mlx-community--Qwen3-1.7B-4bit/snapshots/3b1b1768f8f8cf8351c712464f906e86c2b8269e",
+  "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "python": "3.13.1 (main, Jan 14 2025, 23:31:50) [Clang 19.1.6 ]",
+  "schema_version": 1
+}

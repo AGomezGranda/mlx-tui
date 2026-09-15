@@ -13,7 +13,9 @@ from mlx_tui.app import main as app_main
 from mlx_tui.config import (
     AppConfig,
     ConfigParseError,
+    _coerce_float_strict,
     config_path,
+    create_config,
     load_config,
     parse_config,
     write_template,
@@ -58,7 +60,6 @@ def test_string_keys_round_trip(tmp_path: Path) -> None:
                     'model = "ornith-ai/Ornith-1.5-9B-MLX-4bit"',
                     'start_cmd = "mlx_lm.server --port 8080"',
                     'stop_cmd = "pkill -f mlx_lm.server"',
-                    'pidfile = "/tmp/mlx.pid"',
                 ]
             ),
         )
@@ -66,13 +67,56 @@ def test_string_keys_round_trip(tmp_path: Path) -> None:
     assert cfg.model == "ornith-ai/Ornith-1.5-9B-MLX-4bit"
     assert cfg.start_cmd == "mlx_lm.server --port 8080"
     assert cfg.stop_cmd == "pkill -f mlx_lm.server"
-    assert cfg.pidfile == "/tmp/mlx.pid"
 
 
 def test_host_and_port_round_trip(tmp_path: Path) -> None:
     cfg = load_config(_write(tmp_path, 'host = "0.0.0.0"\nport = 9001\n'))
     assert cfg.host == "0.0.0.0"
     assert cfg.port == 9001
+
+
+def test_optional_request_identity_fields_require_exact_types(tmp_path: Path) -> None:
+    cfg = load_config(_write(tmp_path, "seed = 7\nenable_thinking = false\n"))
+    assert cfg.seed == 7
+    assert cfg.enable_thinking is False
+
+    invalid = load_config(_write(tmp_path, 'seed = true\nenable_thinking = "false"\n'))
+    assert invalid.seed is None
+    assert invalid.enable_thinking is None
+
+
+def test_runtime_mode_defaults_to_attach_and_accepts_managed(
+    tmp_path: Path,
+) -> None:
+    assert load_config(_write(tmp_path, 'runtime_mode = "managed"\n')).runtime_mode == (
+        "managed"
+    )
+
+
+def test_create_config_is_atomic_and_does_not_overwrite_existing_file(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "nested" / "config.toml"
+
+    assert create_config(path, runtime_mode="managed", host="127.0.0.1", port=18080)
+    original = path.read_text()
+    assert 'runtime_mode = "managed"' in original
+    assert not create_config(path, runtime_mode="attach", host="0.0.0.0", port=9)
+    assert path.read_text() == original
+    assert load_config(_write(tmp_path, 'runtime_mode = "other"\n')).runtime_mode == (
+        "attach"
+    )
+
+
+def test_invalid_runtime_mode_does_not_change_attach_settings(tmp_path: Path) -> None:
+    cfg = load_config(
+        _write(
+            tmp_path,
+            'runtime_mode = true\nhost = "127.0.0.1"\nport = 9002\nstart_cmd = "server"\n',
+        )
+    )
+    assert cfg.runtime_mode == "attach"
+    assert (cfg.host, cfg.port, cfg.start_cmd) == ("127.0.0.1", 9002, "server")
 
 
 @pytest.mark.parametrize(
@@ -91,6 +135,19 @@ def test_wrong_type_degrades_to_default(
     cfg = load_config(_write(tmp_path, toml_line))
     defaults = AppConfig()
     assert getattr(cfg, key) == getattr(defaults, key)
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "+inf", "-inf"])
+@pytest.mark.parametrize("key", ["temperature", "top_p"])
+def test_nonfinite_float_degrades_to_absent(
+    tmp_path: Path, key: str, value: str
+) -> None:
+    cfg = load_config(_write(tmp_path, f"{key} = {value}\n"))
+    assert getattr(cfg, key) is None
+
+
+def test_float_coercion_rejects_integer_overflow() -> None:
+    assert _coerce_float_strict(10**1000) is None
 
 
 def test_unknown_key_ignored(tmp_path: Path) -> None:
@@ -227,6 +284,8 @@ def test_write_template_mentions_command_shell(tmp_path: Path) -> None:
     content = path.read_bytes()
     assert b"command_shell" in content
     assert b"MLX_TUI_MODEL" in content
+    assert b"enable_thinking" in content
+    assert b'runtime_mode = "attach"' in content
 
 
 def test_replace_preserves_unrelated_app_config_fields() -> None:
@@ -237,7 +296,6 @@ def test_replace_preserves_unrelated_app_config_fields() -> None:
         start_cmd="start",
         stop_cmd="stop",
         command_shell=True,
-        pidfile="/tmp/mlx.pid",
         temperature=0.2,
         top_p=0.8,
         max_tokens=512,
@@ -255,7 +313,6 @@ def test_replace_preserves_unrelated_app_config_fields() -> None:
         start_cmd="start",
         stop_cmd="stop",
         command_shell=True,
-        pidfile="/tmp/mlx.pid",
         temperature=0.2,
         top_p=0.8,
         max_tokens=1024,

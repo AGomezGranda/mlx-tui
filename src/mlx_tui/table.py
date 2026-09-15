@@ -7,49 +7,57 @@ from typing import override
 from textual.coordinate import Coordinate
 from textual.widgets import DataTable
 
-from mlx_tui.models import ModelRow, fits_headroom
-
-_FITS_GLYPHS: dict[bool | None, str] = {True: "✓", False: "⚠", None: "—"}
+from mlx_tui.models import ModelRow, model_identity_matches
 
 
-def loaded_cell(repo_id: str, effective_model: str | None) -> str:
-    """The ● marker when repo_id is the model currently serving."""
-    return "●" if effective_model == repo_id else ""
+def selected_cell(repo_id: str, selected_model: str | None) -> str:
+    """The ● marker when repo_id is the explicit request target."""
+    return "●" if model_identity_matches(repo_id, selected_model) else ""
 
 
-def fits_cell(size_on_disk: int, avail_gib: float | None) -> str:
-    """✓/⚠ headroom hint; em-dash when system memory is unknown."""
-    return _FITS_GLYPHS.get(fits_headroom(size_on_disk, avail_gib), "—")
+def quant_cell(quant: str) -> str:
+    """Name-derived quantization is a hint, not runtime evidence."""
+    return f"{quant} hint" if quant != "—" else "unknown hint"
+
+
+def runtime_fit_cell() -> str:
+    """Disk size never proves runtime memory fit."""
+    return "unknown"
 
 
 class ModelsTable(DataTable[str]):
     BINDINGS = [
-        ("enter", "load_swap", "Load/swap"),
+        ("enter", "load_swap", "Load"),
         ("d", "delete_model", "Delete"),
-        ("slash", "search_hf", "Search HF"),
+        ("slash", "search_hf", "Search"),
     ]
 
     @override
     def on_mount(self) -> None:
-        for column_key in ("model", "quant", "size", "fits", "loaded"):
+        for column_key in (
+            "model",
+            "quant hint",
+            "size on disk",
+            "runtime fit",
+            "selected",
+        ):
             self.add_column(column_key, key=column_key)
 
     def set_rows(
         self,
         rows: list[ModelRow],
         *,
-        effective_model: str | None,
-        avail_gib: float | None,
+        selected_model: str | None,
     ) -> None:
-        """Replace every row; renders quant/size/fits/loaded cells."""
+        """Replace every row; render disk facts and explicit selection."""
         self.clear()
         for row in rows:
             self.add_row(
                 row.repo_id,
-                row.quant,
-                f"{row.size_on_disk / 2**30:.1f} GB",
-                fits_cell(row.size_on_disk, avail_gib),
-                loaded_cell(row.repo_id, effective_model),
+                quant_cell(row.quant),
+                f"{row.size_on_disk / 2**30:.1f} GiB",
+                runtime_fit_cell(),
+                selected_cell(row.repo_id, selected_model),
                 key=row.repo_id,
             )
 
@@ -57,17 +65,14 @@ class ModelsTable(DataTable[str]):
         self,
         rows: list[ModelRow],
         *,
-        effective_model: str | None,
-        avail_gib: float | None,
+        selected_model: str | None,
     ) -> None:
-        """Update fits/loaded cells whose rendered value changed."""
+        """Update selection cells whose rendered value changed."""
+        # runtime fit is always "unknown" — no per-cell check needed.
         for index, row in enumerate(rows):
-            new_loaded = loaded_cell(row.repo_id, effective_model)
-            new_fits = fits_cell(row.size_on_disk, avail_gib)
-            if self.get_cell_at(Coordinate(index, 4)) != new_loaded:
-                self.update_cell(row.repo_id, "loaded", new_loaded)
-            if self.get_cell_at(Coordinate(index, 3)) != new_fits:
-                self.update_cell(row.repo_id, "fits", new_fits)
+            new_selected = selected_cell(row.repo_id, selected_model)
+            if self.get_cell_at(Coordinate(index, 4)) != new_selected:
+                self.update_cell(row.repo_id, "selected", new_selected)
 
     def action_load_swap(self) -> None:
         # Local import: models_pane imports table for ModelsTable, so a
