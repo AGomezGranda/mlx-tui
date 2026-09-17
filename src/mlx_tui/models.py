@@ -97,9 +97,8 @@ def _is_mlx_model(repo: CachedRepoInfo) -> bool:
     return False
 
 
-def collect_rows(info: HFCacheInfo, avail_gib: float | None = None) -> list[ModelRow]:
+def collect_rows(info: HFCacheInfo) -> list[ModelRow]:
     """Map MLX-ish cache repos to rows, biggest first, repo_id breaking ties."""
-    del avail_gib  # kept for callers while disk facts remain independent of RAM
     rows: list[ModelRow] = [
         ModelRow(
             repo_id=r.repo_id,
@@ -114,7 +113,7 @@ def collect_rows(info: HFCacheInfo, avail_gib: float | None = None) -> list[Mode
     return rows
 
 
-def scan_models(avail_gib: float | None = None) -> list[ModelRow]:
+def scan_models() -> list[ModelRow]:
     """The only cache touchpoint: scan the HF cache into table rows.
 
     A missing cache directory is not an error — an empty table.
@@ -123,7 +122,7 @@ def scan_models(avail_gib: float | None = None) -> list[ModelRow]:
         info = scan_cache_dir()
     except CacheNotFound:
         return []
-    return collect_rows(info, avail_gib)
+    return collect_rows(info)
 
 
 def resolve_cached_snapshot(

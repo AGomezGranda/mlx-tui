@@ -34,13 +34,6 @@ def _profile_ids_in_order(result: ComparisonResult) -> tuple[str, str] | None:
     return (profiles[0].profile.id, profiles[1].profile.id)
 
 
-def _profile_name(result: ComparisonResult, profile_id: str) -> str:
-    for entry in result.comparison.profiles:
-        if entry.profile.id == profile_id:
-            return entry.profile.name or entry.profile.id
-    return profile_id
-
-
 def result_header(result: ComparisonResult) -> Text:
     """Render run ID and frozen tested names/order from the result itself."""
     profiles = result.comparison.profiles

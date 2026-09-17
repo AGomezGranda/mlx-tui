@@ -14,10 +14,6 @@ _BRAILLE_LEFT = (0x01, 0x02, 0x04, 0x40)
 _BRAILLE_RIGHT = (0x08, 0x10, 0x20, 0x80)
 
 
-def _braille_char(bits: int) -> str:
-    return chr(0x2800 + bits) if bits else " "
-
-
 def sparkline_visible(
     records: list[TurnRecord], width: int = SPARKLINE_WIDTH
 ) -> list[TurnRecord]:
@@ -69,17 +65,9 @@ def _render_braille(levels: list[int | None], height_rows: int) -> str:
                         bits |= (_BRAILLE_LEFT if col == 0 else _BRAILLE_RIGHT)[
                             rg - row_start
                         ]
-            chars_in_row.append(_braille_char(bits))
+            chars_in_row.append(chr(0x2800 + bits) if bits else " ")
         lines.append("".join(chars_in_row))
     return "\n".join(lines)
-
-
-def _braille_for(values: list[float | None], height_rows: int) -> str:
-    return _render_braille(_braille_levels(values, height_rows * 4), height_rows)
-
-
-def _width_capped[T](records: list[T], width: int) -> list[T]:
-    return records[-(width * 2) :] if len(records) > width * 2 else records
 
 
 def render_sparkline(
@@ -102,7 +90,9 @@ def render_sparkline(
     visible = sparkline_visible(records, width)
     if not visible:
         return ("", "no history yet — chat to build it")
-    braille = _braille_for([r.req_tok_s for r in visible], height_rows)
+    braille = _render_braille(
+        _braille_levels([r.req_tok_s for r in visible], height_rows * 4), height_rows
+    )
     last = visible[-1]
     assert last.req_tok_s is not None
     legend = (
@@ -131,11 +121,11 @@ def render_memory_sparkline(  # noqa: PLR0912
     """
     if not records:
         return ("", "no memory samples yet")
-    visible = _width_capped(records, width)
+    visible = records[-(width * 2) :]
     rss_vals = [r.rss_gib for r in visible]
     if all(v is None for v in rss_vals):
         return ("", "no memory samples yet")
-    braille = _braille_for(rss_vals, height_rows)
+    braille = _render_braille(_braille_levels(rss_vals, height_rows * 4), height_rows)
     n = len(visible)
     latest = visible[-1]
     if latest.rss_gib is None:

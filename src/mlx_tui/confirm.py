@@ -55,8 +55,8 @@ class ConfirmScreen(ModalScreen[bool]):
 
     @on(Button.Pressed, "#btn-yes")
     def _confirm_pressed(self) -> None:
-        self.action_confirm()
+        self.dismiss(True)
 
     @on(Button.Pressed, "#btn-no")
     def _keep_pressed(self) -> None:
-        self.action_dismiss_no()
+        self.dismiss(False)

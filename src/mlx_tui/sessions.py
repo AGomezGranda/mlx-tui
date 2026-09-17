@@ -48,7 +48,7 @@ import tempfile
 import uuid
 from collections.abc import Generator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import UTC, datetime
 from hashlib import sha256
 from operator import attrgetter
@@ -187,16 +187,11 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def new_session_id() -> str:
-    """Generate a canonical UUIDv4 session identifier."""
-    return str(uuid.uuid4())
-
-
 def new_session(settings: RequestSettings, draft: str = "") -> ChatSession:
     """Start an unsaved session; the caller owns first-save timestamps."""
     now = _now_iso()
     return ChatSession(
-        session_id=new_session_id(),
+        session_id=str(uuid.uuid4()),
         created_at=now,
         updated_at=now,
         settings=settings,
@@ -324,13 +319,7 @@ def _provenance_value(table: dict[str, Any], key: str, label: str) -> str | None
     return value
 
 
-_ATTACHMENT_KEYS = {
-    "selected_path",
-    "resolved_path",
-    "byte_length",
-    "sha256",
-    "content",
-}
+_ATTACHMENT_KEYS = {f.name for f in fields(AttachmentSnapshot)}
 
 
 def _validate_attachment(snapshot: AttachmentSnapshot) -> AttachmentSnapshot:
@@ -415,27 +404,7 @@ def _attachments_to_json(
     return result
 
 
-_REQUEST_KEYS = {
-    "model",
-    "repo_id",
-    "revision",
-    "system",
-    "temperature",
-    "top_p",
-    "max_tokens",
-    "max_ctx",
-    "seed",
-    "enable_thinking",
-    "profile_id",
-    "profile_fingerprint",
-    "profile_modified",
-    "profile_runtime_commit",
-    "profile_runtime_provenance",
-    "profile_template_sha256",
-    "profile_template_provenance",
-    "profile_launch_settings",
-    "profile_launch_provenance",
-}
+_REQUEST_KEYS = {f.name for f in fields(RequestSettings)}
 
 
 def _settings_from_json(table: object) -> RequestSettings:
@@ -513,34 +482,7 @@ def _settings_from_json(table: object) -> RequestSettings:
     )
 
 
-_TURN_KEYS = {
-    "turn_id",
-    "created_at",
-    "original_draft",
-    "sent_content",
-    "settings",
-    "included_turn_ids",
-    "estimated_input",
-    "reserved_output",
-    "excluded_messages",
-    "answer",
-    "reasoning",
-    "tool_calls",
-    "response_model",
-    "finish_reason",
-    "skipped_frames",
-    "stream_complete",
-    "outcome",
-    "prompt_tokens",
-    "completion_tokens",
-    "total_tokens",
-    "cached_prompt_tokens",
-    "first_output_s",
-    "answer_started_s",
-    "total_s",
-    "error_category",
-    "error_detail",
-}
+_TURN_KEYS = {f.name for f in fields(SessionTurn)} - {"attachments"}
 
 _TURN_KEYS_V2 = _TURN_KEYS | {"attachments"}
 
@@ -641,15 +583,7 @@ def _turn_from_json(table: object, version: int) -> SessionTurn:
     )
 
 
-_SESSION_KEYS = {
-    "schema_version",
-    "session_id",
-    "created_at",
-    "updated_at",
-    "settings",
-    "draft",
-    "attempts",
-}
+_SESSION_KEYS = {f.name for f in fields(ChatSession)} - {"attachments"}
 
 _SESSION_KEYS_V2 = _SESSION_KEYS | {"attachments"}
 
@@ -751,58 +685,15 @@ def _session_from_json(document: object, expected_id: str | None = None) -> Chat
 
 
 def _settings_to_json(settings: RequestSettings) -> dict[str, JSONValue]:
-    return {
-        "model": settings.model,
-        "repo_id": settings.repo_id,
-        "revision": settings.revision,
-        "system": settings.system,
-        "temperature": settings.temperature,
-        "top_p": settings.top_p,
-        "max_tokens": settings.max_tokens,
-        "max_ctx": settings.max_ctx,
-        "seed": settings.seed,
-        "enable_thinking": settings.enable_thinking,
-        "profile_id": settings.profile_id,
-        "profile_fingerprint": settings.profile_fingerprint,
-        "profile_modified": settings.profile_modified,
-        "profile_runtime_commit": settings.profile_runtime_commit,
-        "profile_runtime_provenance": settings.profile_runtime_provenance,
-        "profile_template_sha256": settings.profile_template_sha256,
-        "profile_template_provenance": settings.profile_template_provenance,
-        "profile_launch_settings": settings.profile_launch_settings,
-        "profile_launch_provenance": settings.profile_launch_provenance,
-    }
+    return cast(dict[str, JSONValue], asdict(settings))
 
 
 def _turn_to_json(turn: SessionTurn) -> dict[str, JSONValue]:
     return {
-        "turn_id": turn.turn_id,
-        "created_at": turn.created_at,
-        "original_draft": turn.original_draft,
-        "sent_content": turn.sent_content,
-        "settings": _settings_to_json(turn.settings),
+        **asdict(turn),
         "attachments": _attachments_to_json(turn.attachments),
         "included_turn_ids": cast(JSONValue, list(turn.included_turn_ids)),
-        "estimated_input": turn.estimated_input,
-        "reserved_output": turn.reserved_output,
-        "excluded_messages": turn.excluded_messages,
-        "answer": turn.answer,
-        "reasoning": turn.reasoning,
         "tool_calls": cast(JSONValue, list(turn.tool_calls)),
-        "response_model": turn.response_model,
-        "finish_reason": turn.finish_reason,
-        "skipped_frames": turn.skipped_frames,
-        "stream_complete": turn.stream_complete,
-        "outcome": turn.outcome,
-        "prompt_tokens": turn.prompt_tokens,
-        "completion_tokens": turn.completion_tokens,
-        "total_tokens": turn.total_tokens,
-        "cached_prompt_tokens": turn.cached_prompt_tokens,
-        "first_output_s": turn.first_output_s,
-        "answer_started_s": turn.answer_started_s,
-        "total_s": turn.total_s,
-        "error_category": turn.error_category,
-        "error_detail": turn.error_detail,
     }
 
 
@@ -1110,34 +1001,9 @@ def load_session(path: Path, lock_handle: SessionLock | None = None) -> ChatSess
         settings=session.settings,
         draft=session.draft,
         attempts=tuple(
-            SessionTurn(
-                turn_id=turn.turn_id,
-                created_at=turn.created_at,
-                original_draft=turn.original_draft,
-                sent_content=turn.sent_content,
-                settings=turn.settings,
-                attachments=turn.attachments,
-                included_turn_ids=turn.included_turn_ids,
-                estimated_input=turn.estimated_input,
-                reserved_output=turn.reserved_output,
-                excluded_messages=turn.excluded_messages,
-                answer=turn.answer,
-                reasoning=turn.reasoning,
-                tool_calls=turn.tool_calls,
-                response_model=turn.response_model,
-                finish_reason=turn.finish_reason,
-                skipped_frames=turn.skipped_frames,
-                stream_complete=turn.stream_complete,
+            replace(
+                turn,
                 outcome="interrupted" if turn.outcome == "running" else turn.outcome,
-                prompt_tokens=turn.prompt_tokens,
-                completion_tokens=turn.completion_tokens,
-                total_tokens=turn.total_tokens,
-                cached_prompt_tokens=turn.cached_prompt_tokens,
-                first_output_s=turn.first_output_s,
-                answer_started_s=turn.answer_started_s,
-                total_s=turn.total_s,
-                error_category=turn.error_category,
-                error_detail=turn.error_detail,
             )
             for turn in session.attempts
         ),

@@ -93,6 +93,32 @@ def _same_identity(_host: str, _port: int) -> ProcessIdentity:
     return ProcessIdentity(os.getpid(), 0.0)
 
 
+def test_nested_trial_round_trip_rejects_unknown_fields(tmp_path: Path) -> None:
+    identity = ProcessIdentity(123, 4.5)
+    trial = comparison.TrialResult(
+        "profile-a",
+        1,
+        state="completed",
+        payload={"messages": [{"role": "user", "content": "hello"}]},
+        tool_calls=({"index": 0, "arguments": "{}"},),
+        rss_samples=(comparison.MemorySample(1.0, 2.0, 3.0),),
+        process_identity_before=identity,
+        process_identity_after=identity,
+    )
+    result = comparison.ComparisonResult(
+        run_id="nested-trial",
+        status="completed",
+        comparison=_result_input(tmp_path),
+        trials=(trial,),
+    )
+    encoded = comparison.encode_comparison(result)
+    assert comparison.decode_comparison(encoded) == result
+    document = json.loads(encoded)
+    document["trials"][0]["unknown_field"] = True
+    with pytest.raises(comparison.ComparisonValidationError, match="unknown keys"):
+        comparison.decode_comparison(document)
+
+
 def test_json_round_trip_and_reopen_running_as_interrupted(tmp_path: Path) -> None:
     value = _result_input(tmp_path)
     result = comparison.ComparisonResult(

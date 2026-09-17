@@ -34,13 +34,11 @@ from mlx_tui.comparison_persistence import (
     commit_choice,
     comparison_dir,
     decode_comparison,
-    deserialize_comparison,
     encode_comparison,
     load_choice,
     load_comparison,
     save_choice,
     save_comparison,
-    serialize_comparison,
 )
 from mlx_tui.comparison_runner import (
     assert_coding_check_v1,
@@ -77,7 +75,6 @@ __all__ = [
     "commit_choice",
     "comparison_dir",
     "decode_comparison",
-    "deserialize_comparison",
     "encode_comparison",
     "load_choice",
     "load_comparison",
@@ -85,6 +82,5 @@ __all__ = [
     "run_comparison",
     "save_choice",
     "save_comparison",
-    "serialize_comparison",
     "verify_profile_snapshot",
 ]

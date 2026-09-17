@@ -65,7 +65,7 @@ class ModelsPane(Vertical):
     @work(exclusive=True, group="rescan", thread=True)
     def _rescan(self) -> None:
         try:
-            rows = scan_models(self.tui.latest_avail_gib)
+            rows = scan_models()
         except Exception as exc:
             # Keep the current rows; a failed scan must not blank the table.
             self.tui.call_from_thread(self._rescan_failed, exc)

@@ -415,10 +415,6 @@ def _runtime_lock(root: Path):
         handle.close()
 
 
-def _terminate_install(proc: subprocess.Popen[str]) -> None:
-    serverctl.terminate_failed_process(proc)
-
-
 def _run_install_command(
     argv: list[str],
     *,
@@ -458,7 +454,7 @@ def _run_install_command(
     try:
         while proc.poll() is None:
             if cancel_event.is_set():
-                _terminate_install(proc)
+                serverctl.terminate_failed_process(proc)
                 raise InstallCancelled("managed runtime installation cancelled")
             with suppress(subprocess.TimeoutExpired):
                 proc.wait(timeout=0.1)
@@ -466,7 +462,7 @@ def _run_install_command(
         reader.join(timeout=1.0)
     finally:
         if proc.poll() is None:
-            _terminate_install(proc)
+            serverctl.terminate_failed_process(proc)
         reader.join(timeout=1.0)
     if cancel_event.is_set():
         raise InstallCancelled("managed runtime installation cancelled")

@@ -26,7 +26,6 @@ def test_read_attachment_keeps_exact_text_and_identity(tmp_path: Path) -> None:
     assert snapshot.resolved_path == source.resolve()
     assert snapshot.byte_length == len("def answer():\n    return '✓'\n".encode())
     assert snapshot.content == "def answer():\n    return '✓'\n"
-    assert snapshot.text == snapshot.content
 
 
 def test_render_user_content_is_exact_and_deterministic(tmp_path: Path) -> None:

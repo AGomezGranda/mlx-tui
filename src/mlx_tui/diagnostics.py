@@ -108,6 +108,7 @@ def _marker_info() -> dict[str, object]:  # noqa: PLR0911, PLR0912
         managed.BUILD_CONSTRAINTS_RESOURCE: None,
     }
     unknown: dict[str, object] = {
+        "verification": "recorded, not verified now",
         "runtime_commit": None,
         "python_version": None,
         "uv_version": None,
@@ -118,64 +119,28 @@ def _marker_info() -> dict[str, object]:  # noqa: PLR0911, PLR0912
     try:
         info = marker.lstat()
     except FileNotFoundError:
-        return {
-            "status": "missing",
-            "verification": "recorded, not verified now",
-            **unknown,
-        }
+        return {"status": "missing", **unknown}
     except OSError:
-        return {
-            "status": "unavailable",
-            "verification": "recorded, not verified now",
-            **unknown,
-        }
+        return {"status": "unavailable", **unknown}
     if stat.S_ISLNK(info.st_mode):
-        return {
-            "status": "symlink",
-            "verification": "recorded, not verified now",
-            **unknown,
-        }
+        return {"status": "symlink", **unknown}
     if not stat.S_ISREG(info.st_mode):
-        return {
-            "status": "invalid_type",
-            "verification": "recorded, not verified now",
-            **unknown,
-        }
+        return {"status": "invalid_type", **unknown}
     if info.st_size > _MAX_MARKER_BYTES:
-        return {
-            "status": "too_large",
-            "verification": "recorded, not verified now",
-            **unknown,
-        }
+        return {"status": "too_large", **unknown}
     try:
         with marker.open("rb") as file:
             raw = file.read(_MAX_MARKER_BYTES + 1)
     except OSError:
-        return {
-            "status": "unavailable",
-            "verification": "recorded, not verified now",
-            **unknown,
-        }
+        return {"status": "unavailable", **unknown}
     if len(raw) > _MAX_MARKER_BYTES:
-        return {
-            "status": "too_large",
-            "verification": "recorded, not verified now",
-            **unknown,
-        }
+        return {"status": "too_large", **unknown}
     try:
         value = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return {
-            "status": "corrupt",
-            "verification": "recorded, not verified now",
-            **unknown,
-        }
+        return {"status": "corrupt", **unknown}
     if not isinstance(value, dict):
-        return {
-            "status": "corrupt",
-            "verification": "recorded, not verified now",
-            **unknown,
-        }
+        return {"status": "corrupt", **unknown}
 
     invalid = False
     commit = _safe_hash(value.get("runtime_commit"), _HEX40)

@@ -28,24 +28,21 @@ def _matches_server_tokens(cmdline: list[str]) -> bool:
     return any(token.endswith(_SERVER_TOKEN_SUFFIXES) for token in cmdline)
 
 
-def _conn_port(conn: object) -> int | None:
+def _conn_addr(conn: object) -> tuple[str | None, int | None]:
     laddr = getattr(conn, "laddr", None)
-    if laddr is None:
-        return None
-    if isinstance(laddr, (tuple, list)) and len(laddr) >= 2:  # noqa: PLR2004
-        port = laddr[1]
-        return port if isinstance(port, int) else None
+    if isinstance(laddr, (tuple, list)):
+        host = laddr[0] if laddr else None
+        port = laddr[1] if len(laddr) >= 2 else None  # noqa: PLR2004
+        return (
+            host if isinstance(host, str) else None,
+            port if isinstance(port, int) else None,
+        )
+    ip = getattr(laddr, "ip", None)
     port = getattr(laddr, "port", None)
-    return port if isinstance(port, int) else None
-
-
-def _conn_host(conn: object) -> str | None:
-    laddr = getattr(conn, "laddr", None)
-    if isinstance(laddr, (tuple, list)) and laddr:
-        host = laddr[0]
-        return host if isinstance(host, str) else None
-    host = getattr(laddr, "ip", None)
-    return host if isinstance(host, str) else None
+    return (
+        ip if isinstance(ip, str) else None,
+        port if isinstance(port, int) else None,
+    )
 
 
 def _address_matches(requested: str, actual: str | None) -> bool:
@@ -70,9 +67,10 @@ def _listening_pids(host: str, port: int, conns: object) -> set[int]:
             continue
         if _conn_status(conn) != "LISTEN":
             continue
-        if _conn_port(conn) != port:
+        host_addr, port_addr = _conn_addr(conn)
+        if port_addr != port:
             continue
-        if not _address_matches(host, _conn_host(conn)):
+        if not _address_matches(host, host_addr):
             continue
         pids.add(pid)
     return pids
@@ -111,8 +109,8 @@ def _cached_identity_is_verified(
         and _matches_server_tokens(cmdline)
         and any(
             _conn_status(conn) == "LISTEN"
-            and _conn_port(conn) == port
-            and _address_matches(host, _conn_host(conn))
+            and (addr := _conn_addr(conn))[1] == port
+            and _address_matches(host, addr[0])
             for conn in conns
         )
     )

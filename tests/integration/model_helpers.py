@@ -13,7 +13,7 @@ from tests.conftest import AppHarness
 ROW = ModelRow("mlx-community/stub-test", 1_000_000_000, "4bit", ("abc123",))
 
 
-def _stub_rows(avail_gib: float | None) -> list[ModelRow]:
+def _stub_rows() -> list[ModelRow]:
     return [ROW]
 
 

@@ -281,9 +281,6 @@ class ComparePane(VerticalScroll):
     def _is_busy(self) -> bool:
         return self._comparison_active or self.tui.operations.is_busy
 
-    def _catalogue_error(self) -> str | None:
-        return self.tui.profile_error
-
     def refresh_profile_state(self) -> None:
         ids = self.tui.comparison_profile_ids
         try:
@@ -298,7 +295,7 @@ class ComparePane(VerticalScroll):
         except NoMatches:
             tier_raw = ""
         tier = tier_raw or "unknown"
-        catalogue_error = self._catalogue_error()
+        catalogue_error = self.tui.profile_error
         if catalogue_error:
             self._set_text(
                 "#comparison-setup-details",
@@ -447,7 +444,7 @@ class ComparePane(VerticalScroll):
         if not self.is_mounted:
             return
         busy = self._is_busy()
-        catalogue_broken = self._catalogue_error() is not None
+        catalogue_broken = self.tui.profile_error is not None
         readiness = self._preflight_input is not None and not busy
         result = self.tui.last_comparison
         decidable = result is not None and result.status == "completed" and not busy
@@ -666,10 +663,11 @@ class ComparePane(VerticalScroll):
                 "yellow",
             )
             return
-        if self._catalogue_error() is not None:
+        catalogue_error = self.tui.profile_error
+        if catalogue_error is not None:
             self._set_text(
                 "#comparison-progress",
-                f"catalogue unavailable: {self._catalogue_error()}",
+                f"catalogue unavailable: {catalogue_error}",
                 "red",
             )
             return

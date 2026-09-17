@@ -211,7 +211,3 @@ class ComparisonResult:
     updated_at: str = field(default_factory=_now_iso)
     summary: dict[str, JSONValue] = field(default_factory=dict)
     error: str | None = None
-
-    @property
-    def input(self) -> ComparisonInput:
-        return self.comparison

@@ -6,7 +6,7 @@ import json
 import math
 import os
 import tempfile
-from dataclasses import replace
+from dataclasses import asdict, fields, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -29,7 +29,6 @@ from mlx_tui.profiles import (
     CodingProfile,
     ProfileEntry,
     RecommendationEvidence,
-    profile_fingerprint,
 )
 
 
@@ -98,25 +97,7 @@ def _evidence_to_json(evidence: RecommendationEvidence) -> dict[str, JSONValue]:
 
 
 def _profile_to_json(profile: CodingProfile) -> dict[str, JSONValue]:
-    return {
-        "id": profile.id,
-        "name": profile.name,
-        "repo_id": profile.repo_id,
-        "revision": profile.revision,
-        "quantization": profile.quantization,
-        "runtime_commit": profile.runtime_commit,
-        "mlx_version": profile.mlx_version,
-        "template_sha256": profile.template_sha256,
-        "template_assets": _json_value(profile.template_assets),
-        "launch_settings": _json_value(profile.launch_settings),
-        "system": profile.system,
-        "temperature": profile.temperature,
-        "top_p": profile.top_p,
-        "max_tokens": profile.max_tokens,
-        "max_ctx": profile.max_ctx,
-        "seed": profile.seed,
-        "enable_thinking": profile.enable_thinking,
-    }
+    return cast(dict[str, JSONValue], _json_value(asdict(profile)))
 
 
 def _entry_to_json(entry: ProfileEntry) -> dict[str, JSONValue]:
@@ -152,44 +133,8 @@ def _input_to_json(value: ComparisonInput) -> dict[str, JSONValue]:
     }
 
 
-def _sample_to_json(sample: MemorySample) -> dict[str, JSONValue]:
-    return {
-        "timestamp": sample.timestamp,
-        "rss_gib": sample.rss_gib,
-        "available_gib": sample.available_gib,
-        "scope": sample.scope,
-    }
-
-
 def _trial_to_json(trial: TrialResult) -> dict[str, JSONValue]:
-    return {
-        "profile_id": trial.profile_id,
-        "repeat_index": trial.repeat_index,
-        "state": trial.state,
-        "error": trial.error,
-        "cancelled": trial.cancelled,
-        "payload": _json_value(trial.payload),
-        "answer": trial.answer,
-        "reasoning": trial.reasoning,
-        "tool_calls": _json_value(trial.tool_calls),
-        "response_model": trial.response_model,
-        "finish_reason": trial.finish_reason,
-        "stream_complete": trial.stream_complete,
-        "quality_pass": trial.quality_pass,
-        "quality_reason": trial.quality_reason,
-        "prompt_tokens": trial.prompt_tokens,
-        "completion_tokens": trial.completion_tokens,
-        "prompt_estimated": trial.prompt_estimated,
-        "completion_estimated": trial.completion_estimated,
-        "cached_prompt_tokens": trial.cached_prompt_tokens,
-        "first_output_s": trial.first_output_s,
-        "answer_started_s": trial.answer_started_s,
-        "total_s": trial.total_s,
-        "rss_samples": [_sample_to_json(value) for value in trial.rss_samples],
-        "sample_scope": trial.sample_scope,
-        "process_identity_before": _identity_to_json(trial.process_identity_before),
-        "process_identity_after": _identity_to_json(trial.process_identity_after),
-    }
+    return cast(dict[str, JSONValue], _json_value(asdict(trial)))
 
 
 def _result_to_json(value: ComparisonResult) -> dict[str, JSONValue]:
@@ -251,25 +196,7 @@ def _profile_from_json(value: object) -> CodingProfile:
     table = _require_dict(value, "profile")
     _check_keys(
         table,
-        {
-            "id",
-            "name",
-            "repo_id",
-            "revision",
-            "quantization",
-            "runtime_commit",
-            "mlx_version",
-            "template_sha256",
-            "template_assets",
-            "launch_settings",
-            "system",
-            "temperature",
-            "top_p",
-            "max_tokens",
-            "max_ctx",
-            "seed",
-            "enable_thinking",
-        },
+        {f.name for f in fields(CodingProfile)},
         "profile",
     )
     assets = _require_dict(
@@ -313,10 +240,6 @@ def _profile_from_json(value: object) -> CodingProfile:
         seed=integer("seed"),
         enable_thinking=thinking,
     )
-    if profile.fingerprint != profile_fingerprint(profile):
-        raise ComparisonValidationError(
-            "profile fingerprint could not be reconstructed"
-        )
     return profile
 
 
@@ -326,22 +249,7 @@ def _evidence_from_json(
     table = _require_dict(value, "evidence")
     _check_keys(
         table,
-        {
-            "owner",
-            "source",
-            "status",
-            "revocation_reason",
-            "tested_at",
-            "expires_at",
-            "machine_tier",
-            "task_id",
-            "check_id",
-            "prompt_sha256",
-            "runtime_freeze",
-            "profile_fingerprint",
-            "result_references",
-            "result_hashes",
-        },
+        {f.name for f in fields(RecommendationEvidence)},
         "evidence",
     )
     try:
@@ -406,25 +314,7 @@ def _input_from_json(value: object) -> ComparisonInput:
     table = _require_dict(value, "input")
     _check_keys(
         table,
-        {
-            "endpoint",
-            "profiles",
-            "snapshot_paths",
-            "verified_asset_hashes",
-            "runtime_evidence",
-            "install_evidence",
-            "launch_evidence",
-            "provenance",
-            "process_identity",
-            "isolation_evidence",
-            "machine_tier",
-            "operator_conditions",
-            "profile_order",
-            "task_id",
-            "check_id",
-            "prompt",
-            "result_path",
-        },
+        {f.name for f in fields(ComparisonInput)},
         "input",
     )
     raw_profiles = _required(table, "profiles", "input")
@@ -513,34 +403,7 @@ def _trial_from_json(value: object) -> TrialResult:
     table = _require_dict(value, "trial")
     _check_keys(
         table,
-        {
-            "profile_id",
-            "repeat_index",
-            "state",
-            "error",
-            "cancelled",
-            "payload",
-            "answer",
-            "reasoning",
-            "tool_calls",
-            "response_model",
-            "finish_reason",
-            "stream_complete",
-            "quality_pass",
-            "quality_reason",
-            "prompt_tokens",
-            "completion_tokens",
-            "prompt_estimated",
-            "completion_estimated",
-            "cached_prompt_tokens",
-            "first_output_s",
-            "answer_started_s",
-            "total_s",
-            "rss_samples",
-            "sample_scope",
-            "process_identity_before",
-            "process_identity_after",
-        },
+        {f.name for f in fields(TrialResult)},
         "trial",
     )
     repeat_index = _required(table, "repeat_index", "trial")
@@ -694,13 +557,7 @@ def load_comparison(path: Path) -> ComparisonResult:
 def _choice_json(value: SavedChoice) -> dict[str, JSONValue]:
     return {
         "schema_version": 1,
-        "run_id": value.run_id,
-        "result_path": str(value.result_path),
-        "decision": value.decision,
-        "profile_id": value.profile_id,
-        "profile_fingerprint": value.profile_fingerprint,
-        "reason": value.reason,
-        "created_at": value.created_at,
+        **cast(dict[str, JSONValue], _json_value(asdict(value))),
     }
 
 
@@ -722,16 +579,7 @@ def load_choice(path: Path | None = None) -> SavedChoice:
     table = _require_dict(document, "choice")
     _check_keys(
         table,
-        {
-            "schema_version",
-            "run_id",
-            "result_path",
-            "decision",
-            "profile_id",
-            "profile_fingerprint",
-            "reason",
-            "created_at",
-        },
+        {f.name for f in fields(SavedChoice)} | {"schema_version"},
         "choice",
     )
     if table.get("schema_version") != 1:
@@ -851,8 +699,3 @@ def commit_choice(
             pass
         raise
     return finalized, choice
-
-
-# Kept as a readable alias for callers that prefer the noun used in the plan.
-serialize_comparison = encode_comparison
-deserialize_comparison = decode_comparison

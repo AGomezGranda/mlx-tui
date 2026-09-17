@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 
 from mlx_tui.history.tokens import estimate_tokens
@@ -16,22 +15,6 @@ class TokenAccounting:
     completion_estimated: bool
     tok_s: float
     cached_prompt_tokens: int | None = None
-
-
-def iter_sse_data(lines: Iterable[str]) -> Iterator[str]:
-    """Yield each SSE ``data`` event payload, stop at dispatched ``[DONE]``.
-
-    Blank lines dispatch; ``data`` fields join with newline. See WHATWG SSE
-    interpretation rules; no reconnection/replay for a completion POST.
-    """
-    decoder = SSEDecoder()
-    for raw_line in lines:
-        payload = decoder.feed(raw_line)
-        if payload is None:
-            continue
-        if payload == "[DONE]":
-            break
-        yield payload
 
 
 @dataclass

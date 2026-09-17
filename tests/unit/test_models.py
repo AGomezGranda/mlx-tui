@@ -120,7 +120,7 @@ def test_collect_rows_filters_and_sorts_big_first() -> None:
     dataset = _repo("user/some-dataset", 5_000_000_000, _MLX_FILES, repo_type="dataset")
     plain = _repo("org/plain-model", 4_000_000_000, ["README.md"])
     info = _info(big, small, dataset, plain)
-    rows = collect_rows(info, avail_gib=None)
+    rows = collect_rows(info)
     assert [row.repo_id for row in rows] == [
         "mlx-community/big-4bit",
         "mlx-community/small-8bit",
@@ -145,12 +145,12 @@ def test_collect_rows_revision_hashes_sorted() -> None:
         last_accessed=0.0,
         last_modified=0.0,
     )
-    rows = collect_rows(_info(repo), avail_gib=None)
+    rows = collect_rows(_info(repo))
     assert rows[0].revision_hashes == ("aaa", "mmm", "zzz")
 
 
 def test_collect_rows_empty_cache() -> None:
-    assert collect_rows(_info(), avail_gib=None) == []
+    assert collect_rows(_info()) == []
 
 
 def test_scan_models_maps_missing_cache_to_empty(
@@ -160,7 +160,7 @@ def test_scan_models_maps_missing_cache_to_empty(
         raise models_mod.CacheNotFound("gone", Path("/gone"))
 
     monkeypatch.setattr(models_mod, "scan_cache_dir", raise_missing)
-    assert models_mod.scan_models(None) == []
+    assert models_mod.scan_models() == []
 
 
 def test_delete_repos_passes_hashes_and_returns_freed_size(

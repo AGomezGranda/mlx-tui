@@ -14,7 +14,6 @@ from mlx_tui.sse import (
     delta_reasoning_from_chunk,
     delta_tool_fragments_from_chunk,
     finish_reason_from_chunk,
-    iter_sse_data,
     token_accounting,
     usage_from_chunk,
 )
@@ -63,12 +62,12 @@ def test_decoder_dispatches_only_on_blank_line() -> None:
     assert decoder.feed("") == "a\nb"
 
 
-def test_iter_sse_data_stops_at_done() -> None:
+def test_decoder_stops_at_done() -> None:
     lines = ['data: {"a":1}\n', "\n", "data: [DONE]\n", "\n"]
-    assert list(iter_sse_data(lines)) == ['{"a":1}']
+    assert collect_sse(lines)[0] == ['{"a":1}']
 
 
-def test_iter_sse_data_skips_comments_and_non_data_fields() -> None:
+def test_decoder_skips_comments_and_non_data_fields() -> None:
     lines = [
         ": keepalive 3/10\n",
         "\n",
@@ -79,58 +78,58 @@ def test_iter_sse_data_skips_comments_and_non_data_fields() -> None:
         "data: x\n",
         "\n",
     ]
-    assert list(iter_sse_data(lines)) == ["x"]
+    assert collect_sse(lines)[0] == ["x"]
 
 
-def test_iter_sse_data_ignores_events_after_done() -> None:
+def test_decoder_ignores_events_after_done() -> None:
     lines = ["data: a\n", "\n", "data: [DONE]\n", "\n", "data: late\n", "\n"]
-    assert list(iter_sse_data(lines)) == ["a"]
+    assert collect_sse(lines)[0] == ["a"]
 
 
-def test_iter_sse_data_rejects_indented_field() -> None:
-    assert list(iter_sse_data(["  data: y  \n", "\n"])) == []
+def test_decoder_rejects_indented_field() -> None:
+    assert collect_sse(["  data: y  \n", "\n"])[0] == []
 
 
-def test_iter_sse_data_no_space_field() -> None:
-    assert list(iter_sse_data(["data:x\n", "\n"])) == ["x"]
-    assert list(iter_sse_data(["data:\n", "\n"])) == [""]
+def test_decoder_no_space_field() -> None:
+    assert collect_sse(["data:x\n", "\n"])[0] == ["x"]
+    assert collect_sse(["data:\n", "\n"])[0] == [""]
 
 
-def test_iter_sse_data_joins_multiple_data_fields() -> None:
-    assert list(iter_sse_data(["data: a\n", "data: b\n", "\n"])) == ["a\nb"]
+def test_decoder_joins_multiple_data_fields() -> None:
+    assert collect_sse(["data: a\n", "data: b\n", "\n"])[0] == ["a\nb"]
 
 
-def test_iter_sse_data_empty_data_event_yields_empty() -> None:
-    assert list(iter_sse_data(["data:\n", "\n"])) == [""]
-    assert list(iter_sse_data(["data\n", "\n"])) == [""]
+def test_decoder_empty_data_event_yields_empty() -> None:
+    assert collect_sse(["data:\n", "\n"])[0] == [""]
+    assert collect_sse(["data\n", "\n"])[0] == [""]
 
 
-def test_iter_sse_data_ignores_event_without_data() -> None:
-    assert list(iter_sse_data(["event: ping\n", "\n"])) == []
-    assert list(iter_sse_data(["\n"])) == []
+def test_decoder_ignores_event_without_data() -> None:
+    assert collect_sse(["event: ping\n", "\n"])[0] == []
+    assert collect_sse(["\n"])[0] == []
 
 
-def test_iter_sse_data_strips_bom_once() -> None:
-    assert list(iter_sse_data(["\ufeffdata: x\n", "\n"])) == ["x"]
+def test_decoder_strips_bom_once() -> None:
+    assert collect_sse(["\ufeffdata: x\n", "\n"])[0] == ["x"]
 
 
-def test_iter_sse_data_preserves_payload_spaces() -> None:
-    assert list(iter_sse_data(["data:  x  \n", "\n"])) == [" x  "]
+def test_decoder_preserves_payload_spaces() -> None:
+    assert collect_sse(["data:  x  \n", "\n"])[0] == [" x  "]
 
 
-def test_iter_sse_data_normalizes_cr_lf() -> None:
-    assert list(iter_sse_data(["data: a\r\n", "\r\n"])) == ["a"]
-    assert list(iter_sse_data(["data: a\r", "\r"])) == ["a"]
-    assert list(iter_sse_data(["data: a\n", "\n"])) == ["a"]
+def test_decoder_normalizes_cr_lf() -> None:
+    assert collect_sse(["data: a\r\n", "\r\n"])[0] == ["a"]
+    assert collect_sse(["data: a\r", "\r"])[0] == ["a"]
+    assert collect_sse(["data: a\n", "\n"])[0] == ["a"]
 
 
-def test_iter_sse_data_discards_unfinished_at_eof() -> None:
-    assert list(iter_sse_data(["data: incomplete\n"])) == []
-    assert list(iter_sse_data(["data: a\n", "data: b\n"])) == []
+def test_decoder_discards_unfinished_at_eof() -> None:
+    assert collect_sse(["data: incomplete\n"])[0] == []
+    assert collect_sse(["data: a\n", "data: b\n"])[0] == []
 
 
-def test_iter_sse_data_similar_option_names_ignored() -> None:
-    assert list(iter_sse_data(["data-path: x\n", "\n"])) == []
+def test_decoder_similar_option_names_ignored() -> None:
+    assert collect_sse(["data-path: x\n", "\n"])[0] == []
 
 
 @pytest.mark.parametrize(
@@ -146,8 +145,8 @@ def test_iter_sse_data_similar_option_names_ignored() -> None:
         ["data: incomplete\n"],
     ],
 )
-async def test_aiter_matches_iter(lines: list[str]) -> None:
-    assert await _collect_async(lines) == list(iter_sse_data(lines))
+async def test_aiter_matches_collector(lines: list[str]) -> None:
+    assert await _collect_async(lines) == collect_sse(lines)[0]
 
 
 @pytest.mark.parametrize(

@@ -39,9 +39,9 @@ async def test_delete_confirm_yes_deletes_exact_hashes_and_rescans(
     scans = {"count": 0}
     orig_scan = _stub_rows
 
-    def counting_scan(avail_gib: float | None) -> list[ModelRow]:
+    def counting_scan() -> list[ModelRow]:
         scans["count"] += 1
-        return orig_scan(avail_gib)
+        return orig_scan()
 
     def fake_delete(hashes: tuple[str, ...]) -> int:
         seen.append(hashes)

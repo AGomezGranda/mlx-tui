@@ -282,7 +282,7 @@ async def test_rescan_failure_keeps_rows_and_logs_once(
     await _select_row(harness)
     pane = harness.models_pane()
 
-    def failing_scan(avail_gib: float | None) -> list[ModelRow]:
+    def failing_scan() -> list[ModelRow]:
         raise RuntimeError("cache exploded")
 
     def rescan_failed(app: object) -> bool:

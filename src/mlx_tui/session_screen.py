@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast, override
+from typing import override
 
 from textual import on, work
 from textual.app import ComposeResult
@@ -232,6 +232,3 @@ class SessionScreen(ModalScreen[str | None]):
             self.dismiss(None)
         except NoMatches:
             pass
-
-    def _tui(self) -> object:
-        return cast(object, self.app)

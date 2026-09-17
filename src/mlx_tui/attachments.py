@@ -25,11 +25,6 @@ class AttachmentSnapshot:
     sha256: str
     content: str
 
-    @property
-    def text(self) -> str:
-        """Compatibility alias for callers that call the snapshot text."""
-        return self.content
-
 
 def read_attachment(path: Path) -> AttachmentSnapshot:
     """Read one explicitly selected regular UTF-8 file, bounded and exactly."""

@@ -29,7 +29,13 @@ from mlx_tui.attachments import (
     read_attachment,
     render_user_content,
 )
-from mlx_tui.chat import TurnProgress, TurnResult, error_detail, stream_turn
+from mlx_tui.chat import (
+    TurnProgress,
+    TurnResult,
+    _merge_tool_fragments,
+    error_detail,
+    stream_turn,
+)
 from mlx_tui.chat_turn import ChatTurn, render_session_turn  # noqa: F401
 from mlx_tui.config import AppConfig
 from mlx_tui.history.store import TurnRecord
@@ -92,9 +98,6 @@ class ChatInput(TextArea):
             super().__init__()
             self.chat_input = chat_input
             self.text = text
-            # Compat aliases for Input.Submitted call sites.
-            self.value = text
-            self.input = chat_input
 
         @property
         def control(self) -> ChatInput:  # type: ignore[override]
@@ -115,14 +118,6 @@ class ChatInput(TextArea):
             tab_behavior="focus",
             **kwargs,
         )
-
-    @property
-    def value(self) -> str:
-        return self.text
-
-    @value.setter
-    def value(self, new_value: str) -> None:
-        self.text = new_value
 
     def action_submit(self) -> None:
         self.post_message(ChatInput.Submitted(self, self.text))
@@ -886,18 +881,8 @@ class ChatPane(Vertical):
         self.mark_next_request_dirty()
 
     @on(ChatInput.Submitted, "#chat-input")
-    def _on_input_submitted(self, event: Any) -> None:
-        raw = getattr(event, "text", None)
-        if raw is None:
-            raw = getattr(event, "value", "")
-        if not isinstance(raw, str):
-            raw = str(raw)
-        editor = (
-            getattr(event, "chat_input", None)
-            or getattr(event, "input", None)
-            or getattr(event, "control", None)
-        )
-        self._do_submit(raw, editor)
+    def _on_input_submitted(self, event: ChatInput.Submitted) -> None:
+        self._do_submit(event.text, event.chat_input)
 
     @on(Button.Pressed, "#btn-send")
     def _send_pressed(self) -> None:
@@ -907,7 +892,7 @@ class ChatPane(Vertical):
             return
         self._do_submit(composer.text, composer)
 
-    def _do_submit(self, raw: str, editor: Any) -> None:  # noqa: PLR0911, PLR0912, PLR0915
+    def _do_submit(self, raw: str, editor: ChatInput) -> None:  # noqa: PLR0911, PLR0912, PLR0915
         # Test emptiness with strip() but send the original text so code
         # indentation is preserved.
         if not raw.strip():
@@ -1293,14 +1278,15 @@ class ChatPane(Vertical):
                 answer_started_s=result.answer_started_s,
                 total_s=result.total_s,
             )
+            self._record_outcome(
+                model_at_send,
+                result,
+                outcome,
+                ctx_len_estimate,
+                reserved_ctx_len,
+                excluded_turns,
+            )
             if outcome == "success":
-                self._record_success(
-                    model_at_send,
-                    result,
-                    ctx_len_estimate,
-                    reserved_ctx_len,
-                    excluded_turns,
-                )
                 self._commit_success(
                     pending_user,
                     result.full_text,
@@ -1310,14 +1296,6 @@ class ChatPane(Vertical):
                     result.tool_calls,
                 )
             else:
-                self._record_outcome(
-                    model_at_send,
-                    result,
-                    outcome,
-                    ctx_len_estimate,
-                    reserved_ctx_len,
-                    excluded_turns,
-                )
                 # Length-capped, damaged, tool-only and empty outcomes stay visible
                 # but neither side enters future history, so a retry resends
                 # the same context. The pending draft is intentionally left set so
@@ -1479,37 +1457,6 @@ class ChatPane(Vertical):
             notices.append(f"{excluded_turns} earlier message(s) excluded from request")
         return notices
 
-    def _record_success(
-        self,
-        model_at_send: str,
-        result: TurnResult,
-        ctx_len_estimate: int,
-        reserved_ctx_len: int,
-        excluded_turns: int,
-    ) -> None:
-        acct = result.accounting
-        ctx_len = acct.prompt_tokens if not acct.prompt_estimated else ctx_len_estimate
-        record = TurnRecord(
-            ts=time.time(),
-            model=model_at_send,
-            prompt_tok=acct.prompt_tokens,
-            out_tok=acct.completion_tokens,
-            first_output_s=result.first_output_s,
-            answer_started_s=result.answer_started_s,
-            total_s=result.total_s,
-            req_tok_s=acct.tok_s,
-            ctx_len=ctx_len,
-            outcome="success",
-            cancelled=False,
-            cached_prompt_tokens=result.cached_prompt_tokens,
-            prompt_estimated=acct.prompt_estimated,
-            out_estimated=acct.completion_estimated,
-            excluded_turns=excluded_turns,
-        )
-        self.tui.history.add(record)
-        self.tui._refresh_metrics()
-        self.update_ctx_bar(reserved_ctx_len, excluded_turns)
-
     def _record_outcome(  # noqa: PLR0913, PLR0917
         self,
         model_at_send: str,
@@ -1519,21 +1466,25 @@ class ChatPane(Vertical):
         reserved_ctx_len: int,
         excluded_turns: int,
     ) -> None:
+        acct = result.accounting
+        success = outcome == "success"
         record = TurnRecord(
             ts=time.time(),
             model=model_at_send,
-            prompt_tok=None,
-            out_tok=None,
+            prompt_tok=acct.prompt_tokens if success else None,
+            out_tok=acct.completion_tokens if success else None,
             first_output_s=result.first_output_s,
             answer_started_s=result.answer_started_s,
             total_s=result.total_s,
-            req_tok_s=None,
-            ctx_len=ctx_len_estimate,
+            req_tok_s=acct.tok_s if success else None,
+            ctx_len=acct.prompt_tokens
+            if success and not acct.prompt_estimated
+            else ctx_len_estimate,
             outcome=outcome,
             cancelled=False,
             cached_prompt_tokens=result.cached_prompt_tokens,
-            prompt_estimated=False,
-            out_estimated=False,
+            prompt_estimated=success and acct.prompt_estimated,
+            out_estimated=success and acct.completion_estimated,
             excluded_turns=excluded_turns,
         )
         self.tui.history.add(record)
@@ -1594,26 +1545,7 @@ class ChatPane(Vertical):
             self._progress_answer += progress.answer_delta
         if progress.reasoning_delta:
             self._progress_reasoning += progress.reasoning_delta
-        if progress.tool_fragments:
-            for frag in progress.tool_fragments:
-                try:
-                    index = frag.get("index")
-                    if not isinstance(index, int):
-                        continue
-                    slot = self._progress_tools.setdefault(
-                        index, {"index": index, "arguments": ""}
-                    )
-                    for key in ("id", "type", "name"):
-                        if key in frag and key not in slot:
-                            slot[key] = frag[key]
-                    args = frag.get("arguments")
-                    if isinstance(args, str):
-                        current = slot.get("arguments")
-                        slot["arguments"] = (
-                            current if isinstance(current, str) else ""
-                        ) + args
-                except Exception:
-                    continue
+        _merge_tool_fragments(self._progress_tools, progress.tool_fragments)
         if progress.response_model:
             self._progress_response_model = progress.response_model
         # Stream at most once per second; terminal/switch/clear/shutdown flush.
