@@ -21,7 +21,8 @@ from textual.widgets import (
 )
 from textual.worker import Worker, WorkerError
 
-from mlx_tui.comparison import (
+from mlx_tui.comparison.contracts import (
+    _PROFILE_COUNT,
     ComparisonInput,
     ComparisonResult,
     DecisionKind,
@@ -35,7 +36,6 @@ if TYPE_CHECKING:
 import mlx_tui.compare.decisions as _compare_decisions
 import mlx_tui.compare.render as _compare_render
 import mlx_tui.compare.workflow as _compare_workflow
-from mlx_tui.compare.render import _PROFILE_COUNT
 
 _NARROW_WIDTH = 90
 

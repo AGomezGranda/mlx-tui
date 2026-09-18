@@ -13,7 +13,6 @@ from textual.widgets import Button, Static
 import mlx_tui.sessions.errors as _sessions_errors
 import mlx_tui.sessions.models as _sessions_models
 import mlx_tui.sessions.store as _sessions_store
-from mlx_tui.chat_turn import ChatTurn, render_session_turn  # noqa: F401
 from mlx_tui.chat_ui.context import _MAX_CONTEXT_TOKENS_EST
 from mlx_tui.chat_ui.widgets import ChatInput
 from mlx_tui.params import ParamsPane

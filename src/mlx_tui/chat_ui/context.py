@@ -16,7 +16,6 @@ from mlx_tui.attachments import (
     read_attachment,
     render_user_content,
 )
-from mlx_tui.chat_turn import ChatTurn, render_session_turn  # noqa: F401
 from mlx_tui.chat_ui.widgets import ChatInput, _choose_macos_file
 from mlx_tui.history.tokens import (
     ContextLimitError,

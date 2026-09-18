@@ -20,7 +20,7 @@ from mlx_tui.chat import (
     error_detail,
     stream_turn,
 )
-from mlx_tui.chat_turn import ChatTurn, render_session_turn  # noqa: F401
+from mlx_tui.chat_turn import ChatTurn
 from mlx_tui.chat_ui.widgets import ChatInput
 from mlx_tui.config import AppConfig
 from mlx_tui.history.store import TurnRecord

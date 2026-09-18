@@ -13,7 +13,7 @@ from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any, cast
 
-from mlx_tui.comparison_contracts import JSONValue
+from mlx_tui.comparison.contracts import JSONValue
 from mlx_tui.managed.paths import (
     BUILD_CONSTRAINTS_RESOURCE,
     MIN_FREE_BYTES,

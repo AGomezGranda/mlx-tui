@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from textual.css.query import NoMatches
 from textual.widgets import (
@@ -11,14 +11,9 @@ from textual.widgets import (
     TabbedContent,
 )
 
-from mlx_tui.comparison import (
-    DecisionKind,
-    commit_choice,
-)
+from mlx_tui.comparison.contracts import DecisionKind
+from mlx_tui.comparison.store import commit_choice
 from mlx_tui.operations import OperationKind
-
-if TYPE_CHECKING:
-    pass
 
 
 def _decision_reason(pane: Any) -> str:

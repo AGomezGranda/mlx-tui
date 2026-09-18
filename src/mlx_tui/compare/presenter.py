@@ -9,14 +9,14 @@ from __future__ import annotations
 
 from rich.text import Text
 
-from mlx_tui.comparison_contracts import (
+from mlx_tui.comparison.contracts import (
+    _PROFILE_COUNT,
     TRIAL_REPEATS,
     ComparisonResult,
     TrialResult,
 )
 
 _UNKNOWN = "—"
-_PROFILE_COUNT = 2
 _RANGE_PAIR = 2
 
 

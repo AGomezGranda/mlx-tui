@@ -16,7 +16,7 @@ import psutil
 
 from mlx_tui import process
 from mlx_tui.chat import TurnResult, stream_turn
-from mlx_tui.comparison_contracts import (
+from mlx_tui.comparison.contracts import (
     _PROFILE_COUNT,
     CODING_CHECK_EXPECTED,
     CODING_CHECK_PROMPT,
@@ -32,9 +32,9 @@ from mlx_tui.comparison_contracts import (
     _now_iso,
     parse_loopback_url,
 )
-from mlx_tui.comparison_encoding import _json_value
-from mlx_tui.comparison_store import comparison_dir, save_comparison
-from mlx_tui.comparison_summary import _summary
+from mlx_tui.comparison.encoding import _json_value
+from mlx_tui.comparison.store import comparison_dir, save_comparison
+from mlx_tui.comparison.summary import _summary
 from mlx_tui.history.tokens import prepare_context
 from mlx_tui.models import verify_cached_assets
 from mlx_tui.process import ProcessIdentity

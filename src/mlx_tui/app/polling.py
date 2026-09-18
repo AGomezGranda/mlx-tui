@@ -14,7 +14,7 @@ import psutil
 from textual.css.query import NoMatches
 
 from mlx_tui import process
-from mlx_tui.comparison_contracts import ComparisonValidationError, parse_loopback_url
+from mlx_tui.comparison.contracts import ComparisonValidationError, parse_loopback_url
 from mlx_tui.config import AppConfig
 from mlx_tui.history.store import MemoryRecord
 from mlx_tui.metrics_pane import MetricsPane

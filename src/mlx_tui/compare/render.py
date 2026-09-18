@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from rich.text import Text
 from textual.css.query import NoMatches
@@ -14,12 +14,7 @@ from textual.widgets import (
     Static,
 )
 
-from mlx_tui.comparison import (
-    CODING_CHECK_EXPECTED,
-    CODING_CHECK_PROMPT,
-    ComparisonResult,
-)
-from mlx_tui.comparison_presenter import (
+from mlx_tui.compare.presenter import (
     keep_button_labels,
     latency_text,
     measurement_rows,
@@ -29,12 +24,13 @@ from mlx_tui.comparison_presenter import (
     trial_detail_text,
     trial_table_rows,
 )
+from mlx_tui.comparison.contracts import (
+    _PROFILE_COUNT,
+    CODING_CHECK_EXPECTED,
+    CODING_CHECK_PROMPT,
+    ComparisonResult,
+)
 from mlx_tui.models import resolve_cached_snapshot
-
-if TYPE_CHECKING:
-    pass
-
-_PROFILE_COUNT = 2
 
 
 def _set_text(pane: Any, selector: str, message: str, style: str | None = None) -> None:

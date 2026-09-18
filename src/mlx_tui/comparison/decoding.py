@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import cast
 
-from mlx_tui.comparison_contracts import (
+from mlx_tui.comparison.contracts import (
     ComparisonInput,
     ComparisonPersistenceError,
     ComparisonResult,
@@ -16,7 +16,7 @@ from mlx_tui.comparison_contracts import (
     MemorySample,
     TrialResult,
 )
-from mlx_tui.comparison_encoding import _identity_from_json, _json_value
+from mlx_tui.comparison.encoding import _identity_from_json, _json_value
 from mlx_tui.json_util import check_keys, require_dict, required_field, string_field
 from mlx_tui.profiles import CodingProfile, ProfileEntry, RecommendationEvidence
 

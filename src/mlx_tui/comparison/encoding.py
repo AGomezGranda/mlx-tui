@@ -8,7 +8,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import cast
 
-from mlx_tui.comparison_contracts import (
+from mlx_tui.comparison.contracts import (
     ComparisonInput,
     ComparisonResult,
     ComparisonValidationError,

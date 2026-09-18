@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import subprocess
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from textual.binding import Binding
 from textual.message import Message
@@ -12,11 +12,6 @@ from textual.widgets import TextArea
 from mlx_tui.attachments import (
     AttachmentError,
 )
-from mlx_tui.chat_turn import ChatTurn, render_session_turn  # noqa: F401
-
-if TYPE_CHECKING:
-    pass
-
 
 _MACOS_FILE_PICKER_SCRIPT = """try
 POSIX path of (choose file with prompt "Attach a text file to mlx-tui")

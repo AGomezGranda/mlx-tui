@@ -8,13 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from mlx_tui.comparison_contracts import (
+from mlx_tui.comparison.contracts import (
     ComparisonInput,
     ComparisonResult,
     JSONValue,
     TrialResult,
 )
-from mlx_tui.comparison_summary import _summary
+from mlx_tui.comparison.summary import _summary
 from mlx_tui.process import ProcessIdentity
 from mlx_tui.profiles import (
     ProfileEntry,

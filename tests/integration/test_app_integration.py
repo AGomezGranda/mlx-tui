@@ -592,9 +592,10 @@ async def test_compare_keyboard_journey_preserves_focus_and_draft(  # noqa: PLR0
         TabbedContent,
     )
 
-    from mlx_tui import comparison  # noqa: PLC0415
     from mlx_tui.compare.pane import ComparePane  # noqa: PLC0415
-    from mlx_tui.comparison_summary import _summary  # noqa: PLC0415
+    from mlx_tui.comparison import contracts as comparison  # noqa: PLC0415
+    from mlx_tui.comparison.store import save_comparison  # noqa: PLC0415
+    from mlx_tui.comparison.summary import _summary  # noqa: PLC0415
     from mlx_tui.process import ProcessIdentity  # noqa: PLC0415
 
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
@@ -662,7 +663,7 @@ async def test_compare_keyboard_journey_preserves_focus_and_draft(  # noqa: PLR0
             trials=trials,
         )
         result = replace(provisional, summary=_summary(provisional))
-        comparison.save_comparison(result)
+        save_comparison(result)
         on_progress(result)
         return result
 
@@ -870,7 +871,7 @@ async def test_endpoint_preview_non_loopback_omits_recipes(
 
 
 async def test_endpoint_ipv6_app_bracketed_urls_end_to_end() -> None:
-    from mlx_tui.comparison_contracts import parse_loopback_url  # noqa: PLC0415
+    from mlx_tui.comparison.contracts import parse_loopback_url  # noqa: PLC0415
 
     app = MlxTuiApp(
         host="::1", port=18080, config=AppConfig(model="explicit/ipv6-target")

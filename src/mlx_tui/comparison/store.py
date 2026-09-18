@@ -8,7 +8,7 @@ from dataclasses import asdict, fields, replace
 from pathlib import Path
 from typing import cast
 
-from mlx_tui.comparison_contracts import (
+from mlx_tui.comparison.contracts import (
     ComparisonPersistenceError,
     ComparisonResult,
     ComparisonValidationError,
@@ -17,8 +17,8 @@ from mlx_tui.comparison_contracts import (
     SavedChoice,
     _now_iso,
 )
-from mlx_tui.comparison_decoding import decode_comparison
-from mlx_tui.comparison_encoding import _json_value, encode_comparison
+from mlx_tui.comparison.decoding import decode_comparison
+from mlx_tui.comparison.encoding import _json_value, encode_comparison
 from mlx_tui.json_util import (
     atomic_write_bytes,
     check_keys,
@@ -60,17 +60,16 @@ def load_comparison(path: Path) -> ComparisonResult:
     return decode_comparison(content)
 
 
-def _choice_json(value: SavedChoice) -> dict[str, JSONValue]:
-    return {
-        "schema_version": 1,
-        **cast(dict[str, JSONValue], _json_value(asdict(value))),
-    }
-
-
 def save_choice(value: SavedChoice, path: Path | None = None) -> Path:
     target = path or choice_path()
     encoded = json.dumps(
-        _choice_json(value), sort_keys=True, separators=(",", ":"), allow_nan=False
+        {
+            "schema_version": 1,
+            **cast(dict[str, JSONValue], _json_value(asdict(value))),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
     ).encode("utf-8")
     atomic_write_bytes(target, encoded, error=ComparisonPersistenceError)
     return target

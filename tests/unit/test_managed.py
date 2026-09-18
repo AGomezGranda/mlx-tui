@@ -15,7 +15,7 @@ import mlx_tui.managed.inspect as managed_inspect
 import mlx_tui.managed.install as managed_install
 import mlx_tui.managed.runtime as managed_runtime
 from mlx_tui import serverctl
-from mlx_tui.comparison_contracts import JSONValue
+from mlx_tui.comparison.contracts import JSONValue
 from mlx_tui.managed.paths import (
     COMPLETION_MARKER,
     MLX_LM_VERSION,

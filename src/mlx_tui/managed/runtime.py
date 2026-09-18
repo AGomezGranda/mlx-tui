@@ -13,7 +13,7 @@ from typing import Any
 import psutil
 
 from mlx_tui import process, serverctl
-from mlx_tui.comparison_contracts import JSONValue
+from mlx_tui.comparison.contracts import JSONValue
 from mlx_tui.managed.inspect import _check_owner, inspect_runtime
 from mlx_tui.managed.paths import (
     ManagedRuntimeError,

@@ -262,8 +262,8 @@ and active-profile/modified state; Models owns ordinary request-target selection
 while Compare renders or requests updates to comparison state. Metrics only
 renders ordinary history.
 
-The headless comparison facade in `comparison.py` re-exports the split
-contracts, persistence, summary, and runner modules. The UI-free runner owns
+The headless comparison package in `comparison/` owns the immutable contracts,
+JSON codecs, persistence, summary, and runner modules. The UI-free runner owns
 the twelve slots: first request plus five repeats for each profile in selected
 order. It accepts only an explicit-IP loopback chat-completions URL, verifies
 cached pinned assets and process identity around every request, samples process
@@ -274,7 +274,7 @@ and reports latency or memory as inconclusive when identity, evidence, cache
 reuse, conditions, or RSS attribution cannot support the narrower claim.
 
 `ComparePane` owns Textual composition, setup/readiness/run/review/choice/reuse
-controls, and worker/cancellation lifetime. `comparison_presenter.py` contains
+controls, and worker/cancellation lifetime. `compare/presenter.py` contains
 pure result/progress/trial builders. The pane gathers explicit operator evidence
 and runs one async comparison without changing Chat messages, draft, or live
 Params. Compare and Keep never execute launch settings or stop/restart an
@@ -326,15 +326,14 @@ src/mlx_tui/
   chat_ui/                 # chat UI, transcript, context, worker lifecycle
   chat_turn.py             # presentation-only persistent attempted turn
   coding_profiles.toml     # packaged pinned shortlist and dated evidence
-  comparison.py            # stable facade for comparison modules
-  comparison_contracts.py  # immutable comparison inputs/results/trials
-  comparison_encoding.py   # comparison JSON rendering
-  comparison_decoding.py   # comparison strict validation
-  comparison_store.py      # comparison checkpoints and choice transaction
-  comparison_summary.py    # pure evidence and conclusion summaries
-  comparison_runner.py     # sequential twelve-slot execution
-  comparison_presenter.py  # pure Textual result/progress builders
-  compare/                 # Compare tab workflow and worker lifecycle
+  comparison/              # UI-free comparison boundary
+    contracts.py           # immutable comparison inputs/results/trials
+    encoding.py            # comparison JSON rendering
+    decoding.py            # comparison strict validation
+    store.py               # comparison checkpoints and choice transaction
+    summary.py             # pure evidence and conclusion summaries
+    runner.py              # sequential twelve-slot execution
+  compare/                 # Compare tab workflow, presenter, and worker lifecycle
   confirm.py               # delete confirmation modal
   history/                 # token bounds, turn/memory rings, sparklines
   metrics_pane.py          # metrics table and sparklines

@@ -6,7 +6,7 @@ import asyncio
 import uuid
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 from textual.css.query import NoMatches
 from textual.widgets import (
@@ -17,31 +17,28 @@ from textual.widgets import (
 )
 
 from mlx_tui import process
-from mlx_tui.comparison import (
+from mlx_tui.compare.presenter import (
+    trial_detail_text,
+)
+from mlx_tui.comparison.contracts import (
+    _PROFILE_COUNT,
     ComparisonInput,
     ComparisonPersistenceError,
     ComparisonResult,
     ComparisonValidationError,
     JSONValue,
-    comparison_dir,
-    load_comparison,
     parse_loopback_url,
+)
+from mlx_tui.comparison.runner import (
     run_comparison,
     verify_profile_snapshot,
 )
-from mlx_tui.comparison_presenter import (
-    trial_detail_text,
-)
+from mlx_tui.comparison.store import comparison_dir, load_comparison
 from mlx_tui.config import AppConfig
 from mlx_tui.models import resolve_cached_snapshot
 from mlx_tui.operations import OperationKind
 from mlx_tui.params import ParamsPane
 from mlx_tui.search_screen import SearchScreen
-
-if TYPE_CHECKING:
-    pass
-
-from mlx_tui.compare.render import _PROFILE_COUNT
 
 
 def _candidate_changed(pane: Any, event: Select.Changed) -> None:

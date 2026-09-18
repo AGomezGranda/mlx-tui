@@ -13,9 +13,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, Literal
 
-type JSONValue = (
-    str | int | float | bool | None | dict[str, "JSONValue"] | list["JSONValue"]
-)
+from mlx_tui.json_util import JSONValue
 
 type EvidenceStatus = Literal[
     "candidate", "unqualified", "qualified", "revoked", "withdrawn"

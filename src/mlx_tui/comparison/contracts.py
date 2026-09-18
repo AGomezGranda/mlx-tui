@@ -10,10 +10,10 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
+from mlx_tui.json_util import JSONValue
 from mlx_tui.process import ProcessIdentity
 from mlx_tui.profiles import ProfileEntry
 
-JSONValue = str | int | float | bool | None | dict[str, "JSONValue"] | list["JSONValue"]
 ComparisonStatus = Literal["running", "completed", "failed", "cancelled", "interrupted"]
 TrialState = Literal["not_attempted", "attempted", "completed"]
 DecisionKind = Literal["keep", "retain", "reject"]

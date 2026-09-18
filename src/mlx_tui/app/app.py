@@ -28,7 +28,7 @@ import mlx_tui.app.state as _app_state
 import mlx_tui.app.ui as _app_ui
 from mlx_tui.chat_ui.pane import ChatPane
 from mlx_tui.compare.pane import ComparePane
-from mlx_tui.comparison import ComparisonResult, SavedChoice
+from mlx_tui.comparison.contracts import ComparisonResult, SavedChoice
 from mlx_tui.config import AppConfig
 from mlx_tui.history.store import HistoryStore, MemoryRecord
 from mlx_tui.managed.runtime import ManagedRuntime

@@ -7,17 +7,16 @@ from typing import Any
 
 from textual.css.query import NoMatches
 
-from mlx_tui.comparison import (
+from mlx_tui.comparison.contracts import _PROFILE_COUNT
+from mlx_tui.comparison.runner import verify_profile_snapshot
+from mlx_tui.comparison.store import (
     choice_is_committed,
     choice_path,
     load_choice,
     load_comparison,
-    verify_profile_snapshot,
 )
 from mlx_tui.models import resolve_cached_snapshot
 from mlx_tui.profiles import ProfileEntry
-
-_PROFILE_COUNT = 2
 
 
 def swap_busy(app: Any) -> bool:

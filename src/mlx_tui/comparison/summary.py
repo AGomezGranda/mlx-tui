@@ -6,7 +6,7 @@ import json
 from statistics import median
 from typing import cast
 
-from mlx_tui.comparison_contracts import (
+from mlx_tui.comparison.contracts import (
     _LATENCY_THRESHOLD,
     _PROFILE_COUNT,
     RSS_SCOPE,
@@ -15,7 +15,7 @@ from mlx_tui.comparison_contracts import (
     JSONValue,
     TrialResult,
 )
-from mlx_tui.comparison_encoding import _json_value
+from mlx_tui.comparison.encoding import _json_value
 
 
 def _summary(result: ComparisonResult) -> dict[str, JSONValue]:

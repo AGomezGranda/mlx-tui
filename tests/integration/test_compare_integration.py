@@ -20,11 +20,16 @@ from textual.widgets import (
 )
 from textual.widgets._data_table import Coordinate
 
-from mlx_tui import comparison
 from mlx_tui.app import MlxTuiApp
 from mlx_tui.chat_ui.widgets import ChatInput
 from mlx_tui.compare.pane import ComparePane
-from mlx_tui.comparison_summary import _summary
+from mlx_tui.comparison import contracts as comparison
+from mlx_tui.comparison.store import (
+    choice_is_committed,
+    load_comparison,
+    save_comparison,
+)
+from mlx_tui.comparison.summary import _summary
 from mlx_tui.config import AppConfig
 from mlx_tui.operations import OperationKind
 from mlx_tui.process import ProcessIdentity
@@ -51,7 +56,7 @@ def _comparison_result(
         ),
         summary={"scope": "coding-check-v1 only"} if status == "completed" else {},
     )
-    comparison.save_comparison(result)
+    save_comparison(result)
     return result
 
 
@@ -132,7 +137,7 @@ async def test_compare_keep_and_next_chat_preserve_state_and_exact_settings(
     assert harness.app.config.seed == profile.seed
     assert harness.app.config.enable_thinking == profile.enable_thinking
     assert harness.app.saved_choice is not None
-    assert comparison.choice_is_committed(harness.app.saved_choice)
+    assert choice_is_committed(harness.app.saved_choice)
 
     reopened = MlxTuiApp(
         host=harness.app.host,
@@ -233,7 +238,7 @@ async def test_escape_cancels_comparison_after_checkpoint(
             raise AssertionError("unreachable")
         except asyncio.CancelledError:
             cancelled = replace(running, status="cancelled", error="cancelled")
-            comparison.save_comparison(cancelled)
+            save_comparison(cancelled)
             raise
 
     monkeypatch.setattr("mlx_tui.compare.workflow.run_comparison", blocked)
@@ -296,7 +301,7 @@ def _populated_completed_result(
     )
     summary = _summary(provisional)
     result = replace(provisional, summary=summary)
-    comparison.save_comparison(result)
+    save_comparison(result)
     return result
 
 
@@ -469,7 +474,7 @@ async def test_save_then_failed_apply_is_truthful(
 
     assert harness.app.saved_choice is not None
     assert harness.app.saved_choice.decision == "keep"
-    assert comparison.choice_is_committed(harness.app.saved_choice)
+    assert choice_is_committed(harness.app.saved_choice)
     saved_text = str(pane.query_one("#comparison-saved", Static).render())
     assert "Choice saved; profile not applied" in saved_text
     assert harness.app.active_profile_id is None
@@ -505,7 +510,7 @@ async def test_open_completed_partial_and_corrupt_preserves_state(
         error="boom",
     )
     partial_path = tmp_path / "partial.json"
-    comparison.save_comparison(partial, partial_path)
+    save_comparison(partial, partial_path)
     corrupt_path = tmp_path / "corrupt.json"
     corrupt_path.write_text("{not json")
 
@@ -561,9 +566,9 @@ async def test_copied_result_decides_copy_not_original(
     assert harness.app.saved_choice is not None
     assert Path(str(harness.app.saved_choice.result_path)) == copied_path
 
-    copied = comparison.load_comparison(copied_path)
+    copied = load_comparison(copied_path)
     assert isinstance(copied.summary.get("decision"), dict)
-    original = comparison.load_comparison(original_path)
+    original = load_comparison(original_path)
     assert "decision" not in original.summary
 
 
