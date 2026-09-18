@@ -16,8 +16,19 @@ from pathlib import Path
 
 import psutil
 
-from mlx_tui import managed
 from mlx_tui.config import ConfigParseError, config_path, parse_config
+from mlx_tui.managed.paths import (
+    BUILD_CONSTRAINTS_RESOURCE,
+    COMPLETION_MARKER,
+    MLX_LM_VERSION,
+    MLX_METAL_VERSION,
+    MLX_VERSION,
+    PYTHON_VERSION,
+    RUNTIME_COMMIT,
+    RUNTIME_RESOURCE,
+    UV_VERSION,
+    runtime_root,
+)
 
 _MAX_MARKER_BYTES = 1024 * 1024
 _VERSION = re.compile(r"^(?=.*[0-9])[0-9A-Za-z][0-9A-Za-z.!+~_-]{0,63}$")
@@ -59,7 +70,7 @@ def _package_info(name: str) -> dict[str, object]:
 def _packaged_runtime() -> dict[str, object]:
     hashes: dict[str, str | None] = {}
     try:
-        for name in (managed.RUNTIME_RESOURCE, managed.BUILD_CONSTRAINTS_RESOURCE):
+        for name in (RUNTIME_RESOURCE, BUILD_CONSTRAINTS_RESOURCE):
             content = resources.files("mlx_tui").joinpath(name).read_bytes()
             hashes[name] = hashlib.sha256(content).hexdigest()
     except (ModuleNotFoundError, OSError):
@@ -75,12 +86,12 @@ def _packaged_runtime() -> dict[str, object]:
         }
     return {
         "status": "available",
-        "runtime_commit": managed.RUNTIME_COMMIT,
-        "python_version": managed.PYTHON_VERSION,
-        "uv_version": managed.UV_VERSION,
-        "mlx_version": managed.MLX_VERSION,
-        "mlx_metal_version": managed.MLX_METAL_VERSION,
-        "mlx_lm_version": managed.MLX_LM_VERSION,
+        "runtime_commit": RUNTIME_COMMIT,
+        "python_version": PYTHON_VERSION,
+        "uv_version": UV_VERSION,
+        "mlx_version": MLX_VERSION,
+        "mlx_metal_version": MLX_METAL_VERSION,
+        "mlx_lm_version": MLX_LM_VERSION,
         "resource_hashes": hashes,
     }
 
@@ -101,11 +112,11 @@ def _config_info() -> dict[str, object]:
 
 
 def _marker_info() -> dict[str, object]:  # noqa: PLR0911, PLR0912
-    marker = managed.runtime_root() / managed.COMPLETION_MARKER
+    marker = runtime_root() / COMPLETION_MARKER
     packages: dict[str, str | None] = {name: None for name in _RUNTIME_PACKAGES}
     resource_hashes: dict[str, str | None] = {
-        managed.RUNTIME_RESOURCE: None,
-        managed.BUILD_CONSTRAINTS_RESOURCE: None,
+        RUNTIME_RESOURCE: None,
+        BUILD_CONSTRAINTS_RESOURCE: None,
     }
     unknown: dict[str, object] = {
         "verification": "recorded, not verified now",

@@ -1,0 +1,230 @@
+# Refactor Oversized Modules into Single-Responsibility Files
+
+**Date:** 2026-09-17
+**Work Item:** n/a
+**Status:** Complete
+
+## Overview
+Split the 6 largest `mlx-tui` modules into small single-responsibility modules/subpackages with all importers updated (no legacy shim facades, except `mlx_tui.app:main` entry point which must keep its path), extracting one shared UI-free JSON/atomic-IO helper first, with zero behavior change.
+
+## Current State
+Verified by reading code and running `uv run ruff check src/mlx_tui/sessions.py` (pass) and `uv run pytest --collect-only -q` (collects unit+integration):
+
+- `src/mlx_tui/chat_pane.py:126` — 2463 lines. `ChatPane(Vertical)` has ~96 methods mixing transcript UI (`compose:237`, `on_mount:270`, `on_resize:1708`), turn execution (`_run_turn:1128` 258 lines, `_do_submit:895` 173 lines, `_finalize_session_attempt:1566` 94 lines), session/draft persistence (`_save_session_now:439` 92 lines, `capture_request_settings:293` 79 lines, `open_session:1923` 105 lines), context/attachments, reconcile UI. Imports mix `textual`, `httpx`, `mlx_tui.sessions`, `mlx_tui.chat`, `mlx_tui.history.tokens`. Importers: `src/mlx_tui/app/__init__.py:41`, `src/mlx_tui/compare_pane.py:1065` (`ChatInput`), `tests/conftest.py:22`, `tests/integration/test_app_integration.py:13`, plus 8 more integration tests and `tests/unit/test_params.py:7`.
+- `src/mlx_tui/app/__init__.py:88` — 1323 lines. `MlxTuiApp(App[None])` has 53 methods + `main:1254` (70 lines argparse bootstrap) mixing lifecycle (`__init__:130`, `compose:306`, `on_mount:325`, `on_unmount:367`), polling/identity (`_poll:510` 77 lines, `endpoint_preview_text:705` 116 lines, `update_server_identity:588`), presets, operations/managed wiring (`action_cold_start:939`, `start_managed:1046`, `_restart_config_model:1051`), activity/error/config UI. Console script is `pyproject.toml:26` `mlx-tui = "mlx_tui.app:main"`. Only file under `src/mlx_tui/app/`. Importers: `tests/conftest.py:21`, `tests/integration/conftest.py:9`, 9 integration tests, `tests/unit/test_config.py:11-12`, plus `TYPE_CHECKING` imports from `chat_pane.py:60`, `compare_pane.py:62`, `models_pane.py:36`, `search_screen.py:35`, `metrics_pane.py:23`, `setup_screen.py:28`.
+- `src/mlx_tui/compare_pane.py:68` — 1141 lines. `ComparePane(VerticalScroll)` has 45 methods mixing `compose:119` (113 lines), `_update_controls:443` (108 lines), input build/preflight/run (`_build_comparison_input:574` 82 lines, `_run_comparison:799` 60 lines), render helpers, decision transaction (`_commit_decision:927` 52 lines). Importers: `src/mlx_tui/app/__init__.py:42`, `tests/integration/test_compare_integration.py:26`, `tests/integration/test_app_integration.py:463,596`.
+- `src/mlx_tui/sessions.py:1` — 1078 lines, UI-free. Exceptions `SessionValidationError:90` through `SessionDurabilityUnconfirmed:106`, dataclasses `RequestSettings:115`, `SessionTurn:140`, `ChatSession:173`, primitive validators `_required:202`, `_check_keys:208`, `_string_value:214` et al, codecs `_settings_from_json:410` (73 lines), `_turn_from_json:521` (63 lines), `_session_from_json:635` (50 lines), FS/locking/atomic IO `SessionLock:797`, `lock_session:822` (41 lines), `_atomic_write:890`, `save_session:930`, `load_session:965`, queries `successful_turns:1052`, `request_messages:1057`, `session_label:1066`. Importers: `src/mlx_tui/chat_pane.py:52`, `src/mlx_tui/chat_turn.py:14`, `tests/unit/test_sessions.py`, `tests/integration/test_sessions.py` (verify during implementation for full list via `rg -n "from mlx_tui.sessions import"`).
+- `src/mlx_tui/managed.py:1` — 778 lines. Constants `RUNTIME_COMMIT:37`–`COMPLETION_MARKER:49`, env/path helpers `runtime_root:87`–`_python_path:203`, `inspect_runtime:256` (83 lines), `install_runtime:474` (77 lines), `class ManagedRuntime:553` (17 methods, `start:683` 80 lines). Importers: `src/mlx_tui/app/__init__.py:63`, `src/mlx_tui/setup_screen.py:22`.
+- `src/mlx_tui/comparison_persistence.py:1` — 701 lines. Encode `_input_to_json:110` (24 lines), `encode_comparison:157`; validators `_required:174`, `_check_keys:180`, `_string_value:188`, `_profile_from_json:195` (49 lines), `_evidence_from_json:246` (52 lines), `_input_from_json:313` (63 lines), `_trial_from_json:402` (54 lines), `decode_comparison:458` (55 lines); IO ` _atomic_write:515`, `save_comparison:538`, `load_comparison:548`, `save_choice:564`, `load_choice:573` (41 lines), `commit_choice:641` (61 lines). Duplicates `sessions.py` shapes for `_required`, `_check_keys`, `_string_value`, `_atomic_write`. Importers: `src/mlx_tui/comparison.py:31` (facade re-export), `src/mlx_tui/comparison_runner.py:35`, `src/mlx_tui/comparison_summary.py:18` (`_json_value`).
+- Conventions to follow: flat top-level modules + absolute `mlx_tui.*` imports (no relative imports); comparison facade `src/mlx_tui/comparison.py:1-86` re-exporting `comparison_contracts/persistence/runner/summary`; namespace subpackage `src/mlx_tui/history/` (`store.py:64`, `tokens.py:152`, `sparkline.py:155`, no `__init__.py`); UI-free vs UI split by docstring (`ARCHITECTURE.md:321-358` layout, `ARCHITECTURE.md:364-370` gates).
+- Gates: `uv run pytest -q`, `uv run ruff check .`, `uv run ruff format --check src tests`, `uv run pyrefly check --min-severity warn`, `uv run python tests/artifact_smoke.py` (per `ARCHITECTURE.md:364-370`, `pyproject.toml:28-58`).
+
+## Design Decisions
+| Decision | Options Considered | Rationale |
+|----------|--------------------|-----------|
+| Break old import paths (no shim facades), update all importers per phase | Facade shims like `comparison.py` vs break imports | User chose break imports: cleanest end state, no legacy files; diff is mechanical via `rg` |
+| Extract shared `json_util.py` first before splitting `sessions.py` / `comparison_persistence.py` | Move-only splits with no shared code vs shared helper | User chose shared helper: kills proven `_required`/`_check_keys`/`_string_value`/`_atomic_write` duplication (DRY); doing it first keeps Phases 2–3 move-only |
+| Flat siblings for comparison-persistence split, subpackages for sessions/managed/chat/compare/app | All-flat vs all-subpackage | Follow existing precedent: comparison family is already flat `comparison_*` + `comparison.py` facade; chat/compare/app/sessions/managed exceed what flat siblings cleanly express and match `history/` subpackage precedent |
+| Keep `mlx_tui.app` package path (split `app/__init__.py` internally, `__init__.py` becomes thin re-export of `MlxTuiApp` + `main`) | Delete package path vs keep | `pyproject.toml:26` console script `mlx-tui = "mlx_tui.app:main"` and ~15 test importers require the path; internal split still satisfies breakup goal without breaking packaging |
+| UI-free storage/runtime first (Phases 1–4), then UI panes + app (Phases 5–7) | Biggest-pain-first (`chat_pane` first) vs UI-free first | User chose UI-free first: storage/runtime are dependency leaves with fast unit tests, lowest TUI regression risk; UI splits build on stable storage APIs |
+| Pure move (Extract Module) per Fowler, no behavior change, no new abstractions | Redesign responsibilities vs move-only | YAGNI/KISS/SOLID: file size is the smell, not missing abstractions; each phase is verifiable by existing tests |
+
+## Implementation Phases
+
+### Phase 1: Shared JSON/atomic-IO helper
+Extract duplicated validation + atomic-write primitives so Phases 2–3 become pure moves.
+
+**Changes:**
+- `src/mlx_tui/json_util.py` — NEW UI-free module (~140 lines). Defines `JSONValue` itself (canonical home; `sessions.py:65` deletes its duplicate and imports from here; `comparison_contracts.py:16` keeps its own alias untouched). Imports NOTHING from `mlx_tui.sessions` or `mlx_tui.comparison_persistence` (no cycle — it is the dependency leaf). Public functions: `def require_dict(value: object, label: str, *, error: Callable[[str], Exception]) -> dict[str, Any]`, `def required_field(table: dict[str, Any], key: str, label: str, *, error: Callable[[str], Exception]) -> Any`, `def check_keys(table: dict[str, Any], allowed: set[str], label: str, *, error: Callable[[str], Exception]) -> None`, `def string_field(table: dict[str, Any], key: str, label: str, *, error: Callable[[str], Exception]) -> str`, `def optional_string_field(table: dict[str, Any], key: str, label: str, *, error: Callable[[str], Exception]) -> str | None`, `def bool_field(table: dict[str, Any], key: str, label: str, *, error: Callable[[str], Exception]) -> bool`, `def json_compatible(value: object, label: str) -> JSONValue` (sessions semantics only: strict `type(x) is` checks, raises `SessionValidationError`; comparison keeps its own coercing `_json_value` local per below), `def atomic_write_bytes(target: Path, encoded: bytes, *, error: Callable[[str], Exception], what: str) -> None` raising `error(f"could not save {what} {target}")` with callers passing `what="session"` / `what=<comparison noun>` to preserve exact messages, `def sync_dir(directory: Path, target: Path) -> None` (sessions-only; preserves `SessionDurabilityUnconfirmed`). The `error` factory param is REQUIRED (no default): sessions callers pass `SessionValidationError`, comparison decoders pass `ComparisonValidationError` — this is what makes one helper behavior-preserving for both sides, since the two sources differ in error type AND message text (`"is missing 'k'"` vs `"k is required"`, `"has an unexpected field"` vs `"has unknown keys: ..."`) AND strictness (`type(x) is` vs `isinstance`). Message templates unify on the sessions wording (canonical); any test asserting comparison's old wording gets updated (find via `rg -n "is required|unknown keys" tests/`). Bodies are moves of `src/mlx_tui/sessions.py:202-231,294-312,890-928` logic; verify against `src/mlx_tui/comparison_persistence.py:168-194,515-536` during implementation. `_atomic_write` unifies on comparison semantics (`target.parent.mkdir(parents=True, exist_ok=True)`); sessions callers always pass existing dirs via `session_dir()` so this is a no-op relaxation in practice — prove it with the Phase 1 test gate, no separate behavior claim.
+- `src/mlx_tui/sessions.py` — delete local `_required`, `_check_keys`, `_string_value`, `_optional_string`, `_bool_value`, `_json_compatible`, `_atomic_write`, `_sync_directory` definitions; call sites import the `json_util` equivalents and pass `error=SessionValidationError` (and `what="session"` for `atomic_write_bytes`). No signature changes to public `save_session`, `load_session`, `encode_session`, `decode_session`.
+- `src/mlx_tui/comparison_persistence.py` — delete local `_require_dict`, `_required`, `_check_keys`, `_string_value`, `_atomic_write`; call sites import from `mlx_tui.json_util` and pass `error=ComparisonValidationError` (and the existing `what` noun for `atomic_write_bytes`). Keep `_json_value` local (comparison-specific `Path`-coercing semantics at `comparison_persistence.py:45-60`, deliberately NOT unified with sessions-strict `json_compatible`). No signature changes to `encode_comparison`, `decode_comparison`, `save_comparison`, `load_comparison`, `commit_choice`.
+- `tests/unit/test_sessions.py`, `tests/unit/test_comparison.py` — no changes expected; only update if they import deleted private names (check via `rg -n "from mlx_tui.(sessions|comparison_persistence) import _"`; if clean, touch nothing).
+
+**Success Criteria:**
+
+#### Automated Verification:
+- [x] Unit storage tests pass: `uv run pytest tests/unit/test_sessions.py tests/unit/test_comparison.py tests/unit/test_comparison_summary.py -q`
+- [x] Full suite passes: `uv run pytest -q`
+- [x] Lint passes: `uv run ruff check .`
+- [x] Format passes: `uv run ruff format --check src tests`
+- [x] Types pass: `uv run pyrefly check --min-severity warn`
+
+Deviation notes (Phase 1, trivial, behavior-preserving): `json_compatible` and `sync_dir` take a REQUIRED `error` factory (like the other helpers) to keep `json_util` a dependency leaf with zero imports from `sessions`/`comparison_persistence`; `sync_dir` uses `Callable[[str, Path], Exception]` so `SessionDurabilityUnconfirmed(msg, path)` passes directly. `atomic_write_bytes` uses `what: str = ""` with empty-means-no-noun (`f"could not save {target}"`) to preserve comparison's exact no-noun message; sessions passes `error=SessionPersistenceError, what="session"`, comparison passes `error=ComparisonPersistenceError` (persistence — not validation — so `commit_choice` rollback still triggers). Updated `tests/unit/test_comparison.py:119` `match="unknown keys"` → `match="unexpected field"` per the canonical sessions wording.
+
+#### Manual Verification:
+- [ ] No behavior change: session save/load round-trip still works via existing TUI flow (open TUI, send one chat, restart, session restores)
+
+### Phase 2: Split `sessions.py` into `sessions/` subpackage
+Break the 1078-line UI-free store into cohesive modules; delete the old flat file.
+
+**Changes:**
+- `src/mlx_tui/sessions/errors.py` — NEW: move `SessionValidationError`, `SessionPersistenceError`, `SessionLockedError`, `SessionStaleWriteError`, `SessionDurabilityUnconfirmed` (from `sessions.py:90-113`).
+- `src/mlx_tui/sessions/models.py` — NEW: move `RequestSettings:115`, `SessionTurn:140`, `ChatSession:173`, `_now_iso:186`, `new_session:190`; import `JSONValue` from `mlx_tui.json_util` (canonical home since Phase 1).
+- `src/mlx_tui/sessions/codec.py` — NEW: move module constant `PROVENANCE:86` plus remaining validators `_optional_bool:235`, `_count_value:242`, `_required_count:253`, `_finite_value:260`, `_session_uuid:273`, `_timestamp_value:285`, `_provenance_value:313`, attachment codec (`_ATTACHMENT_KEYS:322`–`_attachments_to_json:389`), settings/turn/session codec (`_settings_from_json:410`–`decode_session:730` incl. `_settings_to_json:687`, `_turn_to_json:691`, `_session_to_json:700`, `encode_session:713`, `decode_session:730` plus the in-range helpers `_tool_calls_from_json:490`, `_check_turn_consistency:504`, `_attempt_aggregate_bytes:591`, `_check_attempt_references:613`); import structural validators from `mlx_tui.json_util` (Phase 1, passing `error=SessionValidationError`) and errors from `mlx_tui.sessions.errors`.
+- `src/mlx_tui/sessions/store.py` — NEW: move `session_dir:739`–`delete_session:1050` incl. `SessionLock:797`, `lock_session:822`, `save_session:930`, `load_session:965`, `list_sessions:1013`, `delete_session:1024`; import `atomic_write_bytes`, `sync_dir` from `mlx_tui.json_util`.
+- `src/mlx_tui/sessions/queries.py` — NEW: move `successful_turns:1052`, `request_messages:1057`, `session_label:1066`.
+- Delete `src/mlx_tui/sessions.py` (no shim, per break-imports decision).
+- Update importers (stale check: `rg -n "mlx_tui\.sessions" src tests | rg -v "mlx_tui\.sessions\.(models|store|codec|errors|queries)"` must return empty — the plain `from mlx_tui.sessions import` / `import mlx_tui.sessions` patterns MISS the `from mlx_tui import sessions` idiom used below): `src/mlx_tui/chat_pane.py:52-58` → `from mlx_tui.sessions.models import ChatSession, RequestSettings, SessionTurn` + `from mlx_tui.sessions.store import SessionLock` (+ `import mlx_tui.sessions.store as _sessions_store` replacing `from mlx_tui import sessions as _sessions`); `src/mlx_tui/chat_turn.py:14` (`TYPE_CHECKING`-only) → `from mlx_tui.sessions.models import SessionTurn`; `src/mlx_tui/session_screen.py:83,206` (`from mlx_tui import sessions as S`, using `S.list_sessions` / `S.delete_session` / `S.SessionPersistenceError` / `S.SessionLockedError`) → `from mlx_tui.sessions.store import delete_session, list_sessions` + `from mlx_tui.sessions.errors import SessionLockedError, SessionPersistenceError`, updating the `S.` call sites accordingly; `tests/unit/test_sessions.py:14`, `tests/integration/test_sessions.py:15` (`from mlx_tui import sessions as S`) → new paths per names used; `tests/conftest.py` (whichever match the broad `rg`) → new paths. `ARCHITECTURE.md:348` line `sessions.py # ...` → update to `sessions/ # ...` in same phase.
+
+**Success Criteria:**
+
+#### Automated Verification:
+- [x] Storage tests pass: `uv run pytest tests/unit/test_sessions.py tests/integration/test_sessions.py tests/integration/test_chat_integration.py -q`
+- [x] Full suite passes: `uv run pytest -q`
+- [x] Lint passes: `uv run ruff check .`
+- [x] Format passes: `uv run ruff format --check src tests`
+- [x] Types pass: `uv run pyrefly check --min-severity warn`
+- [x] No stale imports remain: `rg -n "mlx_tui\.sessions" src tests | rg -v "mlx_tui\.sessions\.(models|store|codec|errors|queries)"` returns empty
+
+Deviation notes (Phase 2, trivial, behavior-preserving): `SCHEMA_VERSION` lives in `sessions/models.py` (needed for `ChatSession` default); `codec.py` imports it and defines `SUPPORTED_SCHEMA_VERSIONS`, `SHA256_HEX_LENGTH`, `OUTCOMES`, `ERROR_CATEGORIES`, `PROVENANCE`, `MAX_AGGREGATE_BYTES`. `fcntl` lives in `sessions/store.py` (locking home) and tests import it from there. `chat_pane.py` uses four aliases (`_sessions_errors/models/queries/store`) instead of store-only, since `new_session` (models) and `request_messages` (queries) are not in store. `session_screen.py` also imports `load_session`/`lock_session` (store), `session_label` (queries), `SessionValidationError` (errors) beyond the plan's partial list. `tests/integration/test_sessions.py` patch targets retargeted from `S.save_session` to `mlx_tui.sessions.store.save_session` (the lookup namespace `chat_pane._sessions_store` resolves to). No `sessions/__init__.py` (namespace subpackage, matching `history/` precedent).
+
+#### Manual Verification:
+- [ ] Sessions screen lists labels by updated time, opens a prior session, and shows locked/corrupt states as before
+
+### Phase 3: Split `comparison_persistence.py` into flat siblings
+Break the 701-line checkpoint/choice store; keep the existing `comparison.py` facade pattern.
+
+**Changes:**
+- `src/mlx_tui/comparison_encoding.py` — NEW: move `_json_value:45`, `_identity_to_json:61`, `_identity_from_json:67`, `_evidence_to_json:80`, `_profile_to_json:99`, `_entry_to_json:103`, `_input_to_json:110`, `_trial_to_json:136`, `_result_to_json:140`, `encode_comparison:157` from `comparison_persistence.py`.
+- `src/mlx_tui/comparison_decoding.py` — NEW: move `_profile_from_json:195`, `_evidence_from_json:246`, `_entry_from_json:300`, `_input_from_json:313`, `_sample_from_json:378`, `_trial_from_json:402`, `decode_comparison:458`; import `require_dict`, `required_field`, `check_keys`, `string_field` from `mlx_tui.json_util`.
+- `src/mlx_tui/comparison_store.py` — NEW: move `comparison_dir:35`, `choice_path:41`, `save_comparison:538`, `load_comparison:548`, `_choice_json:557`, `save_choice:564`, `load_choice:573`, `_decision_payload:616`, `choice_is_committed:627`, `commit_choice:641`; import `atomic_write_bytes` from `mlx_tui.json_util`.
+- Delete `src/mlx_tui/comparison_persistence.py` (no shim).
+- `src/mlx_tui/comparison.py` — update facade imports `comparison_persistence import (...)` (`comparison.py:31-42`) to import the same 10 names from the three new modules (`encode_comparison` from `comparison_encoding`, `decode_comparison` from `comparison_decoding`, rest from `comparison_store`); `__all__` unchanged (35 names).
+- Update importers: `src/mlx_tui/comparison_runner.py:35-39` → split by destination (`_json_value` from `mlx_tui.comparison_encoding`; `comparison_dir`, `save_comparison` from `mlx_tui.comparison_store`); `src/mlx_tui/comparison_summary.py:18` (`_json_value`) → `from mlx_tui.comparison_encoding import _json_value`; any test matching `rg -n "comparison_persistence" src tests` → new paths, INCLUDING patch-target retargets in `tests/unit/test_comparison.py` (`hasattr(comparison_persistence, "_decision_payload")` at :47, `_decision_payload` call sites at :235,246,268, `monkeypatch.setattr(comparison_persistence, "save_choice", ...)` at :322, `comparison_persistence.save_comparison` at :346, `monkeypatch.setattr(comparison_persistence, "save_comparison", ...)` at :358 → `mlx_tui.comparison_store`). Caveat: patches must target `comparison_store` (the lookup namespace where `commit_choice` resolves `save_choice`/`save_comparison` globals) — patching the `comparison.py` facade object will NOT intercept the store-internal calls. `ARCHITECTURE.md:331` line → update to three new files.
+
+**Success Criteria:**
+
+#### Automated Verification:
+- [x] Comparison tests pass: `uv run pytest tests/unit/test_comparison.py tests/unit/test_comparison_summary.py tests/integration/test_compare_integration.py -q`
+- [x] Full suite passes: `uv run pytest -q`
+- [x] Lint passes: `uv run ruff check .`
+- [x] Format passes: `uv run ruff format --check src tests`
+- [x] Types pass: `uv run pyrefly check --min-severity warn`
+- [x] No stale imports remain: `rg -n "comparison_persistence" src tests` returns empty
+
+Deviation notes (Phase 3, trivial, behavior-preserving): `comparison_decoding.py` imports `_identity_from_json` and `_json_value` from `comparison_encoding` (plan puts `_identity_from_json` in encoding even though it decodes; `_profile_from_json` needs `_json_value` for `launch_settings`). `comparison_store.py` drops the unused `required_field` import (`load_choice` uses `require_dict`/`check_keys`/`string_field` only). No other deviations; `__all__` in `comparison.py` unchanged (35 names).
+
+#### Manual Verification:
+- [ ] Compare tab can run a comparison, save a checkpoint, reopen it by path, and commit a Keep decision as before
+
+### Phase 4: Split `managed.py` into `managed/` subpackage
+Isolate env/path helpers, inspect/install flows, and child lifecycle.
+
+**Changes:**
+- `src/mlx_tui/managed/paths.py` — NEW: move constants `RUNTIME_COMMIT:37`–`COMPLETION_MARKER:49`, `_INDEX_ENVIRONMENT:51`, `_SANITIZED_ENVIRONMENT:61`, plus `runtime_root:87`, `_resource_bytes:93`, `_resource_hash:97`, `_normal_name:101`, `_freeze_requirements:105`, `_sanitized_environment:121`, `_command_output:135`, `_uv_executable:153`, `_python_path:203`, `_resource` helpers; exceptions `ManagedRuntimeError:79`, `InstallCancelled:83` stay here (imported by install/runtime).
+- `src/mlx_tui/managed/inspect.py` — NEW: move `_preflight:160` (41 lines), `_INSPECT_SCRIPT:207`, `_validate_profiles:244`, `inspect_runtime:256` (83 lines), `_atomic_json:341`, `_read_marker:357`, `_check_owner:365`, `_prepare_runtime:376`, `_runtime_lock:395`.
+- `src/mlx_tui/managed/install.py` — NEW: move `_run_install_command:418` (54 lines, incl. inner `pump:438`), `install_runtime:474` (77 lines).
+- `src/mlx_tui/managed/runtime.py` — NEW: move `class ManagedRuntime:553` (17 methods through `close:771`) unchanged.
+- Delete `src/mlx_tui/managed.py` (no shim).
+- Intra-package imports (new modules are NOT self-contained): `inspect.py` imports path helpers/constants from `mlx_tui.managed.paths` (`runtime_root`, `_sanitized_environment`, `_command_output`, `_uv_executable`, `QUALIFIED_MACOS_VERSION`, `UV_VERSION`, `PYTHON_VERSION`, `MIN_FREE_BYTES`, `RUNTIME_RESOURCE`); `install.py` imports `runtime_root`, `_python_path`, `_runtime_lock`, `_prepare_runtime`, `inspect_runtime` from `paths`/`inspect` plus `ManagedRuntimeError`/`InstallCancelled` from `paths`; `runtime.py` (`ManagedRuntime.start:683` uses `_check_owner`, `inspect_runtime`, `_python_path`, `_sanitized_environment`, `runtime_root` — see `managed.py:690-716`) imports from both `paths` and `inspect`.
+- Update importers (stale check: `rg -n "mlx_tui\.managed" src tests | rg -v "mlx_tui\.managed\.(paths|inspect|install|runtime)"` must return empty — the old `from mlx_tui.managed import|import mlx_tui.managed` patterns MISS `from mlx_tui import managed`): `src/mlx_tui/app/__init__.py:63` (`ManagedRuntime`) → `from mlx_tui.managed.runtime import ManagedRuntime`; `src/mlx_tui/setup_screen.py:22` (`COMPLETION_MARKER, install_runtime, runtime_root`) → `from mlx_tui.managed.paths import COMPLETION_MARKER, runtime_root` + `from mlx_tui.managed.install import install_runtime`; `src/mlx_tui/diagnostics.py:19` (`from mlx_tui import managed`, using `managed.RUNTIME_RESOURCE`, `managed.BUILD_CONSTRAINTS_RESOURCE`, `managed.RUNTIME_COMMIT`, `managed.PYTHON_VERSION`, `managed.UV_VERSION`, `managed.MLX_VERSION`, `managed.runtime_root`, `managed.COMPLETION_MARKER`) → import each name from `mlx_tui.managed.paths` and update call sites; `tests/unit/test_managed.py:14` (`from mlx_tui import managed`) → new paths per names used; any other match of the broad `rg` → new paths. `ARCHITECTURE.md:352` line → `managed/ # ...`.
+
+**Success Criteria:**
+
+#### Automated Verification:
+- [x] Managed tests pass: `uv run pytest tests/unit/test_managed.py -q`
+- [x] Full suite passes: `uv run pytest -q`
+- [x] Lint passes: `uv run ruff check .`
+- [x] Format passes: `uv run ruff format --check src tests`
+- [x] Types pass: `uv run pyrefly check --min-severity warn`
+- [x] No stale imports remain: `rg -n "mlx_tui\.managed" src tests | rg -v "mlx_tui\.managed\.(paths|inspect|install|runtime)"` returns empty
+
+Deviation notes (Phase 4, trivial, behavior-preserving): `install.py` also imports `_atomic_json` from `inspect` (plan's intra-package list omits it, but `install_runtime` writes the completion marker through it). Test patch targets follow the Phase 3 lookup-namespace rule: `inspect`-internal names (`_uv_executable`, `_command_output`, `_validate_profiles`) patched on `mlx_tui.managed.inspect`, `install_runtime` globals (`runtime_root`, `_preflight`, `inspect_runtime`, `_run_install_command`) patched on `mlx_tui.managed.install`, `ManagedRuntime.start` globals (`inspect_runtime`, `verify_cached_assets`) patched on `mlx_tui.managed.runtime`; `serverctl` patched as the shared `mlx_tui.serverctl` module object. Test imports use `import mlx_tui.managed.X as ...` (not `from mlx_tui.managed import X`) so the plan's stale-import gate returns empty, matching the `sessions.store` precedent.
+
+#### Manual Verification:
+- [ ] Setup screen managed-install path still resolves runtime root and reports completion marker as before (no live install required; verify screen renders and unit-covered paths pass)
+
+### Phase 5: Split `chat_pane.py` into `chat_ui/` subpackage
+Break the 2463-line `ChatPane`; highest-risk UI phase, done after storage is stable. (Named `chat_ui/`, not `chat/`: `src/mlx_tui/chat.py` already exists as the streaming engine — `TurnProgress`, `TurnResult`, `stream_turn`, `error_detail` — imported by `chat_pane.py:32`, `comparison_runner.py:18`, and 6+ test sites. Python cannot resolve both `mlx_tui.chat` the module and `mlx_tui.chat.pane` the submodule, so the pane pieces get their own package and `chat.py` is untouched.)
+
+**Changes:**
+- `src/mlx_tui/chat_ui/widgets.py` — NEW: move `_choose_macos_file:70`, `class ChatInput:86` (`__init__:106`, `action_submit:122`), `_MACOS_FILE_PICKER_SCRIPT:63`.
+- `src/mlx_tui/chat_ui/context.py` — NEW: move context/attachment pure helpers (`_get_max_ctx:602`, `_request_destination:608`, `_is_loopback_destination:613`, `_current_draft:621`, `_prepare_window:627`, `_refresh_attachment_ui:645`, `_current_window:664`, `_included_turn_ids:670`, `refresh_context_bar:1079`, `update_ctx_bar:1097`) as free functions taking an explicit `pane` param. The `@on`-decorated entry points (`_context_preview_pressed:679`, `_attachment_failed:709`, `_attachment_added:712`, `_attachment_picker_finished:734`, `_add_attachment_pressed:756`, `_selected_attachment:772`, `_inspect_attachment_pressed:788`, `_remove_attachment_pressed:803`) and the `@work` worker (`_choose_attachment_worker:745`) STAY as thin delegating methods on `ChatPane` — Textual message dispatch and worker lifecycle require the decorator to live on the widget class. Same rule everywhere below: decorated/lifecycle/`action_*` methods stay thin; only pure logic moves.
+- `src/mlx_tui/chat_ui/persistence.py` — NEW: move draft/session pure logic (`_ensure_session:284`, `capture_request_settings:293`, `mark_next_request_dirty:373`, `_schedule_draft_save:385`, `_draft_timer_fired:400`, `_save_session_async:404`, `_has_meaningful_content:412`, `_snapshot_for_save:417`, `_save_session_now:439`, `_update_save_status:532`, `_update_action_visibility:546`, `save_failed:595`, `is_temporary:599`, `open_session:1923`, `_start_empty_session:2029`, `_confirm_discard:2062`, `_open_picker:2077`, `_new_session_pressed:2098`, `_new_temp_pressed:2102`, `_clear_pressed:2107`, `_clear_session:2130`, `_delete_pressed:2160`, `_delete_session:2180`, `_last_retryable_turn:2226`, `_retry_request_pressed:2235`, `_apply_retry_draft:2276`, `_restore_retry_settings:2307`, `_retry_save_pressed:2341`, `_retry_save:2345`, `_discard_pressed:2357`, `_use_saved_pressed:2371`, `_apply_saved_settings:2377`, `_keep_current_pressed:2425`, `_release_session_lock:1860`, `flush_for_shutdown:2433`) as free functions with explicit `pane` param; every `@on(Button.Pressed, ...)` handler among them stays on `ChatPane` as a one-line delegate.
+- `src/mlx_tui/chat_ui/turns.py` — NEW: move submit/streaming pure logic (`_send_blocked_reason:833`, `_send_pressed:888`, `_do_submit:895`, `apply_config_params:1069`, `_run_turn:1128`, `_classify_outcome:1388`, `_format_stamp:1400`, `_outcome_notices:1442`, `_record_outcome:1460`, `_drop_running_attempt:1494`, `_update_running_estimates:1514`, `_merged_progress_tools:1557`, `_finalize_session_attempt:1566`, `_checkpoint_terminal:1661`, `abort:1676`, `wait_for_cleanup:1692`, `_record_cancelled:1774`, `end_turn:1805`, `_commit_success:1744`, `_complete_turn_ui:1760`) as free functions with explicit `pane` param. The `@on` handlers (`_on_draft_changed:843`, `_on_param_changed:878`, `_on_input_submitted:884`), the `@work` worker driving `_run_turn`, and the `TurnProgress` message receiver (`_on_turn_progress:1541`) STAY as thin delegating methods on `ChatPane`.
+- `src/mlx_tui/chat_ui/pane.py` — NEW home of `class ChatPane(Vertical)`: keep `__init__:189`, `tui:229`, `has_live_turn:233`, `compose:237`, `on_mount:270`, `_now_iso:281`, `_focus_changed:1701`, `_scroll_changed:1704`, `on_resize:1708`, `_queue_follow:1711`, `_follow_after_layout:1721`, `_update_stream:1734`, `_update_activity:1739`, `_write_system_line:1801`, `_clear_transcript_widgets:1869`, `_render_session:1878`, `_settings_differ:1907`, `on_unmount:2456`; plus the thin `@on`/`@work` delegates above; delegate pure logic to `context`/`persistence`/`turns` helpers.
+- Delete `src/mlx_tui/chat_pane.py` (no shim).
+- Update importers: `src/mlx_tui/app/__init__.py:41` → `from mlx_tui.chat_ui.pane import ChatPane`; `src/mlx_tui/app/__init__.py:916` (`ChatInput`) → `from mlx_tui.chat_ui.widgets import ChatInput`; `src/mlx_tui/compare_pane.py:1065` → same (transient — Phase 6 carries it into `compare/decisions.py` near `_go_chat:1064`); `tests/conftest.py:22`, `tests/unit/test_params.py:7`, all integration tests importing `mlx_tui.chat_pane` → new `mlx_tui.chat_ui.*` paths. Retarget string patch targets (patches bind to the lookup namespace): `"mlx_tui.chat_pane.stream_turn"` → `"mlx_tui.chat_ui.turns.stream_turn"` in `tests/integration/test_chat_cancellation.py:402,463`, `tests/integration/test_chat_integration.py:539,777`. `ARCHITECTURE.md:326` line → `chat_ui/ # ...`.
+
+**Success Criteria:**
+
+#### Automated Verification:
+- [x] Chat tests pass: `uv run pytest tests/unit/test_chat.py tests/unit/test_params.py tests/integration/test_chat_integration.py tests/integration/test_chat_cancellation.py tests/integration/test_context_integration.py tests/integration/test_sessions.py -q`
+- [x] Full suite passes: `uv run pytest -q`
+- [x] Lint passes: `uv run ruff check .`
+- [x] Format passes: `uv run ruff format --check src tests`
+- [x] Types pass: `uv run pyrefly check --min-severity warn`
+- [x] No stale imports remain: `rg -n "mlx_tui\.chat_pane" src tests` returns empty
+
+Deviation notes (Phase 5, behavior-preserving): every moved method keeps a thin same-signature delegate on `ChatPane` (not only `@on`/`@work` handlers) because app code and tests call the moved public API directly (`apply_config_params`, `refresh_context_bar`, `mark_next_request_dirty`, `capture_request_settings`, `end_turn`, `open_session`, `flush_for_shutdown`, `abort`, `save_failed`, `is_temporary`, plus direct `pane._on_input_submitted(...)` calls in tests); helpers never call siblings directly (all cross-calls go through `pane` delegates), so no sibling imports and no import cycle. Helper `pane` params are typed `Any` (not `ChatPane`): the `TYPE_CHECKING` pane import created a `Self`-vs-`ChatPane` dual-identity `bad-argument-type` error on all 74 delegates under pyrefly, and `Any` keeps the rest of the signatures fully typed. `_MAX_CONTEXT_TOKENS_EST` is defined in `context.py` and imported by `persistence.py` (used at both `capture_request_settings` and `_get_max_ctx`). `_RETRYABLE_OUTCOMES` class attribute preserved on `ChatPane` (it sits between methods in the original and is read via `pane`). Lost paren-line `# noqa` comments restored on `_run_turn`/`_record_outcome`/`_finalize_session_attempt`/`_commit_success`; `_complete_turn_ui` gained `# noqa: PLR0913, PLR0917` (mechanical +1 `pane` param); `pane._progress_tools = dict[int, dict[str, object]]()` spells the declared `__init__` type for pyrefly. `tests/integration/test_context_integration.py` used the unlisted `from mlx_tui import chat_pane` idiom (patching `chat_pane.subprocess.run` for the macOS picker) → retargeted to `mlx_tui.chat_ui.widgets.subprocess`; `tests/unit/test_operations.py` fresh-interpreter module string → `mlx_tui.chat_ui.pane`.
+
+#### Manual Verification:
+- [ ] Chat tab sends a message, streams, aborts with Escape, retries, attaches a text file, and context bar updates as before
+
+### Phase 6: Split `compare_pane.py` into `compare/` subpackage
+Break the 1141-line compare workflow after chat is stable.
+
+**Changes:**
+- `src/mlx_tui/compare/pane.py` — NEW home of `class ComparePane(VerticalScroll)`: keep `__init__:104`, `tui:115`, `compose:119`, `on_resize:233`, `on_mount:236`, `has_live_comparison:260`, `cancel_requested:264`, `abort:860`, `wait_for_cleanup:872`, `set_comparison_busy:881`, `_cancel:887`.
+- `src/mlx_tui/compare/render.py` — NEW pure helpers: `_set_text:267`, `_set_rich_text:274`, `_is_busy:281`, `refresh_profile_state:284`, `_render_task_details:351`, `_operator_input_value:368`, `_render_evidence_details:374`, `_render_saved:393`, `_result_text:415`, `_update_keep_labels:432`, `_update_controls:443`, `_clear_result_display:739`, `_render_result:753` (take explicit `pane` param).
+- `src/mlx_tui/compare/workflow.py` — NEW pure helpers: `_operator_value:570`, `_build_comparison_input:574`, `_preflight:658`, `_on_progress:794`, `_run_comparison:799` (the `@work` worker stays a thin method on the pane), `_download:891`, `_restart:908`, `_open_result:1079`, `_trial_selected:1120`. The `@on`-decorated entry points (`_candidate_changed:553`, `_setup_input_changed:566`, `_start_comparison:694`, `_cancel:887`-adjacent button handlers, download/restart buttons) STAY as thin delegating methods on `ComparePane` (Textual dispatch requires it) — same rule as Phase 5.
+- `src/mlx_tui/compare/decisions.py` — NEW pure helpers: `_decision_reason:921`, `_commit_decision:927` core; carry the `ChatInput` import here (from Phase 5's transient `compare_pane.py:1065` edit) for `_go_chat:1064`. The `@on` button handlers (`_keep_a:981`, `_keep_b:985`, `_retain:989`, `_reject:993`, `_use_saved:997`, `_activate_managed_profile:1025` incl. its `@work` worker, `_go_chat:1064`) STAY as thin delegating methods on `ComparePane`.
+- Delete `src/mlx_tui/compare_pane.py` (no shim).
+- Update importers: `src/mlx_tui/app/__init__.py:42` → `from mlx_tui.compare.pane import ComparePane`; `tests/integration/test_compare_integration.py:26`, `tests/integration/test_app_integration.py:463,596` → new path. Retarget string patch targets to the new lookup namespaces: `"mlx_tui.compare_pane.run_comparison"` → `"mlx_tui.compare.workflow.run_comparison"` (`test_compare_integration.py:108,196,239,412`, `test_app_integration.py:669`), `"mlx_tui.compare_pane.resolve_cached_snapshot"` → wherever the name is imported in the new layout (`test_compare_integration.py:81`, `test_app_integration.py:619`), `"mlx_tui.compare_pane.verify_profile_snapshot"` likewise (`:83`, `:621`), `"mlx_tui.compare_pane.process.find_server_process"` likewise (`:86`, `:624`). Rule: patch the module where the pane code looks the name up, not the old path. `ARCHITECTURE.md:335` line → `compare/ # ...`.
+
+**Success Criteria:**
+
+#### Automated Verification:
+- [x] Compare tests pass: `uv run pytest tests/integration/test_compare_integration.py tests/integration/test_app_integration.py -q`
+- [x] Full suite passes: `uv run pytest -q`
+- [x] Lint passes: `uv run ruff check .`
+- [x] Format passes: `uv run ruff format --check src tests`
+- [x] Types pass: `uv run pyrefly check --min-severity warn`
+- [x] No stale imports remain: `rg -n "mlx_tui\.compare_pane" src tests` returns empty
+
+Deviation notes (Phase 6, behavior-preserving, same pattern as Phase 5): every moved method keeps a thin same-signature delegate on `ComparePane` (app calls `set_comparison_busy()`, `abort()`, `_update_controls()` directly); helpers take `pane: Any` and never import siblings (no cycle). `_PROFILE_COUNT = 2` is defined in `render.py` and imported by `workflow.py` and `pane.py` (used in compose/render/build-input); `_NARROW_WIDTH = 90` stays in `pane.py` (used only by kept `on_resize`). `_go_chat`'s function-local `from mlx_tui.chat_ui.widgets import ChatInput` moved verbatim into `decisions.py` (satisfies the Phase 5 transient-import carry). String patch targets retargeted to the lookup namespaces where the names are imported in the new layout (`compare.workflow.run_comparison/resolve_cached_snapshot/verify_profile_snapshot/process.find_server_process`; `process` and the `comparison` facade are shared module objects, so patching via the workflow namespace intercepts the same globals). One lambda in `_activate_managed_profile` became a typed nested `def _report(line: str)` (untyped `pane` broke pyrefly's lambda inference).
+
+#### Manual Verification:
+- [ ] Compare tab builds input, runs, renders result, and Keep-A/Keep-B/Retain/Reject commits visibly as before
+
+### Phase 7: Split `app/__init__.py` internally
+Break the 1323-line coordinator without changing the `mlx_tui.app:main` entry path.
+
+**Changes:**
+- `src/mlx_tui/app/state.py` — NEW: move profile/comparison-selection state `_load_saved_choice:200`, `profile_entry:214`, `selected_comparison_profiles:220`, `update_comparison_candidate:228`, `refresh_profile_views:241`, `mark_active_profile_modified:249`, `apply_coding_profile:255`, plus `swap_busy:197`.
+- `src/mlx_tui/app/polling.py` — NEW: move `_fetch_probe:465`, `_advance_observation:506`, `_poll:510`, `update_server_identity:588`, `select_model:634`, `restore_request_state:647`, `record_generation_success:668`, `record_generation_failure:694`, `effective_model:701`, `endpoint_preview_text:705`, `action_endpoint_info:822`, `refresh_models:831`, `_refresh_metrics:350`, `_classify_liveness:872`, `_render_status:875`.
+- `src/mlx_tui/app/ops.py` — NEW: move `set_operation_ui:914`, `action_cold_start:939`, `ensure_managed_runtime:997`, `set_runtime_mode:1002`, `_managed_target:1009`, `_action_managed_start:1024`, `start_managed:1046`, `_restart_config_model:1051`, `_chat_pane_or_none:1098`, `cancel_chat_for_swap:1104`, `action_cancel_chat:1110`.
+- `src/mlx_tui/app/ui.py` — NEW: move `_apply_preset:838`, `_cycle_preset:859`, `action_cycle_preset:866`, `action_cycle_preset_back:869`, `_on_tab_activated:357`, `action_toggle_activity:1149`, `_activity_toggled:1154`, `refresh_activity:1163`, `log_app:1121`, `check_action:1132`, `log_error_once:1185`, `clear_error:1198`, `action_edit_config:1202`.
+- `src/mlx_tui/app/cli.py` — NEW: move `main:1254` (70 lines argparse bootstrap incl. `request_shutdown:1312`) unchanged.
+- `src/mlx_tui/app/app.py` — NEW home of `class MlxTuiApp(App[None])`: keep `__init__:130`, `compose:306`, `on_resize:321`, `on_mount:325`, `on_unmount:367`, `action_quit:424`; keep ALL `@on`/`@work`/`action_*`/lifecycle methods (`_on_tab_activated:357`, `_activity_toggled:1154`, `action_*`, `check_action:1132`) as thin delegating methods on the class (Textual dispatch requires it — same rule as Phases 5–6, no method-assignment tricks); pure logic lives in `state`/`polling`/`ops`/`ui` as free functions taking an explicit `app` param. `state.py`/`polling.py`/`ops.py`/`ui.py` import shared types from `mlx_tui.app.app` only under `TYPE_CHECKING`; runtime pane lookups (`_chat_pane_or_none`) import `mlx_tui.chat_ui.pane` / `mlx_tui.compare.pane` lazily inside functions (panes already import app only under `TYPE_CHECKING`, so this direction stays acyclic).
+- `src/mlx_tui/app/__init__.py` — rewrite as thin re-export only: `from mlx_tui.app.app import MlxTuiApp` + `from mlx_tui.app.cli import main` + `__all__ = ["MlxTuiApp", "main"]` so `mlx-tui = "mlx_tui.app:main"` keeps working.
+- Update internal imports only; external `from mlx_tui.app import MlxTuiApp` / `mlx_tui.app:main` paths unchanged, so no test import churn expected (verify with `rg -n "from mlx_tui.app import" src tests`). `ARCHITECTURE.md:323` line → `app/ # coordinator ...` listing new siblings.
+
+**Success Criteria:**
+
+#### Automated Verification:
+- [x] App tests pass: `uv run pytest tests/integration/test_app_integration.py tests/integration/test_boot_integration.py tests/integration/test_config_integration.py tests/unit/test_config.py -q`
+- [x] Full suite passes: `uv run pytest -q`
+- [x] Lint passes: `uv run ruff check .`
+- [x] Format passes: `uv run ruff format --check src tests`
+- [x] Types pass: `uv run pyrefly check --min-severity warn`
+- [x] Packaging smoke passes: `uv run python tests/artifact_smoke.py`
+
+Deviation notes (Phase 7, behavior-preserving, same pattern as Phases 5–6): every moved method keeps a thin same-signature delegate on `MlxTuiApp` (helpers take `app: Any` and never import siblings; cross-calls go through `app` delegates, so no cycle). `@on`/`action_*`/`check_action`/`@override` decorators stay on the class. The plan's "no test import churn" missed `monkeypatch` string targets resolving via the old `mlx_tui.app` namespace — retargeted per the lookup-namespace rule: `mlx_tui.app.process.find_server_process` → canonical `mlx_tui.process.find_server_process` (shared module object; redundant duplicate stanzas in `tests/integration/conftest.py` and `tests/integration/test_boot_integration.py` deleted since the canonical patch already covers polling+ops), `mlx_tui.app.resolve_cached_snapshot`/`verify_profile_snapshot` → `mlx_tui.app.state.*`, `mlx_tui.app.config_path`/`write_template` → `mlx_tui.app.ui.*`, `app_mod.subprocess` → the test file's stdlib `subprocess` import (same shared object, matching `_stub_editor`'s existing form), `mlx_tui.app.load_config` → `mlx_tui.app.cli.load_config`, `test_diagnostics.py` `app_module.write_diagnostics`/`load_config` → `mlx_tui.app.cli.*` (`app_module.main()` still works via re-export). `ComparePane` imports in `ops.py` are function-local (lazy) to keep the import graph acyclic; `_chat_pane_or_none` lazy per plan; `set_runtime_mode` does a function-local `from dataclasses import replace`. `_PROFILE_COUNT = 2` is defined in `state.py` (only user), `_COMPACT_HEIGHT` stays in `app.py` (only user). `app.py` `__init__` keeps `deque[MemoryRecord]` spelled explicitly (bare `deque` fails pyrefly `implicit-any-type-argument`). `ruff format` applied to the new files (whitespace only). Final layout: `app.py` 479 lines (was 1323), `polling.py` 463, `ops.py` 243, `ui.py` 209, `state.py` 135, `cli.py` 85, `__init__.py` 6-line re-export.
+
+#### Manual Verification:
+- [ ] `mlx-tui --help` shows `usage: mlx-tui` with `--managed`/`--attach`; `--version` matches `pyproject.toml:3`; TUI boots, polls, switches tabs, and quits cleanly
+
+## Out of Scope
+- Splitting `tests/` integration files (e.g. `tests/integration/test_app_integration.py:960` lines) — test-only duplication, no production SOLID violation
+- Splitting mid-size modules under ~500 lines (`models_pane.py:456`, `serverctl.py:449`, `profiles.py:434`, `search_screen.py:416`, `comparison_runner.py:400`) — below the agreed Top-6 threshold
+- Behavior changes, new features, preset/config format changes, session/comparison schema v1/v2 migrations
+- Performance optimization, tokenizer-accurate context counting, new abstractions beyond the one `json_util.py` helper
+- `docs/comparison.md` operator-journey rewrite (only `ARCHITECTURE.md` layout lines touched per phase)
+
+## Risks & Mitigations
+- Circular imports when UI helpers move out of `ChatPane`/`ComparePane`/`MlxTuiApp` (panes import app only under `TYPE_CHECKING` today) → free functions with explicit `pane`/`app` params, keep `TYPE_CHECKING` imports, run `pyrefly` each phase
+- Broad importer churn from breaking `chat_pane`/`compare_pane`/`sessions`/`managed` paths across ~15 test files → one file-family per phase, `rg` emptiness check as gate, full `pytest` per phase
+- `_atomic_write`/`_sync_directory` semantics differ slightly between sessions and comparison stores → Phase 1 unifies names only, keeps sessions behavior canonical, comparison behavior verified by `test_comparison.py` + `test_compare_integration.py`
+- Long-method risk merely moves (e.g. `_run_turn` 258 lines, `endpoint_preview_text` 116 lines) → moves are step one; follow-up method-level Extract Function work is explicitly out of scope for this plan
+- `mlx_tui.app:main` packaging break → Phase 7 keeps `__init__.py` re-export + `artifact_smoke.py` gate proves wheel/sdist entry points

@@ -14,7 +14,7 @@ from mlx_tui.operations import OperationCoordinator, OperationKind
 @pytest.mark.parametrize(
     "module",
     (
-        "mlx_tui.chat_pane",
+        "mlx_tui.chat_ui.pane",
         "mlx_tui.models_pane",
         "mlx_tui.operations",
         "mlx_tui.app",

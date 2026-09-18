@@ -46,7 +46,7 @@ def _qualified_entry(base: ProfileEntry) -> ProfileEntry:
         tested_at=now - timedelta(days=1),
         expires_at=now + timedelta(days=10),
         machine_tier=_TIER,
-        task_id="milestone-b-coding-check",
+        task_id="coding-check-v1",
         check_id="coding-check-v1",
         prompt_sha256="a" * 64,
         runtime_freeze="frozen",

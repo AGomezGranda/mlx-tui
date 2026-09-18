@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from mlx_tui.profiles import (
+    ProfileEntry,
     ProfileValidationError,
+    RecommendationEvidence,
     load_coding_profiles,
     profile_fingerprint,
 )
@@ -22,8 +24,10 @@ def test_packaged_shortlist_has_two_pinned_candidates() -> None:
         "qwen3.5-4b-baseline",
     ]
     assert all(len(entry.profile.revision) == 40 for entry in entries)
-    assert entries[0].status("local-m4-16gib") == "qualified"
-    assert entries[1].status("local-m4-16gib") == "unqualified"
+    assert all(entry.evidence == () for entry in entries)
+    now = datetime(2026, 9, 9, tzinfo=UTC)
+    assert entries[0].status("local-m4-16gib", now=now) == "unknown"
+    assert entries[1].status("local-m4-16gib", now=now) == "unknown"
 
 
 def test_fingerprint_excludes_display_name_but_includes_launch_and_assets() -> None:
@@ -47,7 +51,6 @@ def test_fingerprint_excludes_display_name_but_includes_launch_and_assets() -> N
     [
         ('revision = "3b1b1768f8f8cf8351c712464f906e86c2b8269e"', 'revision = "main"'),
         ("temperature = 0.0", "temperature = true"),
-        ('expires_at = "2026-09-20T18:00:00Z"', 'expires_at = "not-a-date"'),
     ],
 )
 def test_catalogue_rejects_unsafe_values(tmp_path: Path, old: str, new: str) -> None:
@@ -63,39 +66,130 @@ def test_catalogue_rejects_unsafe_values(tmp_path: Path, old: str, new: str) -> 
         load_coding_profiles(path)
 
 
+def _synthetic_evidence(
+    entry: ProfileEntry,
+    *,
+    status: str = "qualified",
+    tested_at: datetime = datetime(2026, 1, 1, tzinfo=UTC),
+    expires_at: datetime = datetime(2026, 1, 11, tzinfo=UTC),
+    revocation_reason: str | None = None,
+) -> RecommendationEvidence:
+    return RecommendationEvidence(
+        owner="unit",
+        source="unit",
+        status=status,  # type: ignore[arg-type]
+        revocation_reason=revocation_reason,
+        tested_at=tested_at,
+        expires_at=expires_at,
+        machine_tier="local-m4-16gib",
+        task_id="coding-check-v1",
+        check_id="coding-check-v1",
+        prompt_sha256="a" * 64,
+        runtime_freeze="frozen",
+        profile_fingerprint=entry.profile.fingerprint,
+        result_references=("ref",) if status == "qualified" else (),
+        result_hashes=("b" * 64,) if status == "qualified" else (),
+    )
+
+
 def test_expiry_is_exact_and_unknown_tiers_fail_closed() -> None:
     entry = load_coding_profiles()[0]
-    evidence = entry.evidence[0]
-    assert entry.status("other-tier", now=evidence.expires_at) == "unknown"
-    assert entry.status("local-m4-16gib", now=evidence.expires_at) == "expired"
+    tested_at = datetime(2026, 1, 1, tzinfo=UTC)
+    expires_at = datetime(2026, 1, 11, tzinfo=UTC)
+    qualified = ProfileEntry(
+        profile=entry.profile,
+        evidence=(
+            _synthetic_evidence(entry, tested_at=tested_at, expires_at=expires_at),
+        ),
+    )
+    assert qualified.status("other-tier", now=expires_at) == "unknown"
+    assert qualified.status("local-m4-16gib", now=expires_at) == "expired"
     assert (
-        entry.status("local-m4-16gib", now=evidence.expires_at.replace(microsecond=1))
+        qualified.status("local-m4-16gib", now=expires_at.replace(microsecond=1))
         == "expired"
     )
-    assert evidence.is_current(
+    assert qualified.evidence[0].is_current(
         entry.profile,
         machine_tier="local-m4-16gib",
-        now=datetime(2026, 9, 9, tzinfo=UTC),
+        now=tested_at + timedelta(days=1),
     )
 
 
-def test_revoked_and_absent_evidence_never_qualify(tmp_path: Path) -> None:
+def test_revoked_and_absent_evidence_never_qualify() -> None:
+    entry = load_coding_profiles()[0]
+    revoked = ProfileEntry(
+        profile=entry.profile,
+        evidence=(
+            _synthetic_evidence(entry, status="revoked", revocation_reason="failed"),
+        ),
+    )
+    assert revoked.status("local-m4-16gib") == "revoked"
+
+    assert (
+        ProfileEntry(profile=entry.profile, evidence=()).status("local-m4-16gib")
+        == "unknown"
+    )
+
+
+def _catalogue_with_evidence(evidence_toml: str) -> str:
     source = (
         __import__("importlib.resources", fromlist=["files"])
         .files("mlx_tui")
         .joinpath("coding_profiles.toml")
         .read_text()
     )
-    revoked = source.replace('status = "qualified"', 'status = "revoked"', 1).replace(
-        'revocation_reason = ""', 'revocation_reason = "candidate failed"', 1
-    )
-    revoked_path = tmp_path / "revoked.toml"
-    revoked_path.write_text(revoked)
-    assert load_coding_profiles(revoked_path)[0].status("local-m4-16gib") == "revoked"
+    head, sep, tail = source.partition("[[profiles]]")
+    assert sep
+    first, sep2, rest = tail.partition("[[profiles]]")
+    assert sep2
+    return f"{head}[[profiles]]{first}{evidence_toml}\n[[profiles]]{rest}"
 
-    no_evidence = source.replace(source[source.index("[[profiles.evidence]]") :], "")
-    no_evidence_path = tmp_path / "none.toml"
-    no_evidence_path.write_text(no_evidence)
-    assert (
-        load_coding_profiles(no_evidence_path)[0].status("local-m4-16gib") == "unknown"
+
+def _evidence_toml(fingerprint: str, *, status: str, reason: str, expires: str) -> str:
+    return f"""[[profiles.evidence]]
+owner = "unit"
+source = "unit"
+status = "{status}"
+revocation_reason = "{reason}"
+tested_at = "2026-01-01T00:00:00Z"
+expires_at = "{expires}"
+machine_tier = "local-m4-16gib"
+task_id = "coding-check-v1"
+check_id = "coding-check-v1"
+prompt_sha256 = "{"a" * 64}"
+runtime_freeze = "frozen"
+profile_fingerprint = "{fingerprint}"
+result_references = []
+result_hashes = []
+"""
+
+
+def test_catalogue_rejects_bad_evidence_timestamp(tmp_path: Path) -> None:
+    fingerprint = load_coding_profiles()[0].profile.fingerprint
+    path = tmp_path / "bad-timestamp.toml"
+    path.write_text(
+        _catalogue_with_evidence(
+            _evidence_toml(
+                fingerprint, status="unqualified", reason="", expires="not-a-date"
+            )
+        )
     )
+    with pytest.raises(ProfileValidationError):
+        load_coding_profiles(path)
+
+
+def test_catalogue_rejects_revocation_without_reason(tmp_path: Path) -> None:
+    fingerprint = load_coding_profiles()[0].profile.fingerprint
+    path = tmp_path / "bad-revocation.toml"
+    path.write_text(
+        _catalogue_with_evidence(
+            _evidence_toml(
+                fingerprint,
+                status="revoked",
+                reason="",
+                expires="2026-01-11T00:00:00Z",
+            )
+        )
+    )
+    with pytest.raises(ProfileValidationError):
+        load_coding_profiles(path)

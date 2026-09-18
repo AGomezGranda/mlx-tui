@@ -12,8 +12,8 @@ from textual.widgets import TextArea
 
 from mlx_tui import text_screen
 from mlx_tui.app import MlxTuiApp
-from mlx_tui.chat_pane import ChatInput
 from mlx_tui.chat_turn import ChatTurn
+from mlx_tui.chat_ui.widgets import ChatInput
 from mlx_tui.config import AppConfig
 from mlx_tui.operations import OperationKind
 from mlx_tui.text_screen import TextPreviewScreen
@@ -536,7 +536,7 @@ async def test_response_identity_and_authoritative_final(
             stream_complete=True,
         )
 
-    monkeypatch.setattr("mlx_tui.chat_pane.stream_turn", stream)
+    monkeypatch.setattr("mlx_tui.chat_ui.turns.stream_turn", stream)
     harness.app.query_one(TabbedContent).active = "chat"
     await harness.pilot.pause()
     pane = harness.chat_pane()
@@ -774,7 +774,7 @@ async def test_unexpected_failure_respects_newer_draft(
         await finish.wait()
         raise ValueError("unexpected failure")
 
-    monkeypatch.setattr("mlx_tui.chat_pane.stream_turn", fail)
+    monkeypatch.setattr("mlx_tui.chat_ui.turns.stream_turn", fail)
     pane = harness.chat_pane()
     inp = pane.query_one("#chat-input", ChatInput)
     pane._on_input_submitted(ChatInput.Submitted(inp, "  original  "))

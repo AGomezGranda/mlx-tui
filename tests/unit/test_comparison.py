@@ -6,16 +6,17 @@ import asyncio
 import json
 import os
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 
 import httpx
 import pytest
 
-from mlx_tui import comparison, comparison_persistence, comparison_runner
+from mlx_tui import comparison, comparison_runner, comparison_store
 from mlx_tui.chat import TurnResult
 from mlx_tui.process import ProcessIdentity
-from mlx_tui.profiles import load_coding_profiles
+from mlx_tui.profiles import ProfileEntry, RecommendationEvidence, load_coding_profiles
 from tests.builders import sse_frames
 
 
@@ -43,7 +44,7 @@ def test_facade_reexports_production_and_qualification_api() -> None:
     # Private helpers must live in their defining modules, not the facade.
     assert not hasattr(comparison, "_decision_payload")
     assert not hasattr(comparison, "_verify_snapshots")
-    assert hasattr(comparison_persistence, "_decision_payload")
+    assert hasattr(comparison_store, "_decision_payload")
     assert hasattr(comparison_runner, "_verify_snapshots")
 
 
@@ -115,7 +116,7 @@ def test_nested_trial_round_trip_rejects_unknown_fields(tmp_path: Path) -> None:
     assert comparison.decode_comparison(encoded) == result
     document = json.loads(encoded)
     document["trials"][0]["unknown_field"] = True
-    with pytest.raises(comparison.ComparisonValidationError, match="unknown keys"):
+    with pytest.raises(comparison.ComparisonValidationError, match="unexpected field"):
         comparison.decode_comparison(document)
 
 
@@ -141,6 +142,58 @@ def test_json_round_trip_and_reopen_running_as_interrupted(tmp_path: Path) -> No
     with pytest.raises(comparison.ComparisonPersistenceError):
         comparison.load_comparison(path)
     assert path.read_bytes() == newer_bytes
+
+
+def test_task_id_default_is_neutral_and_historical_value_round_trips(
+    tmp_path: Path,
+) -> None:
+    value = _result_input(tmp_path)
+    assert value.task_id == "coding-check-v1"
+
+    base_entries = load_coding_profiles()
+    now = datetime.now(UTC)
+    entries = tuple(
+        ProfileEntry(
+            profile=entry.profile,
+            evidence=(
+                RecommendationEvidence(
+                    owner="unit",
+                    source="unit",
+                    status="qualified",
+                    revocation_reason=None,
+                    tested_at=now - timedelta(days=1),
+                    expires_at=now + timedelta(days=10),
+                    machine_tier="test-tier",
+                    task_id="milestone-b-coding-check",
+                    check_id="coding-check-v1",
+                    prompt_sha256="a" * 64,
+                    runtime_freeze="frozen",
+                    profile_fingerprint=entry.profile.fingerprint,
+                    result_references=("ref",),
+                    result_hashes=("b" * 64,),
+                ),
+            ),
+        )
+        for entry in base_entries
+    )
+    historical = replace(value, profiles=entries, task_id="milestone-b-coding-check")
+    result = comparison.ComparisonResult(
+        run_id="task-id-run",
+        status="completed",
+        comparison=historical,
+        trials=tuple(
+            comparison.TrialResult(entry.profile.id, index)
+            for entry in entries
+            for index in range(6)
+        ),
+    )
+    encoded = comparison.encode_comparison(result)
+    decoded = comparison.decode_comparison(encoded)
+    assert decoded == result
+    assert decoded.comparison.task_id == "milestone-b-coding-check"
+    assert decoded.comparison.profiles[0].evidence[0].task_id == (
+        "milestone-b-coding-check"
+    )
 
 
 def test_negative_timing_is_rejected() -> None:
@@ -178,9 +231,7 @@ def test_choice_is_committed_only_after_finalized_run(tmp_path: Path) -> None:
     choice_file = tmp_path / "choice.json"
     pending = replace(
         result,
-        summary={
-            "decision": comparison_persistence._decision_payload(choice, "pending")
-        },
+        summary={"decision": comparison_store._decision_payload(choice, "pending")},
     )
     comparison.save_comparison(pending)
     comparison.save_choice(choice, choice_file)
@@ -189,9 +240,7 @@ def test_choice_is_committed_only_after_finalized_run(tmp_path: Path) -> None:
 
     finalized = replace(
         result,
-        summary={
-            "decision": comparison_persistence._decision_payload(choice, "finalized")
-        },
+        summary={"decision": comparison_store._decision_payload(choice, "finalized")},
     )
     comparison.save_comparison(finalized)
     assert comparison.choice_is_committed(reopened)
@@ -211,9 +260,7 @@ def test_pending_run_without_choice_is_uncommitted(tmp_path: Path) -> None:
     comparison.save_comparison(
         replace(
             result,
-            summary={
-                "decision": comparison_persistence._decision_payload(choice, "pending")
-            },
+            summary={"decision": comparison_store._decision_payload(choice, "pending")},
         )
     )
 
@@ -266,7 +313,7 @@ def test_choice_write_failure_rolls_back_run_and_previous_choice(
     def fail_choice(_value: comparison.SavedChoice, _path: Path | None = None) -> Path:
         raise comparison.ComparisonPersistenceError("denied")
 
-    monkeypatch.setattr(comparison_persistence, "save_choice", fail_choice)
+    monkeypatch.setattr(comparison_store, "save_choice", fail_choice)
     with pytest.raises(comparison.ComparisonPersistenceError):
         comparison.commit_choice(
             result,
@@ -290,7 +337,7 @@ def test_finalized_run_failure_rolls_back_choice(
     result = _completed_result(tmp_path)
     choice_file = tmp_path / "choice.json"
     choice_file.write_text("previous")
-    original = comparison_persistence.save_comparison
+    original = comparison_store.save_comparison
     calls = 0
 
     def fail_final(
@@ -302,7 +349,7 @@ def test_finalized_run_failure_rolls_back_choice(
             raise comparison.ComparisonPersistenceError("denied")
         return original(value, path)
 
-    monkeypatch.setattr(comparison_persistence, "save_comparison", fail_final)
+    monkeypatch.setattr(comparison_store, "save_comparison", fail_final)
     with pytest.raises(comparison.ComparisonPersistenceError):
         comparison.commit_choice(
             result,

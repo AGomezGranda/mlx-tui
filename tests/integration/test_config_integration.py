@@ -12,7 +12,7 @@ import pytest
 from textual.widgets import Input
 
 from mlx_tui.app import MlxTuiApp
-from mlx_tui.chat_pane import ChatInput
+from mlx_tui.chat_ui.widgets import ChatInput
 from tests.conftest import AppHarness
 
 
@@ -24,7 +24,7 @@ async def test_preset_cycle_drives_params_and_system(  # noqa: PLR0915
     from textual.widgets import Input as _Input  # noqa: PLC0415
     from textual.widgets import TabbedContent  # noqa: PLC0415
 
-    from mlx_tui.chat_pane import ChatPane  # noqa: PLC0415
+    from mlx_tui.chat_ui.pane import ChatPane  # noqa: PLC0415
     from mlx_tui.presets import load_presets  # noqa: PLC0415
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
@@ -92,8 +92,7 @@ async def test_config_reload_clears_removed_system_prompt(
     from contextlib import nullcontext  # noqa: PLC0415
     from dataclasses import replace  # noqa: PLC0415
 
-    import mlx_tui.app as app_mod  # noqa: PLC0415
-    from mlx_tui.chat_pane import ChatPane  # noqa: PLC0415
+    from mlx_tui.chat_ui.pane import ChatPane  # noqa: PLC0415
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     config_file = tmp_path / "mlx-tui" / "config.toml"
@@ -109,7 +108,7 @@ async def test_config_reload_clears_removed_system_prompt(
         config_file.write_text("max_tokens = 256\n")
         return SimpleNamespace(returncode=0)
 
-    monkeypatch.setattr(app_mod.subprocess, "run", fake_editor)
+    monkeypatch.setattr(subprocess, "run", fake_editor)
     harness.app.action_edit_config()
     await harness.pilot.pause()
 
@@ -155,7 +154,7 @@ def _stub_editor(
     raise_oserror: bool = False,
 ) -> tuple[Path, dict[str, object], list[bool], list[bool]]:
     path = tmp_path / "mlx-tui.toml"
-    monkeypatch.setattr("mlx_tui.app.config_path", lambda: path)
+    monkeypatch.setattr("mlx_tui.app.ui.config_path", lambda: path)
     monkeypatch.setenv("EDITOR", "fake-editor")
     ran: dict[str, object] = {}
     entered: list[bool] = []
@@ -227,15 +226,13 @@ async def test_edit_config_editor_oserror_keeps_config(
 async def test_edit_config_template_oserror_keeps_config(
     harness: AppHarness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    import mlx_tui.app as app_mod  # noqa: PLC0415
-
     path, ran, entered, exited = _stub_editor(harness, monkeypatch, tmp_path)
     assert not path.exists()
 
     def fail_template(_path: Path) -> None:
         raise PermissionError("read-only config directory")
 
-    monkeypatch.setattr(app_mod, "write_template", fail_template)
+    monkeypatch.setattr("mlx_tui.app.ui.write_template", fail_template)
     harness.app.action_edit_config()
     await harness.pilot.pause()
 

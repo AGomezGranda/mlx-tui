@@ -12,11 +12,21 @@ from pathlib import Path
 import pytest
 from textual.widgets import Input
 
-from mlx_tui import sessions as S
+import mlx_tui.sessions.store as sessions_store
 from mlx_tui.app import MlxTuiApp
-from mlx_tui.chat_pane import ChatInput
 from mlx_tui.chat_turn import render_session_turn
+from mlx_tui.chat_ui.widgets import ChatInput
 from mlx_tui.config import AppConfig
+from mlx_tui.sessions.codec import encode_session
+from mlx_tui.sessions.errors import SessionPersistenceError
+from mlx_tui.sessions.models import ChatSession, RequestSettings, SessionTurn
+from mlx_tui.sessions.queries import request_messages
+from mlx_tui.sessions.store import (
+    delete_session,
+    load_session,
+    save_session,
+    session_dir,
+)
 from tests.conftest import AppHarness
 
 
@@ -114,7 +124,7 @@ async def test_interrupted_recovery_restores_draft_and_excludes_context(
     monkeypatch.setenv("XDG_STATE_HOME", str(shared))
     server = stub_server_factory("ok")
 
-    def _settings(**overrides: object) -> S.RequestSettings:
+    def _settings(**overrides: object) -> RequestSettings:
         base: dict[str, object] = {
             "model": server.model_id,
             "repo_id": None,
@@ -126,9 +136,9 @@ async def test_interrupted_recovery_restores_draft_and_excludes_context(
             "max_ctx": 8192,
         }
         base.update(overrides)
-        return S.RequestSettings(**base)  # type: ignore[arg-type]
+        return RequestSettings(**base)  # type: ignore[arg-type]
 
-    running = S.SessionTurn(
+    running = SessionTurn(
         turn_id=str(uuid.uuid4()),
         created_at="2030-01-01T00:00:00Z",
         original_draft="interrupted draft",
@@ -137,7 +147,7 @@ async def test_interrupted_recovery_restores_draft_and_excludes_context(
         answer="partial output",
         outcome="running",
     )
-    session = S.ChatSession(
+    session = ChatSession(
         session_id=str(uuid.uuid4()),
         created_at="2030-01-01T00:00:00Z",
         updated_at="2030-01-01T00:00:01Z",
@@ -145,7 +155,7 @@ async def test_interrupted_recovery_restores_draft_and_excludes_context(
         draft="",
         attempts=(running,),
     )
-    target = S.save_session(session)
+    target = save_session(session)
     assert target.exists()
     app = MlxTuiApp(
         host="127.0.0.1",
@@ -157,7 +167,7 @@ async def test_interrupted_recovery_restores_draft_and_excludes_context(
         pane = harness.chat_pane()
         assert await pane.open_session(session.session_id)
         assert pane._session is not None
-        assert S.request_messages(pane._session) == []
+        assert request_messages(pane._session) == []
         assert pane._session.attempts[0].outcome == "interrupted"
         await pilot.pause()
         assert any("Interrupted" in line for line in harness.log_lines())
@@ -179,7 +189,7 @@ async def test_draft_autosave_and_restart_without_sending(
         or True
     )
     session_id = _session_id(pane)
-    path = S.session_dir() / f"{session_id}.json"
+    path = session_dir() / f"{session_id}.json"
     assert json.loads(path.read_text(encoding="utf-8"))["draft"] == "unsent draft ✎"
 
 
@@ -233,10 +243,10 @@ async def test_save_failure_before_http_sends_no_request(
     except Exception:
         pass
 
-    def _boom(session: S.ChatSession) -> Path:
-        raise S.SessionPersistenceError("injected save failure")
+    def _boom(session: ChatSession) -> Path:
+        raise SessionPersistenceError("injected save failure")
 
-    monkeypatch.setattr(S, "save_session", _boom)
+    monkeypatch.setattr(sessions_store, "save_session", _boom)
     n_before = len([r for r in harness.server.requests if "messages" in r])
     inp = harness.app.query_one("#chat-input", ChatInput)
     # Submit synchronously to deterministically race the 250 ms debounce:
@@ -261,12 +271,12 @@ async def test_save_failure_after_completion_blocks_until_retry(
     pane = harness.chat_pane()
     await _send_and_wait(harness, "first ok")
     assert len(pane.messages) == 2
-    real_save = S.save_session
+    real_save = save_session
 
-    def _fail_once(session: S.ChatSession) -> Path:
-        raise S.SessionPersistenceError("injected terminal failure")
+    def _fail_once(session: ChatSession) -> Path:
+        raise SessionPersistenceError("injected terminal failure")
 
-    monkeypatch.setattr(S, "save_session", _fail_once)
+    monkeypatch.setattr(sessions_store, "save_session", _fail_once)
     # Trigger a terminal checkpoint via a failing turn: point at a dead port.
     monkeypatch.setattr(harness.app, "port", 1)
     inp = harness.app.query_one("#chat-input", ChatInput)
@@ -289,7 +299,7 @@ async def test_save_failure_after_completion_blocks_until_retry(
         or pane.save_failed
     )
     # Retry save performs no HTTP request.
-    monkeypatch.setattr(S, "save_session", real_save)
+    monkeypatch.setattr(sessions_store, "save_session", real_save)
     n_before = len([r for r in harness.server.requests if "messages" in r])
     assert await pane._retry_save()
     n_after = len([r for r in harness.server.requests if "messages" in r])
@@ -302,10 +312,10 @@ async def test_retry_save_and_explicit_discard_quit_paths(
 ) -> None:
     pane = harness.chat_pane()
 
-    def _boom(session: S.ChatSession) -> Path:
-        raise S.SessionPersistenceError("nope")
+    def _boom(session: ChatSession) -> Path:
+        raise SessionPersistenceError("nope")
 
-    monkeypatch.setattr(S, "save_session", _boom)
+    monkeypatch.setattr(sessions_store, "save_session", _boom)
     pane._save_failed = True
     pane._update_action_visibility()
     # Every blocked-action branch after save failure.
@@ -339,7 +349,7 @@ async def test_settings_mismatch_blocks_send_until_choice(
     await _send_and_wait(harness, "baseline")
     assert len(pane.messages) == 2
     saved = pane.capture_request_settings()
-    different = S.RequestSettings(
+    different = RequestSettings(
         model="other-model",
         repo_id=saved.repo_id,
         revision=saved.revision,
@@ -373,8 +383,8 @@ async def test_locked_corrupt_session_access_and_picker_listing(
     monkeypatch.setenv("XDG_STATE_HOME", str(shared))
     server = stub_server_factory("ok")
 
-    def _settings() -> S.RequestSettings:
-        return S.RequestSettings(
+    def _settings() -> RequestSettings:
+        return RequestSettings(
             model=server.model_id,
             repo_id=None,
             revision=None,
@@ -385,7 +395,7 @@ async def test_locked_corrupt_session_access_and_picker_listing(
             max_ctx=8192,
         )
 
-    good = S.ChatSession(
+    good = ChatSession(
         session_id=str(uuid.uuid4()),
         created_at="2030-01-01T00:00:00Z",
         updated_at="2030-01-01T00:00:02Z",
@@ -393,15 +403,15 @@ async def test_locked_corrupt_session_access_and_picker_listing(
         draft="hello",
         attempts=(),
     )
-    good_path = S.save_session(good)
+    good_path = save_session(good)
     bad_id = str(uuid.uuid4())
-    bad_path = S.session_dir() / f"{bad_id}.json"
+    bad_path = session_dir() / f"{bad_id}.json"
     bad_path.write_bytes(b"{not json")
     newer_id = str(uuid.uuid4())
-    newer_doc = json.loads(S.encode_session(good))
+    newer_doc = json.loads(encode_session(good))
     newer_doc["schema_version"] = 3
     newer_doc["session_id"] = newer_id
-    newer_path = S.session_dir() / f"{newer_id}.json"
+    newer_path = session_dir() / f"{newer_id}.json"
     newer_path.write_text(json.dumps(newer_doc), encoding="utf-8")
 
     app1 = MlxTuiApp(
@@ -425,12 +435,12 @@ async def test_locked_corrupt_session_access_and_picker_listing(
             assert await pane2.open_session(good.session_id)
             assert pane2._read_only
             # Corrupt/newer entries stay available for explicit deletion.
-            with pytest.raises(S.SessionPersistenceError):
-                S.load_session(bad_path)
-            with pytest.raises(S.SessionPersistenceError, match="unsupported"):
-                S.load_session(newer_path)
+            with pytest.raises(SessionPersistenceError):
+                load_session(bad_path)
+            with pytest.raises(SessionPersistenceError, match="unsupported"):
+                load_session(newer_path)
             assert bad_path.read_bytes() == b"{not json"
-            S.delete_session(bad_id)
+            delete_session(bad_id)
             assert not bad_path.exists()
             assert good_path.exists()
 
@@ -455,14 +465,14 @@ async def test_clear_delete_and_temporary_leave_no_content(
     # Neither action clears comparison results or Metrics.
     assert len(harness.app.history.all_records()) >= history_before
     # Temporary mode leaves no content checkpoints on disk.
-    before_files = set(S.session_dir().glob("*.json"))
+    before_files = set(session_dir().glob("*.json"))
     pane._new_temp_pressed()
     assert pane.is_temporary
     inp = harness.app.query_one("#chat-input", ChatInput)
     inp.text = "temp draft"
     await asyncio.sleep(0.4)
     await _send_and_wait(harness, "temp send")
-    after_files = set(S.session_dir().glob("*.json"))
+    after_files = set(session_dir().glob("*.json"))
     assert after_files == before_files, "temporary sessions must never write"
 
 
@@ -501,7 +511,7 @@ async def test_pane_revision_barrier_and_dir_sync_failure(
     assert ok is False
     assert pane.save_failed
     session_id = _session_id(pane)
-    target = S.session_dir() / f"{session_id}.json"
+    target = session_dir() / f"{session_id}.json"
     assert (
         json.loads(target.read_text(encoding="utf-8"))["draft"] == "unconfirmed draft"
     )

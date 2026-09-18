@@ -13,6 +13,10 @@ from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static, TextArea
 
+_COPIED_OSC52_NOTE = (
+    "Copied (terminal clipboard support varies — macOS Terminal may not support OSC 52)"
+)
+
 
 def copy_text_to_system(text: str) -> tuple[bool, str]:
     """Copy text without temp files; macOS uses argv-only pbcopy.
@@ -37,10 +41,7 @@ def copy_text_to_system(text: str) -> tuple[bool, str]:
             return False, f"copy failed: pbcopy exited {proc.returncode}"
         return True, "Copied to clipboard"
     # Elsewhere rely on the installed Textual clipboard (OSC 52) and label limits.
-    return True, (
-        "Copied (terminal clipboard support varies — "
-        "macOS Terminal may not support OSC 52)"
-    )
+    return True, _COPIED_OSC52_NOTE
 
 
 class TextPreviewScreen(ModalScreen[None]):
@@ -105,10 +106,7 @@ class TextPreviewScreen(ModalScreen[None]):
         except Exception as exc:  # noqa: BLE001
             self._set_status(f"copy failed: {exc.__class__.__name__}", "red")
             return
-        self._set_status(
-            "Copied (terminal clipboard support varies — "
-            "macOS Terminal may not support OSC 52)"
-        )
+        self._set_status(_COPIED_OSC52_NOTE)
 
     @on(Button.Pressed, "#btn-copy-all")
     def _copy_all(self) -> None:

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from mlx_tui.chat_pane import ChatInput
+from mlx_tui.chat_ui.widgets import ChatInput
 from mlx_tui.confirm import ConfirmScreen
 from mlx_tui.models import CacheNotFound, ModelRow
 from mlx_tui.operations import OperationKind

@@ -19,7 +19,7 @@ from textual.pilot import Pilot
 from textual.widgets import RichLog, Static
 
 from mlx_tui.app import MlxTuiApp
-from mlx_tui.chat_pane import ChatPane
+from mlx_tui.chat_ui.pane import ChatPane
 from mlx_tui.config import AppConfig
 from mlx_tui.models_pane import ModelsPane
 from tests.builders import sse_frames

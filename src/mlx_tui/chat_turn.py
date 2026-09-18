@@ -11,7 +11,7 @@ from textual.containers import VerticalGroup
 from textual.widgets import Button, Static
 
 if TYPE_CHECKING:
-    from mlx_tui.sessions import SessionTurn
+    from mlx_tui.sessions.models import SessionTurn
 
 
 class ChatTurn(VerticalGroup):

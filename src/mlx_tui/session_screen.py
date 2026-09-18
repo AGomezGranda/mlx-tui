@@ -80,20 +80,30 @@ class SessionScreen(ModalScreen[str | None]):
 
     @work(exclusive=True, group="sessions-list", thread=True)
     def _load_rows(self, generation: int) -> None:
-        from mlx_tui import sessions as S  # noqa: PLC0415
+        from mlx_tui.sessions.errors import (  # noqa: PLC0415
+            SessionLockedError,
+            SessionPersistenceError,
+            SessionValidationError,
+        )
+        from mlx_tui.sessions.queries import session_label  # noqa: PLC0415
+        from mlx_tui.sessions.store import (  # noqa: PLC0415
+            list_sessions,
+            load_session,
+            lock_session,
+        )
 
         entries: list[SessionRow] = []
         try:
-            candidates = S.list_sessions()
-        except S.SessionPersistenceError as exc:
+            candidates = list_sessions()
+        except SessionPersistenceError as exc:
             self.app.call_from_thread(self._failed, generation, exc)
             return
         # Newest first by filename fallback; updated time after load.
         for path in candidates:
             session_id = path.stem
             try:
-                loaded = S.load_session(path)
-            except S.SessionPersistenceError as exc:
+                loaded = load_session(path)
+            except SessionPersistenceError as exc:
                 entries.append(
                     SessionRow(
                         path=path,
@@ -104,7 +114,7 @@ class SessionScreen(ModalScreen[str | None]):
                     )
                 )
                 continue
-            except S.SessionValidationError as exc:
+            except SessionValidationError as exc:
                 entries.append(
                     SessionRow(
                         path=path,
@@ -117,12 +127,12 @@ class SessionScreen(ModalScreen[str | None]):
                 continue
             locked = any(turn.outcome == "running" for turn in loaded.attempts)
             try:
-                with S.lock_session(loaded.session_id):
+                with lock_session(loaded.session_id):
                     pass
                 probe_locked = False
-            except S.SessionLockedError:
+            except SessionLockedError:
                 probe_locked = True
-            except S.SessionPersistenceError:
+            except SessionPersistenceError:
                 probe_locked = locked
             state = "locked read-only" if (locked or probe_locked) else "saved"
             if any(turn.outcome == "interrupted" for turn in loaded.attempts):
@@ -131,7 +141,7 @@ class SessionScreen(ModalScreen[str | None]):
                 SessionRow(
                     path=path,
                     session_id=loaded.session_id,
-                    label=S.session_label(loaded),
+                    label=session_label(loaded),
                     updated_at=loaded.updated_at,
                     state=state,
                 )
@@ -203,16 +213,21 @@ class SessionScreen(ModalScreen[str | None]):
 
     @work(exclusive=True, group="sessions-delete", thread=True)
     def _delete_row(self, session_id: str, generation: int) -> None:
-        from mlx_tui import sessions as S  # noqa: PLC0415
+        from mlx_tui.sessions.errors import (  # noqa: PLC0415
+            SessionLockedError,
+            SessionPersistenceError,
+            SessionValidationError,
+        )
+        from mlx_tui.sessions.store import delete_session  # noqa: PLC0415
 
         try:
-            S.delete_session(session_id)
-        except S.SessionLockedError:
+            delete_session(session_id)
+        except SessionLockedError:
             self.app.call_from_thread(
                 self._set_status, "session is locked — cannot delete", "yellow"
             )
             return
-        except (S.SessionPersistenceError, S.SessionValidationError) as exc:
+        except (SessionPersistenceError, SessionValidationError) as exc:
             self.app.call_from_thread(self._set_status, f"delete failed: {exc}", "red")
             return
         self.app.call_from_thread(self._refresh_after_delete, generation)

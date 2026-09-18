@@ -15,7 +15,7 @@ from mlx_tui.comparison_contracts import (
     JSONValue,
     TrialResult,
 )
-from mlx_tui.comparison_persistence import _json_value
+from mlx_tui.comparison_encoding import _json_value
 
 
 def _summary(result: ComparisonResult) -> dict[str, JSONValue]:

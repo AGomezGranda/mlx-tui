@@ -182,13 +182,16 @@ comparison, and `Ctrl+Q` quits.
 
 ## Evidence limits and state
 
-The comparison is a reproducible local experiment, not Milestone B
-qualification. Operator-entered evidence is a declaration. Unknown, expired,
+The comparison is a reproducible local experiment, not a general coding
+benchmark. Bundled profiles now have unknown evidence; comparisons,
+inspection, and explicit choices still work, but missing evidence keeps
+advantage conclusions inconclusive. Operator-entered evidence is a declaration. Unknown, expired,
 revoked, withdrawn, or unqualified evidence blocks an advantage label. The 5%
 latency threshold is a product heuristic, not a statistical confidence test.
 Memory remains inconclusive because process RSS is not per-profile residency.
 Older stored summaries are shown as recorded; the latency arithmetic fix does
-not silently recalculate historical JSON. Run a new comparison for a new
+not silently recalculate historical JSON. Saved results retain their original
+facts. Run a new comparison for a new
 summary.
 
 Result checkpoints live under:
@@ -200,9 +203,7 @@ $XDG_STATE_HOME/mlx-tui/comparisons/
 When `XDG_STATE_HOME` is unset, the default is
 `~/.local/state/mlx-tui/comparisons/`. The committed choice is the sibling
 `choice.json`. These are local JSON records; preserve a result file if it is
-needed for review or qualification evidence.
+needed for review.
 
 For implementation ownership and storage/transaction contracts, see
-[ARCHITECTURE.md](../ARCHITECTURE.md#pinned-profile-comparisons). For the
-qualification status and unmet live/product gates, see
-[Milestone B compatibility status](compatibility/milestone-b.md).
+[ARCHITECTURE.md](../ARCHITECTURE.md#pinned-profile-comparisons).

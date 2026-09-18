@@ -157,10 +157,9 @@ def test_cli_diagnostics_runs_before_config_or_app(
 ) -> None:
     seen: list[Path] = []
     monkeypatch.setattr(sys, "argv", ["mlx-tui", "--diagnostics", str(tmp_path / "x")])
-    monkeypatch.setattr(app_module, "write_diagnostics", seen.append)
+    monkeypatch.setattr("mlx_tui.app.cli.write_diagnostics", seen.append)
     monkeypatch.setattr(
-        app_module,
-        "load_config",
+        "mlx_tui.app.cli.load_config",
         lambda: pytest.fail("diagnostics should not load ordinary config"),
     )
 

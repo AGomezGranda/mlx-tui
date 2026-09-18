@@ -8,17 +8,17 @@ from types import SimpleNamespace
 import pytest
 from textual.widgets import Input, TabbedContent, TextArea
 
-from mlx_tui import chat_pane
+import mlx_tui.chat_ui.widgets as chat_widgets
 from mlx_tui.app import MlxTuiApp
 from mlx_tui.attachments import read_attachment, render_user_content
-from mlx_tui.chat_pane import ChatInput
+from mlx_tui.chat_ui.widgets import ChatInput
 from tests.conftest import AppHarness
 
 
 async def test_params_sidebar_sends_payload(harness: AppHarness) -> None:
     from textual.widgets import TabbedContent  # noqa: PLC0415
 
-    from mlx_tui.chat_pane import ChatPane  # noqa: PLC0415
+    from mlx_tui.chat_ui.pane import ChatPane  # noqa: PLC0415
 
     harness.app.query_one(TabbedContent).active = "chat"
     await harness.pilot.pause()
@@ -314,7 +314,7 @@ async def test_add_file_uses_native_macos_picker(
         calls.append((argv, kwargs))
         return SimpleNamespace(returncode=0, stdout=next(outputs))
 
-    monkeypatch.setattr(chat_pane.subprocess, "run", choose)
+    monkeypatch.setattr(chat_widgets.subprocess, "run", choose)
     harness.app.query_one(TabbedContent).active = "chat"
     await harness.pilot.pause()
     await harness.pilot.click("#btn-add-attachment")

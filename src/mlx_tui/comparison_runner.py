@@ -32,11 +32,8 @@ from mlx_tui.comparison_contracts import (
     _now_iso,
     parse_loopback_url,
 )
-from mlx_tui.comparison_persistence import (
-    _json_value,
-    comparison_dir,
-    save_comparison,
-)
+from mlx_tui.comparison_encoding import _json_value
+from mlx_tui.comparison_store import comparison_dir, save_comparison
 from mlx_tui.comparison_summary import _summary
 from mlx_tui.history.tokens import prepare_context
 from mlx_tui.models import verify_cached_assets

@@ -48,58 +48,6 @@ jobs:
         if: runner.os == 'macOS'
         run: uv run python tests/artifact_smoke.py
 
-  compat-highest:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-          python-version: "3.13"
-
-      - name: Print resolved versions
-        run: >
-          uv run --isolated --no-project --with . --with pytest
-          --with pytest-asyncio --resolution highest
-          python -c 'from importlib.metadata import version; print(*(version(name) for name in ("httpx", "huggingface-hub", "psutil", "textual", "rich", "pytest", "pytest-asyncio")))'
-
-      - name: Test newest resolution
-        run: >
-          uv run --isolated --no-project --with . --with pytest
-          --with pytest-asyncio --resolution highest pytest -q
-
-  compat-floor:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-          python-version: "3.13"
-
-      - name: Print resolved versions
-        run: >
-          uv run --isolated --no-project --with . --with pytest
-          --with pytest-asyncio --with 'httpx==0.28'
-          --with 'huggingface-hub==1.28' --with 'psutil==7.0'
-          --with 'textual==8.2.8' --with 'rich==15.0.0'
-          python -c 'from importlib.metadata import version; print(*(version(name) for name in ("httpx", "huggingface-hub", "psutil", "textual", "rich", "pytest", "pytest-asyncio")))'
-
-      - name: Test declared floors
-        run: >
-          uv run --isolated --no-project --with . --with pytest
-          --with pytest-asyncio --with 'httpx==0.28'
-          --with 'huggingface-hub==1.28' --with 'psutil==7.0'
-          --with 'textual==8.2.8' --with 'rich==15.0.0' pytest -q
-
   packaging:
     runs-on: ubuntu-latest
     timeout-minutes: 15

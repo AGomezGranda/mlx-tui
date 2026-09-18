@@ -6,7 +6,7 @@ import pytest
 from textual.widgets import Input
 
 from mlx_tui.app import MlxTuiApp
-from mlx_tui.chat_pane import ChatInput
+from mlx_tui.chat_ui.widgets import ChatInput
 from mlx_tui.models import ModelRow
 from mlx_tui.operations import OperationKind
 from tests.conftest import AppHarness
@@ -399,7 +399,7 @@ async def test_cleanup_respects_navigation_and_focus(  # noqa: PLR0915
             stream_complete=True,
         )
 
-    monkeypatch.setattr("mlx_tui.chat_pane.stream_turn", stream)
+    monkeypatch.setattr("mlx_tui.chat_ui.turns.stream_turn", stream)
     tabs = harness.app.query_one(TabbedContent)
     tabs.active = "chat"
     await harness.pilot.pause()
@@ -460,7 +460,7 @@ async def test_unmounted_cleanup_releases_lease(
         await asyncio.sleep(30)
         raise AssertionError("expected cancellation")
 
-    monkeypatch.setattr("mlx_tui.chat_pane.stream_turn", stream)
+    monkeypatch.setattr("mlx_tui.chat_ui.turns.stream_turn", stream)
     pane = harness.chat_pane()
     inp = pane.query_one("#chat-input", ChatInput)
     pane._on_input_submitted(ChatInput.Submitted(inp, "unmount"))

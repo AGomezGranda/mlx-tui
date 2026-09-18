@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from textual.widgets import Input, TabbedContent
 
-from mlx_tui.chat_pane import ChatInput
+from mlx_tui.chat_ui.widgets import ChatInput
 from mlx_tui.config import AppConfig
 from mlx_tui.params import ParamsPane
 from tests.conftest import AppHarness

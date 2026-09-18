@@ -4,17 +4,18 @@ One-screen TUI control plane for a local MLX server (`mlx_lm.server` / `mlx_vlm.
 
 A collapsed Activity disclosure keeps server output, download progress and notices available with `F2`. Its summary retains the last unseen error or warning until opened; incoming events do not steal focus. A one-row Footer shows contextual keyboard actions. The TUI talks to the server over plain local HTTP (`http://host:port` with no TLS, API key, or reverse-proxy base-path configuration).
 
-The current Milestone F candidate is `mlx-tui` 0.3.0. It is packaging-tested
-only; managed-runtime support remains limited to the explicitly pinned and
-qualified matrix recorded in the [Milestone F support record](docs/compatibility/milestone-f.md).
+For detailed installation see the [activation guide](docs/activation.md), for
+the comparison workflow see the [comparison guide](docs/comparison.md), and
+for pointing other local clients at the server see the [client
+guide](docs/clients.md).
 
 ## Features
 
 **Status bar (always visible)** — state word plus color (Ready/Unexpected/Offline/Unknown), selected request target, last response evidence with request-scoped generation state, sampled process RSS in GiB and available/total GiB, port. Catalogue entries never imply residency; RSS is process memory, not model-exclusive. When the server is down and a start command is configured it hints `ctrl+s to start`.
 
-**Models tab** — every model in your HF cache with a name-derived quantization hint, size on disk in GiB, explicit `runtime fit: unknown`, and a selected marker for the request target. Pinned coding candidates show their dated evidence; direct repository/path selection remains unqualified. Load/swap with `enter`, delete with `d`, search `mlx-community` with `/` — all without leaving the terminal.
+**Models tab** — every model in your HF cache with a name-derived quantization hint, size on disk in GiB, explicit `runtime fit: unknown`, and a selected marker for the request target. Pinned coding candidates remain available, bundled qualification evidence is absent; direct repository/path selection remains unqualified. Load/swap with `enter`, delete with `d`, search `mlx-community` with `/` — all without leaving the terminal.
 
-**Compare tab** — set up two pinned coding profiles, check readiness, run the fixed `coding-check-v1` experiment, inspect evidence, and explicitly keep or reuse a choice. See the [comparison guide](docs/comparison.md). The workflow is local and stub-testable; it does not establish general coding ability or live Milestone B qualification.
+**Compare tab** — set up two pinned coding profiles, check readiness, run the fixed `coding-check-v1` experiment, inspect evidence, and explicitly keep or reuse a choice. See the [comparison guide](docs/comparison.md). The workflow is local and stub-testable; it does not establish general coding ability.
 
 **Chat tab** — streaming answers grow below their prompts in one scrollable transcript and stay in place at completion. Scroll up to read earlier output; reaching the bottom resumes following. The composer stays anchored. Each turn is stamped with prompt/output tokens, first-output/answer/total latency and client request tok/s (completion tokens over full request time, not engine decode speed); client-estimated counts carry `~`, unknowns show `—`. Reasoning renders separately, tool data stays unexecuted, and length-capped/damaged/tool-only/empty outcomes display without entering future history. `esc` requests client-side cancellation of an in-flight turn; engine state stays unknown.
 
@@ -26,7 +27,7 @@ qualified matrix recorded in the [Milestone F support record](docs/compatibility
 
 * Python 3.13.1 (`.python-version`) — `uv` manages the toolchain
 * [uv](https://docs.astral.sh/uv/) 0.12.7 for the pinned managed runtime
-* Managed qualification target: Darwin arm64, macOS 26.6.2, Python 3.13.1 and uv 0.12.7; the 0.3.0 candidate has not established newer-OS support
+* Managed mode enforces Darwin arm64, macOS 26.6.2, Python 3.13.1 and uv 0.12.7; anything else is rejected
 * An MLX server for real use (optional for dev — tests use an ephemeral stub)
 
 The managed runtime is installed separately from the TUI and requires Git to
@@ -50,20 +51,13 @@ uv run mlx-tui --host 127.0.0.1 --port 8080
 uv run mlx-tui --help
 ```
 
-To install the versioned TUI wheel outside a checkout, verify the delivered
-SHA-256 first, then run:
+To install a versioned TUI wheel outside a checkout:
 
 ```sh
-shasum -a 256 mlx_tui-0.3.0-py3-none-any.whl
-uv tool install --python 3.13.1 /absolute/path/to/mlx_tui-0.3.0-py3-none-any.whl
+uv tool install --python 3.13.1 /absolute/path/to/mlx_tui-<version>-py3-none-any.whl
 mlx-tui --help
 mlx-tui --version
 ```
-
-Compare the SHA-256 with the retained artifact record in
-`docs/compatibility/milestone-f.md` before installation. This is a manual
-candidate installation; it does not establish managed runtime or release
-support.
 
 TUI installation time, managed-runtime installation time, and model download
 time are separate measurements. Installing the wheel does not download MLX or
@@ -91,32 +85,7 @@ package URLs, logs, prompts, drafts, answers, reasoning, tool data,
 attachments, titles, comparisons and exception details. Review the file
 locally, share it only after that review, then delete it when no longer needed.
 The export refuses overwrite and symlink targets and is written with private
-permissions; it is not a readiness or release qualification report.
-
-## Final installed qualification
-
-The retained wheel has an opt-in real-runtime contract. Copy
-`tests/runtime/test_milestone_f.py` outside the checkout, install the candidate
-wheel into an isolated environment, and run it from an isolated working
-directory with `PYTHONPATH` unset:
-
-```sh
-MLX_TUI_F_QUALIFY=1 \
-MLX_TUI_F_ARTIFACT=/absolute/candidate/mlx_tui-0.3.0-py3-none-any.whl \
-MLX_TUI_F_ARTIFACT_SHA256=<lowercase-sha256> \
-MLX_TUI_F_RUNTIME_ROOT=/absolute/test-owned/runtime \
-MLX_TUI_F_MODEL_PATH=/absolute/pinned/hf/snapshot \
-MLX_TUI_F_MACHINE_TIER=local-m4-16gib \
-MLX_TUI_F_OUTPUT=/absolute/fresh/evidence \
-  /absolute/candidate-python -m pytest -q /absolute/copied/test_milestone_f.py
-```
-
-The contract verifies the installed distribution identity, pinned
-runtime/profile, managed child ownership, chat/cancel/recovery, saved session
-attachments, and before-start/idle/during-generation cleanup. It never installs
-packages or downloads models. A skipped contract is not evidence; missing or
-invalid opt-in inputs fail. The output contains only allowlisted identities,
-versions, timings, process identity and cleanup outcomes.
+permissions; it is not a readiness report.
 
 No server yet and `start_cmd` configured? A red dot shows `ctrl+s to start` — see [Configuration](#configuration).
 
@@ -132,6 +101,7 @@ No server yet and `start_cmd` configured? A red dot shows `ctrl+s to start` — 
 | `tab` | Chat composer | Move focus; paste never submits |
 | `enter` | Params field | Normalize the value without sending |
 | `F2` | Main shell | Expand/collapse Activity without leaving the current control |
+| `F3` | Main shell | Show the endpoint preview (URLs, models, request shapes) |
 | `ctrl+s` | Any (red dot + `start_cmd`) | Cold start the server; output streams into Activity |
 | `ctrl+g` | Any | Open `~/.config/mlx-tui/config.toml` in `$EDITOR`, reload on save |
 | `ctrl+n` | Any | Cycle presets forward |
@@ -199,19 +169,10 @@ Failure, context rejection, or cancellation restores the original draft, includi
 
 **Attachments** — explicitly selected regular UTF-8 text files are captured as immutable snapshots, each up to 256 KiB, with a 1 MiB aggregate limit enforced independently for the draft and every saved attempt. The snapshot retains the selected/resolved paths, exact bytes, length and SHA-256, so later source edits or deletion do not change preview, retry or restored requests; re-adding a changed file creates a new snapshot. On macOS, Add file… opens the native file chooser. Preview shows the destination, estimated input/reserved output, excluded message count and the exact retained messages/file blocks. Estimates are character-based and do not claim tokenizer or model-limit accuracy. Attachments are sent only to loopback destinations; temporary-session snapshots stay in memory, Clear/Delete removes draft snapshots, and earlier attempt snapshots remain part of the transcript record.
 
-The shipped Milestone D subset is sessions, multiline/copy/retry, and selected
-text-file snapshots. Its [evidence record](docs/compatibility/milestone-d.md)
-keeps product acceptance deferred until consented repeat-use and real-runtime
-recovery observations exist; automated checks are not adoption evidence.
-
-External clients are qualification only; shared serving is blocked. The
-[client guide](docs/clients.md) defines the unenforceable wrong-target and
-lifecycle gate on stock upstream `74e7cf9`, and the
-[Milestone E evidence record](docs/compatibility/milestone-e.md) retains the
-implemented-but-unrun HTTP/OpenCode qualification suite plus the missing
-tool, cancellation, and reuse facts.
-A completed implementation plan substitutes for none of the full E gate:
-enforcement plus repeated workloads plus observed target-user reuse.
+Pointing another local client at the same server is unqualified local use.
+See the [client guide](docs/clients.md): there is no cross-client
+coordination, an external client may change the server target, and managed
+shutdown stops only its owned child.
 
 Escape during chat shows “cancellation requested” until the HTTPX request has cleaned up. This is a client-side cancellation and does not claim that the server stopped generating. Download Escape follows the same honest model: the modal remains open until the Hub worker acknowledges cancellation, then it rescans completed cache content and closes.
 
@@ -258,7 +219,7 @@ uv run pytest -q
 * Local MLX only by design — one cache layout, one memory model, plain HTTP to `host:port` with no TLS, API key, or base-path support; remote/secure servers are not supported. A non-loopback host is best-effort unauthenticated HTTP, not a secure remote-server feature.
 * No quantization runner, no multi-backend abstraction, no server-log tailing; conversation persistence is local single-file snapshots only (no sync, search or branching).
 * Presets are file + `$EDITOR` only — no management UI.
-* Compatibility evidence: [docs/compatibility/milestone-a.md](docs/compatibility/milestone-a.md) pins MLX-LM `74e7cf9` with Qwen3-1.7B-4bit on `local-m4-16gib`. Unit/integration tests use an HTTP stub and cannot prove real-server behavior; real-server contracts in `tests/runtime` are opt-in and skip without `MLX_TUI_CONTRACT_URL`/`MLX_TUI_CONTRACT_MODEL`.
+* Automated behavior coverage uses the local HTTP stub, supplemented by installed-package smoke checks. The stub cannot prove real-server behavior.
 
 ## Architecture
 

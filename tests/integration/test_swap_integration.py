@@ -9,7 +9,7 @@ import pytest
 
 from mlx_tui import serverctl
 from mlx_tui.app import MlxTuiApp
-from mlx_tui.chat_pane import ChatInput
+from mlx_tui.chat_ui.widgets import ChatInput
 from mlx_tui.config import AppConfig
 from mlx_tui.models import ModelRow
 from mlx_tui.operations import OperationKind

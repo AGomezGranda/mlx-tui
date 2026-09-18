@@ -28,24 +28,24 @@ from mlx_tui.comparison_contracts import (
     TrialState,
     parse_loopback_url,
 )
-from mlx_tui.comparison_persistence import (
-    choice_is_committed,
-    choice_path,
-    commit_choice,
-    comparison_dir,
-    decode_comparison,
-    encode_comparison,
-    load_choice,
-    load_comparison,
-    save_choice,
-    save_comparison,
-)
+from mlx_tui.comparison_decoding import decode_comparison
+from mlx_tui.comparison_encoding import encode_comparison
 from mlx_tui.comparison_runner import (
     assert_coding_check_v1,
     coding_check_v1,
     coding_payload,
     run_comparison,
     verify_profile_snapshot,
+)
+from mlx_tui.comparison_store import (
+    choice_is_committed,
+    choice_path,
+    commit_choice,
+    comparison_dir,
+    load_choice,
+    load_comparison,
+    save_choice,
+    save_comparison,
 )
 
 __all__ = [

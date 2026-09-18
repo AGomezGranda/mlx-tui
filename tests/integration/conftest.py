@@ -23,10 +23,6 @@ async def stub_harness(
         _no_process,
     )
     monkeypatch.setattr(
-        "mlx_tui.app.process.find_server_process",
-        _no_process,
-    )
-    monkeypatch.setattr(
         "mlx_tui.process.find_server_process",
         _no_process,
     )

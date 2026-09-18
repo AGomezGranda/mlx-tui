@@ -19,7 +19,8 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Static, TabbedContent
 
 from mlx_tui.config import config_path, create_config
-from mlx_tui.managed import COMPLETION_MARKER, install_runtime, runtime_root
+from mlx_tui.managed.install import install_runtime
+from mlx_tui.managed.paths import COMPLETION_MARKER, runtime_root
 from mlx_tui.models import resolve_cached_snapshot, verify_cached_assets
 from mlx_tui.operations import OperationKind
 from mlx_tui.search_screen import SearchScreen

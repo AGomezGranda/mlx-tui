@@ -22,8 +22,8 @@ from textual.widgets._data_table import Coordinate
 
 from mlx_tui import comparison
 from mlx_tui.app import MlxTuiApp
-from mlx_tui.chat_pane import ChatInput
-from mlx_tui.compare_pane import ComparePane
+from mlx_tui.chat_ui.widgets import ChatInput
+from mlx_tui.compare.pane import ComparePane
 from mlx_tui.comparison_summary import _summary
 from mlx_tui.config import AppConfig
 from mlx_tui.operations import OperationKind
@@ -78,12 +78,12 @@ def _stub_comparison_preflight(
     def same_identity(_host: str, _port: int) -> ProcessIdentity:
         return identity
 
-    monkeypatch.setattr("mlx_tui.compare_pane.resolve_cached_snapshot", resolve)
-    monkeypatch.setattr("mlx_tui.app.resolve_cached_snapshot", resolve)
-    monkeypatch.setattr("mlx_tui.compare_pane.verify_profile_snapshot", verify)
-    monkeypatch.setattr("mlx_tui.app.verify_profile_snapshot", verify)
+    monkeypatch.setattr("mlx_tui.compare.workflow.resolve_cached_snapshot", resolve)
+    monkeypatch.setattr("mlx_tui.app.state.resolve_cached_snapshot", resolve)
+    monkeypatch.setattr("mlx_tui.compare.workflow.verify_profile_snapshot", verify)
+    monkeypatch.setattr("mlx_tui.app.state.verify_profile_snapshot", verify)
     monkeypatch.setattr(
-        "mlx_tui.compare_pane.process.find_server_process",
+        "mlx_tui.compare.workflow.process.find_server_process",
         same_identity,
     )
 
@@ -105,7 +105,7 @@ async def test_compare_keep_and_next_chat_preserve_state_and_exact_settings(
         on_progress(result)
         return result
 
-    monkeypatch.setattr("mlx_tui.compare_pane.run_comparison", complete)
+    monkeypatch.setattr("mlx_tui.compare.workflow.run_comparison", complete)
     pane = harness.app.query_one(ComparePane)
     original_messages = [
         {"role": "user", "content": "old"},
@@ -193,7 +193,7 @@ async def test_comparison_owns_pair_and_suppresses_poll_until_one_cleanup_refres
         polls += 1
         return ServerProbe(state="green", model_id=None)
 
-    monkeypatch.setattr("mlx_tui.compare_pane.run_comparison", blocked)
+    monkeypatch.setattr("mlx_tui.compare.workflow.run_comparison", blocked)
     monkeypatch.setattr(harness.app, "_fetch_probe", fetch)
     pane._preflight()
     pane._start_comparison()
@@ -236,7 +236,7 @@ async def test_escape_cancels_comparison_after_checkpoint(
             comparison.save_comparison(cancelled)
             raise
 
-    monkeypatch.setattr("mlx_tui.compare_pane.run_comparison", blocked)
+    monkeypatch.setattr("mlx_tui.compare.workflow.run_comparison", blocked)
     pane._preflight()
     pane._start_comparison()
     await asyncio.wait_for(entered.wait(), timeout=2)
@@ -409,7 +409,7 @@ async def test_busy_guards_block_decisions_and_open(
         on_progress(completed)
         return completed
 
-    monkeypatch.setattr("mlx_tui.compare_pane.run_comparison", blocked)
+    monkeypatch.setattr("mlx_tui.compare.workflow.run_comparison", blocked)
     pane._preflight()
     pane._start_comparison()
     await asyncio.wait_for(entered.wait(), timeout=2)

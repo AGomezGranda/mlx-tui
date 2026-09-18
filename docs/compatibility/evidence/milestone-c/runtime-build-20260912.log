@@ -1,9 +1,0 @@
-Command: uv 0.12.7
-Source: https://github.com/ml-explore/mlx-lm.git@74e7cf931e84ef7c2f63e875adf414e20decc1c5
-Python: 3.13.1
-Unconstrained build probe result: mlx-lm==0.32.0
-Resolved isolated build backend: setuptools==84.0.0
-Constrained reconstruction result: mlx-lm==0.32.0
-Constraint: src/mlx_tui/managed-build-constraints.txt
-Models downloaded: no
-Inference run: no

@@ -10,7 +10,7 @@ import pytest
 
 from mlx_tui import serverctl
 from mlx_tui.app import MlxTuiApp
-from mlx_tui.chat_pane import ChatInput
+from mlx_tui.chat_ui.widgets import ChatInput
 from mlx_tui.config import AppConfig
 from mlx_tui.models import ModelRow
 from mlx_tui.models_pane import ModelsPane
@@ -140,10 +140,6 @@ async def test_cold_start_with_unhealthy_process_restarts_it(
     harness.server.mode = "html"
     await harness.app._poll()
     monkeypatch.setattr(
-        "mlx_tui.app.process.find_server_process",
-        _fake_process_4242,
-    )
-    monkeypatch.setattr(
         "mlx_tui.models_pane.process.find_server_process",
         _fake_process_4242,
     )
@@ -189,10 +185,6 @@ async def test_cold_start_with_process_but_no_stop_cmd_guides(
     harness = stub_harness
     harness.server.mode = "html"
     await harness.app._poll()
-    monkeypatch.setattr(
-        "mlx_tui.app.process.find_server_process",
-        _fake_process_4242,
-    )
     monkeypatch.setattr(
         "mlx_tui.models_pane.process.find_server_process",
         _fake_process_4242,

@@ -215,11 +215,9 @@ prepared window supplies preview, included-message IDs and send payload.
 Non-loopback destinations are rejected before POST. Character-based estimates
 are labelled as estimates and never imply tokenizer/model-limit guarantees.
 
-This is the shipped Milestone D subset: durable sessions,
-multiline/copy/retry, and selected text-file snapshots. The
-[Milestone D evidence record](docs/compatibility/milestone-d.md) separates
-implementation checks from product acceptance, which remains deferred pending
-consented repeat-use and named-Mac real-runtime recovery observations.
+Sessions, multiline/copy/retry, and selected text-file snapshots are the
+shipped persistence scope: durable local sessions, editable retry, and
+bounded attachment snapshots as described above.
 
 Each turn enters the per-model `HistoryStore` ring of 64 records with an
 explicit outcome. Complete turns with server usage show first output, answer
@@ -322,19 +320,21 @@ and `$EDITOR` workflow, not a second management subsystem.
 
 ```text
 src/mlx_tui/
-  app/__init__.py          # coordinator, polling, status, config edit, presets
+  app/                   # coordinator (app.py), state, polling, ops, ui, cli
   boot.py                  # UI-free boot execution and verified success boundary
   chat.py                  # async HTTPX stream and typed result
-  chat_pane.py             # chat UI, transcript, context, worker lifecycle
+  chat_ui/                 # chat UI, transcript, context, worker lifecycle
   chat_turn.py             # presentation-only persistent attempted turn
   coding_profiles.toml     # packaged pinned shortlist and dated evidence
   comparison.py            # stable facade for comparison modules
   comparison_contracts.py  # immutable comparison inputs/results/trials
-  comparison_persistence.py # JSON checkpoints and choice transaction
+  comparison_encoding.py   # comparison JSON rendering
+  comparison_decoding.py   # comparison strict validation
+  comparison_store.py      # comparison checkpoints and choice transaction
   comparison_summary.py    # pure evidence and conclusion summaries
   comparison_runner.py     # sequential twelve-slot execution
   comparison_presenter.py  # pure Textual result/progress builders
-  compare_pane.py          # Compare tab workflow and worker lifecycle
+  compare/                 # Compare tab workflow and worker lifecycle
   confirm.py               # delete confirmation modal
   history/                 # token bounds, turn/memory rings, sparklines
   metrics_pane.py          # metrics table and sparklines
@@ -347,11 +347,11 @@ src/mlx_tui/
   profiles.py              # strict profile/evidence parsing and fingerprints
   search.py                # UI-free Hub/search/download adapters
   search_screen.py         # search UI and acknowledged download lifecycle
-  sessions.py              # versioned local session records and atomic storage
+  sessions/                # versioned local session records and atomic storage
   attachments.py            # bounded UTF-8 file snapshots and prompt rendering
   session_screen.py        # explicit session picker without startup reads
   setup_screen.py          # keyboard-first managed/attach setup
-  managed.py               # pinned runtime inspection and owned child lifecycle
+  managed/                 # pinned runtime inspection and owned child lifecycle
   serverctl.py             # argv/shell commands, health, process groups
   sse.py                   # incremental SSE decoder and token helpers
   status.py                # endpoint probes and status formatting
@@ -368,17 +368,17 @@ uv run pytest -q
 uv run ruff check .
 uv run ruff format --check src tests
 uv run pyrefly check --min-severity warn
+uv run python tests/artifact_smoke.py
 ```
 
-CI runs those gates on Ubuntu and macOS 14, reports the macOS architecture,
-and runs isolated highest-resolution and declared-direct-floor suites. The
-packaging job builds a fresh wheel and sdist, checks license and entry-point
-metadata, rebuilds a wheel from the extracted sdist, and installs both wheels
-outside the checkout before running `mlx-tui --help` and an import-path check.
+CI runs the lint, format, type, and test gates on Ubuntu and macOS 14 with
+locked dependencies, plus a packaging job on Linux that runs the same smoke
+check. The smoke check builds a fresh wheel and sdist, checks license and
+entry-point metadata, rebuilds a wheel from the extracted sdist, and installs
+both wheels outside the checkout before running `mlx-tui --help`,
+`--version`, diagnostics, and an import-path check.
 
-Unit/integration gates use an HTTP stub and cannot prove real-server
-behavior. Real-server compatibility is pinned in
-[docs/compatibility/milestone-a.md](docs/compatibility/milestone-a.md)
-(MLX-LM `74e7cf9`, Qwen3-1.7B-4bit, `local-m4-16gib`) with opt-in contracts
-in `tests/runtime` that skip without `MLX_TUI_CONTRACT_URL` and
-`MLX_TUI_CONTRACT_MODEL`.
+Unit/integration gates use the local HTTP stub and cannot prove real-server
+behavior. Installed-package smoke checks (`uv run python
+tests/artifact_smoke.py`) exercise the built wheel and rebuilt sdist outside
+the checkout.

@@ -19,28 +19,6 @@ max_ctx = 8192
 seed = 7
 enable_thinking = false
 
-[[profiles.evidence]]
-owner = "Alvaro Gomez"
-source = "milestone-a"
-status = "qualified"
-revocation_reason = ""
-tested_at = "2026-09-08T18:00:00Z"
-expires_at = "2026-09-20T18:00:00Z"
-machine_tier = "local-m4-16gib"
-task_id = "milestone-a-coding-check"
-check_id = "coding-check-v1"
-prompt_sha256 = "4234429d3463214f4566b36f293df6f42bc5af44ea6a8f1c8410f38ca346b54a"
-runtime_freeze = "docs/compatibility/milestone-a-runtime.txt"
-profile_fingerprint = "a0225c0c42addbc9b061c7cffb7786b20b2685d38d192b8eb0423bcc20811303"
-result_references = [
-  "docs/compatibility/evidence/milestone-a/contract-v1-20260908T183324Z-480180d2/metadata.json",
-  "docs/compatibility/evidence/milestone-a/contract-v1-20260908T183324Z-480180d2/results.json",
-]
-result_hashes = [
-  "4a0736b91574daab76cb32e6b3e564a07618ecdedea02f1ed55e8b974d0b6509",
-  "54ef767f23773659eb6730e794eb85cb2795401f56312a27c65886e437b1598a",
-]
-
 [[profiles]]
 id = "qwen3.5-4b-baseline"
 name = "Qwen3.5 4B baseline"
@@ -59,19 +37,3 @@ max_tokens = 32
 max_ctx = 8192
 seed = 7
 enable_thinking = false
-
-[[profiles.evidence]]
-owner = "Alvaro Gomez"
-source = "milestone-b"
-status = "unqualified"
-revocation_reason = ""
-tested_at = "2026-09-09T00:00:00Z"
-expires_at = "2026-09-20T00:00:00Z"
-machine_tier = "local-m4-16gib"
-task_id = "milestone-b-coding-check"
-check_id = "coding-check-v1"
-prompt_sha256 = "4234429d3463214f4566b36f293df6f42bc5af44ea6a8f1c8410f38ca346b54a"
-runtime_freeze = "docs/compatibility/milestone-a-runtime.txt"
-profile_fingerprint = "58d3e27d947dbd1140e7324ab16dfd8f2ec6bb16b257173f3263de0b669d6a96"
-result_references = []
-result_hashes = []

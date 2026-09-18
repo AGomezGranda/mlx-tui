@@ -7,7 +7,7 @@ import time
 from textual.widgets import Static
 
 from mlx_tui.app import MlxTuiApp
-from mlx_tui.chat_pane import ChatInput
+from mlx_tui.chat_ui.widgets import ChatInput
 from mlx_tui.history.store import TurnRecord
 from mlx_tui.metrics_pane import MetricsPane
 from tests.conftest import AppHarness

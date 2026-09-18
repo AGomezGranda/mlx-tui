@@ -12,5 +12,7 @@ wheels/
 # Virtual environments
 .venv
 
+.runtime-evidence/
+
 .vscode
 .idea

@@ -10,7 +10,7 @@ from textual.css.query import NoMatches
 from textual.widgets import Collapsible, Input, Static
 
 from mlx_tui.app import MlxTuiApp
-from mlx_tui.chat_pane import ChatInput
+from mlx_tui.chat_ui.widgets import ChatInput
 from mlx_tui.config import AppConfig
 from mlx_tui.operations import OperationKind
 from mlx_tui.status import ServerProbe
@@ -362,7 +362,7 @@ async def test_chat_layout_bounds_and_resize(
         return None
 
     monkeypatch.setattr(ModelsPane, "rescan", no_rescan)
-    monkeypatch.setattr("mlx_tui.app.process.find_server_process", no_process)
+    monkeypatch.setattr("mlx_tui.process.find_server_process", no_process)
     harness.app.query_one(TabbedContent).active = "chat"
     params = harness.app.query_one(ParamsPane)
     other = (120, 40) if initial == (80, 24) else (80, 24)
@@ -459,8 +459,8 @@ async def test_compare_tab_ownership_and_candidate_isolation(
     from textual.css.query import NoMatches  # noqa: PLC0415
     from textual.widgets import Select, TabbedContent, TabPane  # noqa: PLC0415
 
-    from mlx_tui.chat_pane import ChatPane  # noqa: PLC0415
-    from mlx_tui.compare_pane import ComparePane  # noqa: PLC0415
+    from mlx_tui.chat_ui.pane import ChatPane  # noqa: PLC0415
+    from mlx_tui.compare.pane import ComparePane  # noqa: PLC0415
     from mlx_tui.metrics_pane import MetricsPane  # noqa: PLC0415
     from mlx_tui.models_pane import ModelsPane  # noqa: PLC0415
     from mlx_tui.params import ParamsPane  # noqa: PLC0415
@@ -593,7 +593,7 @@ async def test_compare_keyboard_journey_preserves_focus_and_draft(  # noqa: PLR0
     )
 
     from mlx_tui import comparison  # noqa: PLC0415
-    from mlx_tui.compare_pane import ComparePane  # noqa: PLC0415
+    from mlx_tui.compare.pane import ComparePane  # noqa: PLC0415
     from mlx_tui.comparison_summary import _summary  # noqa: PLC0415
     from mlx_tui.process import ProcessIdentity  # noqa: PLC0415
 
@@ -616,12 +616,12 @@ async def test_compare_keyboard_journey_preserves_focus_and_draft(  # noqa: PLR0
     def same_identity(_host: str, _port: int) -> ProcessIdentity:
         return identity
 
-    monkeypatch.setattr("mlx_tui.compare_pane.resolve_cached_snapshot", resolve)
-    monkeypatch.setattr("mlx_tui.app.resolve_cached_snapshot", resolve)
-    monkeypatch.setattr("mlx_tui.compare_pane.verify_profile_snapshot", verify)
-    monkeypatch.setattr("mlx_tui.app.verify_profile_snapshot", verify)
+    monkeypatch.setattr("mlx_tui.compare.workflow.resolve_cached_snapshot", resolve)
+    monkeypatch.setattr("mlx_tui.app.state.resolve_cached_snapshot", resolve)
+    monkeypatch.setattr("mlx_tui.compare.workflow.verify_profile_snapshot", verify)
+    monkeypatch.setattr("mlx_tui.app.state.verify_profile_snapshot", verify)
     monkeypatch.setattr(
-        "mlx_tui.compare_pane.process.find_server_process", same_identity
+        "mlx_tui.compare.workflow.process.find_server_process", same_identity
     )
 
     async def complete(
@@ -666,7 +666,7 @@ async def test_compare_keyboard_journey_preserves_focus_and_draft(  # noqa: PLR0
         on_progress(result)
         return result
 
-    monkeypatch.setattr("mlx_tui.compare_pane.run_comparison", complete)
+    monkeypatch.setattr("mlx_tui.compare.workflow.run_comparison", complete)
 
     await harness.pilot.resize_terminal(*size)
     await harness.pilot.pause()

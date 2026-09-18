@@ -139,7 +139,7 @@ class ComparisonInput:
     machine_tier: str = ""
     operator_conditions: dict[str, JSONValue] = field(default_factory=dict)
     profile_order: tuple[str, str] | None = None
-    task_id: str = "milestone-b-coding-check"
+    task_id: str = "coding-check-v1"
     check_id: str = "coding-check-v1"
     prompt: str = CODING_CHECK_PROMPT
     result_path: Path | None = None

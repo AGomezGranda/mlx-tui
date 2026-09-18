@@ -327,7 +327,7 @@ def _stub_main(
 ) -> dict[str, object]:
     seen: dict[str, object] = {}
     monkeypatch.setattr(sys, "argv", argv)
-    monkeypatch.setattr("mlx_tui.app.load_config", lambda: cfg)
+    monkeypatch.setattr("mlx_tui.app.cli.load_config", lambda: cfg)
 
     def fake_run(self: MlxTuiApp) -> None:
         seen["app"] = self
