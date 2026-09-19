@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from textual.css.query import NoMatches
 from textual.widgets import Collapsible, Input, Static
@@ -282,6 +283,54 @@ async def test_poll_connection_failure_stays_red_with_bounded_diagnostics(
     assert all("ConnectError" in line for line in lines)
     assert harness.app.operations.current is OperationKind.IDLE
     assert not harness.app.query_one("#chat-input", ChatInput).disabled
+
+
+async def test_restart_probe_disconnects_do_not_log_poll_failures(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def disconnect(_path: str) -> None:
+        raise httpx.RemoteProtocolError("server closed connection")
+
+    monkeypatch.setattr(harness.app._http, "get", disconnect)
+    assert harness.app.operations.try_acquire(OperationKind.RESTARTING)
+    try:
+        probe = await harness.app._fetch_probe()
+        await harness.app._poll()
+    finally:
+        harness.app.operations.release(OperationKind.RESTARTING)
+    assert probe.state == "red"
+    assert probe.catalogue_state == "red"
+    assert _poll_failed_lines(harness) == []
+
+    await harness.app._fetch_probe()
+    assert len(_poll_failed_lines(harness)) == 2
+    assert all("RemoteProtocolError" in line for line in _poll_failed_lines(harness))
+
+
+async def test_poll_started_before_restart_does_not_apply_stale_probe(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await harness.app._poll()
+    initial_state = harness.app.status_state
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_probe(_self: MlxTuiApp) -> ServerProbe:
+        entered.set()
+        await release.wait()
+        return ServerProbe("red", None, (), "red")
+
+    monkeypatch.setattr(MlxTuiApp, "_fetch_probe", delayed_probe)
+    task = asyncio.create_task(harness.app._poll())
+    await entered.wait()
+    assert harness.app.operations.try_acquire(OperationKind.RESTARTING)
+    release.set()
+    try:
+        await task
+    finally:
+        harness.app.operations.release(OperationKind.RESTARTING)
+    assert harness.app.status_state == initial_state
+    assert harness.app._poll_in_flight is False
 
 
 async def test_poll_unexpected_fault_keeps_state_and_logs_once(

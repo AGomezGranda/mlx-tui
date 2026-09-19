@@ -35,6 +35,55 @@ response = httpx.post(
 The preview also shows a generated curl recipe with a 30-second cap. Copying
 either example executes nothing by itself and carries no support claim.
 
+## OpenCode
+
+The configuration format differs between OpenCode releases. The legacy
+`provider`/`npm` format below was tested with OpenCode **1.18.31**. Check the
+[OpenCode provider documentation](https://opencode.ai/docs/providers) for the
+format supported by your installed version.
+
+For OpenCode 1.x, use the exact model ID returned by `GET /v1/models` as the
+key under `models`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "mlx-tui-local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://127.0.0.1:8080/v1"
+      },
+      "models": {
+        "mlx-community/Qwen3-1.7B-4bit": {
+          "name": "Qwen3 1.7B MLX"
+        }
+      }
+    }
+  }
+}
+```
+
+Replace `mlx-community/Qwen3-1.7B-4bit` with the selected model's actual ID.
+The `models` key is sent to the MLX server; `name` is only a display label.
+Do not leave the key as `local` while putting the real model ID only in
+`name`. That causes the server to resolve a Hugging Face repository literally
+named `local`, resulting in an error such as:
+
+```text
+https://huggingface.co/api/models/local/revision/main
+```
+
+This is a model-ID mismatch, not evidence that the locally cached model is
+missing or that Hugging Face authentication is required. The `baseURL` must
+point to the MLX server's `/v1` endpoint, not to the TUI itself.
+
+Newer OpenCode releases may use the `providers`/`package` configuration and a
+separate `modelID` field. In that format, the selectable model key may be an
+alias, but `modelID` must contain the exact ID returned by the MLX server. See
+the [newer OpenCode provider reference](https://opencode.ai/v2/docs/providers)
+before copying that syntax into a different OpenCode version.
+
 ## Limitations
 
 - There is no cross-client model or lifecycle coordination. An external

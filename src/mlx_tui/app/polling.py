@@ -36,7 +36,8 @@ async def _fetch_probe(app: Any) -> ServerProbe:
     try:
         health = await app._http.get("/health")
     except httpx.HTTPError as exc:
-        app.log_error_once("poll-health", exc)
+        if app.operations.current is not OperationKind.RESTARTING:
+            app.log_error_once("poll-health", exc)
     else:
         try:
             health_body: object = health.json()
@@ -51,7 +52,8 @@ async def _fetch_probe(app: Any) -> ServerProbe:
     try:
         response = await app._http.get("/v1/models")
     except httpx.HTTPError as exc:
-        app.log_error_once("poll-catalogue", exc)
+        if app.operations.current is not OperationKind.RESTARTING:
+            app.log_error_once("poll-catalogue", exc)
     else:
         try:
             catalogue_body: object = response.json()
@@ -80,7 +82,7 @@ async def _poll(app: Any) -> None:  # noqa: PLR0912
     if (
         app._closing
         or app._poll_in_flight
-        or app.operations.current is OperationKind.COMPARING
+        or app.operations.current in (OperationKind.COMPARING, OperationKind.RESTARTING)
     ):
         return
     app._poll_in_flight = True
@@ -89,7 +91,10 @@ async def _poll(app: Any) -> None:  # noqa: PLR0912
     prev_identity = app.server_identity
     try:
         probe = await app._fetch_probe()
-        if poll_sequence != app._observation_seq:
+        if (
+            poll_sequence != app._observation_seq
+            or app.operations.current is OperationKind.RESTARTING
+        ):
             return
         app.status_state = probe.state
         snapshot = memory_snapshot()

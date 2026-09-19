@@ -6,10 +6,12 @@ import os
 import shlex
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Callable
 from contextlib import suppress
+from typing import BinaryIO
 
 import httpx
 import psutil
@@ -86,6 +88,34 @@ def _pump(proc: subprocess.Popen[str], on_line: Callable[[str], None]) -> None:
                 proc.stdout.close()
         except Exception:
             pass
+
+
+def _pump_file(
+    proc: subprocess.Popen[str], output: BinaryIO, on_line: Callable[[str], None]
+) -> None:
+    """Read server output without making its lifetime depend on this reader."""
+    offset = 0
+    pending = b""
+    try:
+        while True:
+            chunk = os.pread(output.fileno(), 65536, offset)
+            if chunk:
+                offset += len(chunk)
+                pending += chunk
+                *lines, pending = pending.split(b"\n")
+                for line in lines:
+                    if line:
+                        with suppress(Exception):
+                            on_line(line.decode("utf-8", errors="replace").rstrip("\r"))
+            elif proc.poll() is not None:
+                break
+            else:
+                time.sleep(0.05)
+        if pending:
+            with suppress(Exception):
+                on_line(pending.decode("utf-8", errors="replace"))
+    finally:
+        output.close()
 
 
 def _descendant_identities(pid: int) -> list[ProcessIdentity]:
@@ -256,6 +286,7 @@ def _popen(
     *,
     shell: bool = False,
     env: dict[str, str] | None = None,
+    output: BinaryIO | int = subprocess.PIPE,
 ) -> subprocess.Popen[str]:
     new_session = os.name == "posix"
     if shell:
@@ -279,7 +310,7 @@ def _popen(
     return subprocess.Popen(
         launch_cmd,
         shell=shell,
-        stdout=subprocess.PIPE,
+        stdout=output,
         stderr=subprocess.STDOUT,
         text=True,
         env=env,
@@ -318,9 +349,19 @@ def spawn_command(
     env: dict[str, str] | None = None,
 ) -> subprocess.Popen[str]:
     """Start a long-lived command (a server) without waiting for its exit."""
-    proc = _popen(cmd, shell=shell, env=env)
+    # A pipe would break server request logging as soon as the TUI exits.
+    # An anonymous file remains writable in the child after this process ends.
+    output = tempfile.TemporaryFile()
+    try:
+        proc = _popen(cmd, shell=shell, env=env, output=output)
+    except Exception:
+        output.close()
+        raise
     threading.Thread(
-        target=lambda: _pump(proc, on_line), daemon=True, name="spawned-cmd-output"
+        target=_pump_file,
+        args=(proc, output, on_line),
+        daemon=True,
+        name="spawned-cmd-output",
     ).start()
     return proc
 

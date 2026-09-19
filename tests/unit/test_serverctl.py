@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 
 import httpx
@@ -355,6 +356,39 @@ def test_spawn_command_returns_before_exit_and_streams() -> None:
     finally:
         proc.kill()
         proc.wait()
+
+
+def test_spawned_server_output_survives_launcher_exit(tmp_path: Path) -> None:
+    marker = tmp_path / "server-output.txt"
+    child_script = (
+        "import sys, time; "
+        "from pathlib import Path; "
+        "time.sleep(0.5); "
+        "sys.stderr.write('request log\\n'); sys.stderr.flush(); "
+        f"Path({str(marker)!r}).write_text('ok')"
+    )
+    command = [sys.executable, "-c", child_script]
+    launcher_script = (
+        "from mlx_tui import serverctl; "
+        f"proc = serverctl.spawn_command({command!r}, on_line=lambda _: None); "
+        "print(proc.pid, flush=True)"
+    )
+    launcher = subprocess.run(
+        [sys.executable, "-c", launcher_script],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=5,
+    )
+    child_pid = int(launcher.stdout.strip())
+    try:
+        deadline = time.monotonic() + 5
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert marker.read_text() == "ok"
+    finally:
+        with suppress(psutil.NoSuchProcess):
+            psutil.Process(child_pid).kill()
 
 
 def test_spawn_with_grace_detects_instant_crash() -> None:
