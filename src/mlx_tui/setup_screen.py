@@ -84,7 +84,7 @@ class SetupScreen(ModalScreen[None]):
 
     def on_mount(self) -> None:
         self._update_view()
-        self.query_one("#setup-managed", Button).focus()
+        self.query_one("#setup-attach", Button).focus()
 
     def _set_status(self, message: str, style: str | None = None) -> None:
         try:
@@ -142,7 +142,7 @@ class SetupScreen(ModalScreen[None]):
             "Installation time and model-download time are recorded separately."
         )
         self.query_one("#setup-candidates", Static).update(
-            "Choose a mode, then install the runtime and download the two pinned candidates."
+            "Managed: install its runtime. Attach: use the bundled server or an existing one. Download a model to start."
         )
         self.query_one(
             "#setup-context", Button
@@ -193,12 +193,17 @@ class SetupScreen(ModalScreen[None]):
 
     def _persist_new_mode(self) -> None:
         if not config_path().exists():
-            create_config(
+            created = create_config(
                 config_path(),
                 runtime_mode=self.tui.config.runtime_mode,
                 host=self.tui.host,
                 port=self.tui.port,
             )
+            if created and self.tui.config.runtime_mode == "attach":
+                self.tui.config = replace(
+                    self.tui.config,
+                    start_cmd=f"mlx_lm.server --port {self.tui.port}",
+                )
         self.tui.needs_setup = False
 
     def _select_mode(self, mode: str, note: str) -> None:
@@ -286,9 +291,8 @@ class SetupScreen(ModalScreen[None]):
 
     @on(Button.Pressed, "#setup-start")
     async def _start(self) -> None:
-        self.tui.set_runtime_mode("managed")
         await self.tui.action_cold_start()
-        self._set_status("managed start requested")
+        self._set_status(f"{self.tui.config.runtime_mode} start requested")
         self._update_view()
 
     @on(Button.Pressed, "#setup-reload")

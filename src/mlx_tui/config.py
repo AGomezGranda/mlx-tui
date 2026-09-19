@@ -77,6 +77,8 @@ def create_config(
             handle.write(
                 f'runtime_mode = "{runtime_mode}"\nhost = "{host}"\nport = {port}\n'
             )
+            if runtime_mode == "attach":
+                handle.write(f'start_cmd = "mlx_lm.server --port {port}"\n')
     except FileExistsError:
         return False
     return True

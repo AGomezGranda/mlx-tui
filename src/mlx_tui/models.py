@@ -134,7 +134,12 @@ def resolve_cached_snapshot(
     """Resolve an exact cached revision without contacting the Hub."""
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ValueError("revision must be a full immutable commit hash")
-    cache = info if info is not None else scan_cache_dir()
+    try:
+        cache = info if info is not None else scan_cache_dir()
+    except CacheNotFound as exc:
+        raise FileNotFoundError(
+            f"cached snapshot not found: {repo_id}@{revision}"
+        ) from exc
     for repo in cache.repos:
         if repo.repo_type != "model" or repo.repo_id != repo_id:
             continue

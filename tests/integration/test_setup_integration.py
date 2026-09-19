@@ -5,11 +5,61 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from textual.widgets import Button, TabbedContent
+from huggingface_hub import scan_cache_dir
+from textual.widgets import Button, Static, TabbedContent
 
 from mlx_tui.search_screen import SearchScreen
 from mlx_tui.setup_screen import SetupScreen
 from tests.conftest import AppHarness
+
+
+async def test_first_run_attach_has_working_start_action(
+    stub_harness: AppHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_file = tmp_path / "config.toml"
+    monkeypatch.setattr("mlx_tui.setup_screen.config_path", lambda: config_file)
+    screen = SetupScreen()
+    stub_harness.app.push_screen(screen)
+    await stub_harness.pilot.pause()
+    assert screen.query_one("#setup-attach", Button).has_focus
+
+    await stub_harness.pilot.press("enter")
+    assert stub_harness.app.config.runtime_mode == "attach"
+    command = f"mlx_lm.server --port {stub_harness.app.port}"
+    assert stub_harness.app.config.start_cmd == command
+    assert f'start_cmd = "{command}"' in config_file.read_text()
+
+    called: list[str] = []
+
+    async def start() -> None:
+        called.append(stub_harness.app.config.runtime_mode)
+
+    monkeypatch.setattr(stub_harness.app, "action_cold_start", start)
+    screen.query_one("#setup-start", Button).focus()
+    await stub_harness.pilot.press("enter")
+    assert await stub_harness.wait_for(lambda _: called == ["attach"])
+
+
+async def test_fresh_install_without_hub_cache_shows_download_needed(
+    stub_harness: AppHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    missing_cache = tmp_path / "huggingface" / "hub"
+
+    def scan_missing() -> object:
+        return scan_cache_dir(cache_dir=missing_cache)
+
+    monkeypatch.setattr("mlx_tui.models.scan_cache_dir", scan_missing)
+    screen = SetupScreen()
+    stub_harness.app.push_screen(screen)
+    await stub_harness.pilot.pause()
+
+    details = str(screen.query_one("#setup-mode", Static).render())
+    assert "download needed" in details
+    assert not missing_cache.exists()
 
 
 async def test_keyboard_setup_selects_managed_downloads_and_reaches_compare(
@@ -33,7 +83,8 @@ async def test_keyboard_setup_selects_managed_downloads_and_reaches_compare(
     stub_harness.app.push_screen(screen)
     await stub_harness.pilot.pause()
 
-    # The managed choice is initially focused, so Enter is the whole mode step.
+    managed = screen.query_one("#setup-managed", Button)
+    managed.focus()
     await stub_harness.pilot.press("enter")
     assert stub_harness.app.config.runtime_mode == "managed"
     assert config_file.read_text().startswith('runtime_mode = "managed"')

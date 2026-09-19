@@ -5,8 +5,10 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
+import sys
 from collections.abc import Callable
 from contextlib import suppress
+from importlib.util import find_spec
 
 from mlx_tui import serverctl
 from mlx_tui.config import AppConfig
@@ -55,6 +57,8 @@ def prepare_commands(  # noqa: PLR0912
         start_argv = build_start_command(start_raw, plan.model_id)
     except ValueError as exc:
         raise RuntimeError(f"[swap] invalid start_cmd: {exc}") from exc
+    if start_argv[0] == "mlx_lm.server" and find_spec("mlx_lm") is not None:
+        start_argv = [sys.executable, "-m", "mlx_lm.server", *start_argv[1:]]
 
     stop_argv: list[str] | None = None
     if plan.stop_first:
@@ -131,6 +135,12 @@ def execute_boot(  # noqa: PLR0913
             )
         except ValueError as exc:
             raise RuntimeError(f"[swap] invalid start_cmd: {exc}") from exc
+        except FileNotFoundError as exc:
+            command = start[0] if isinstance(start, list) else start
+            raise RuntimeError(
+                f"[swap] server command not found: {command}; "
+                "install the server or update start_cmd"
+            ) from exc
         start_rc = proc.poll()
         if start_rc is not None and start_rc != 0:
             raise RuntimeError(f"[swap] start_cmd exited {start_rc}")

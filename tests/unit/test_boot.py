@@ -36,6 +36,57 @@ def _plan(*, stop_first: bool = False) -> BootPlan:
     )
 
 
+def test_default_server_command_uses_app_interpreter_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def installed(_name: str) -> object:
+        return object()
+
+    monkeypatch.setattr(boot, "find_spec", installed)
+    start, _, shell, _, _ = boot.prepare_commands(
+        AppConfig(start_cmd="mlx_lm.server --port 8080"), _plan()
+    )
+    assert start == [
+        boot.sys.executable,
+        "-m",
+        "mlx_lm.server",
+        "--port",
+        "8080",
+        "--model",
+        "org/model",
+    ]
+    assert not shell
+
+
+def test_custom_server_command_is_preserved(monkeypatch: pytest.MonkeyPatch) -> None:
+    def installed(_name: str) -> object:
+        return object()
+
+    monkeypatch.setattr(boot, "find_spec", installed)
+    start, _, _, _, _ = boot.prepare_commands(
+        AppConfig(start_cmd="/opt/server/mlx_lm.server --port 8080"), _plan()
+    )
+    assert start[0] == "/opt/server/mlx_lm.server"
+
+
+def test_missing_server_command_has_actionable_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def missing(*_args: object, **_kwargs: object) -> None:
+        raise FileNotFoundError("missing")
+
+    monkeypatch.setattr(boot.serverctl, "spawn_with_grace", missing)
+    with pytest.raises(RuntimeError, match="server command not found: missing-server"):
+        boot.execute_boot(
+            _plan(),
+            AppConfig(start_cmd="missing-server"),
+            host="127.0.0.1",
+            port=8080,
+            on_line=lambda _line: None,
+            on_tick=lambda _seconds: None,
+        )
+
+
 def test_invalid_start_is_rejected_before_stop(monkeypatch: pytest.MonkeyPatch) -> None:
     stops: list[object] = []
 

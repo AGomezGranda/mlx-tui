@@ -60,7 +60,7 @@ The four tabs have separate responsibilities:
 | --- | --- |
 | **Models** | Browse cache contents, download/delete, and choose the ordinary request target. |
 | **Compare** | Set up A/B, check readiness, run, inspect evidence, choose, and reopen results. |
-| **Chat** | Send ordinary prompts and keep the in-memory draft/transcript. |
+| **Chat** | Send ordinary prompts and manage local conversation sessions. |
 | **Metrics** | Show ordinary chat-throughput and server-memory history. |
 
 The Compare candidate pair never changes the ordinary Models selection, Chat

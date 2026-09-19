@@ -10,6 +10,7 @@ requires-python = ">=3.13"
 dependencies = [
     "httpx>=0.28",
     "huggingface_hub>=1.28",
+    "mlx-lm>=0.31.3,<0.32; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "psutil>=7.0",
     "textual>=8.2.8",
     "rich>=15.0.0",

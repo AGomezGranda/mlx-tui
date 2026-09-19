@@ -108,6 +108,12 @@ def test_create_config_is_atomic_and_does_not_overwrite_existing_file(
     )
 
 
+def test_new_attach_config_can_start_bundled_server(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    assert create_config(path, runtime_mode="attach", host="127.0.0.1", port=8081)
+    assert load_config(path).start_cmd == "mlx_lm.server --port 8081"
+
+
 def test_invalid_runtime_mode_does_not_change_attach_settings(tmp_path: Path) -> None:
     cfg = load_config(
         _write(

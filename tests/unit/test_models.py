@@ -226,6 +226,22 @@ def test_cached_snapshot_resolution_is_exact_and_offline(
     assert resolve_cached_snapshot("org/model", "a" * 40) == snapshot
 
 
+def test_cached_snapshot_resolution_missing_cache_is_missing_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    missing_cache = tmp_path / "hub"
+
+    scanner = models_mod.scan_cache_dir
+
+    def scan_missing() -> HFCacheInfo:
+        return scanner(cache_dir=missing_cache)
+
+    monkeypatch.setattr(models_mod, "scan_cache_dir", scan_missing)
+    with pytest.raises(FileNotFoundError, match="cached snapshot not found"):
+        resolve_cached_snapshot("org/model", "a" * 40)
+    assert not missing_cache.exists()
+
+
 @pytest.mark.parametrize(
     ("identity", "expected"),
     [

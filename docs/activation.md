@@ -1,4 +1,4 @@
-# Managed activation
+# Installation and managed activation
 
 The managed runtime is opt-in. Existing configurations remain attach mode;
 the operator-owned server commands are not used by managed mode.
@@ -18,7 +18,9 @@ mlx-tui --version
 ```
 
 Wheel installation is measured separately from managed-runtime installation
-and model downloads. Installing the wheel does not download MLX or models.
+and model downloads. On Apple silicon, the wheel installs MLX-LM and MLX for
+attach-mode server startup. It does not download models or install the pinned
+managed runtime.
 
 ## Upgrade and rollback
 
@@ -36,12 +38,12 @@ Operator backups are a separate manual step. To back up config, presets,
 and app state before an upgrade:
 
 ```sh
-cp -a "$XDG_CONFIG_HOME/mlx-tui" ./pre-upgrade-config
-cp -a "$XDG_STATE_HOME/mlx-tui" ./pre-upgrade-state
+cp -a "${XDG_CONFIG_HOME:-$HOME/.config}/mlx-tui" ./pre-upgrade-config
+cp -a "${XDG_STATE_HOME:-$HOME/.local/state}/mlx-tui" ./pre-upgrade-state
 ```
 
-Use the current XDG roots when they are set; otherwise use `~/.config` and
-`~/.local/state`. Do not copy the Python tool environment or the HF cache.
+The commands use the current XDG roots when set and their default locations
+otherwise. Do not copy the Python tool environment or the HF cache.
 Keep the old wheel and backups until the diagnostics check passes.
 
 Rollback is separate from upgrade. Stop the new installation and its owned child,
