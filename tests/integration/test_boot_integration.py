@@ -510,16 +510,18 @@ async def test_verified_boot_ui_failure_does_not_terminate_server(
 
     terminated: list[object] = []
 
-    def sync_call_from_thread(
+    original_call_from_thread = harness.app.call_from_thread
+
+    def failing_refresh_from_thread(
         callback: Callable[..., object], *args: object, **kwargs: object
     ) -> object:
         if getattr(callback, "__name__", "") == "refresh_models":
             raise RuntimeError("refresh failed")
-        return callback(*args, **kwargs)
+        return original_call_from_thread(callback, *args, **kwargs)
 
     monkeypatch.setattr("mlx_tui.models_pane.execute_boot", fake_execute)
     monkeypatch.setattr(serverctl, "terminate_failed_process", terminated.append)
-    monkeypatch.setattr(harness.app, "call_from_thread", sync_call_from_thread)
+    monkeypatch.setattr(harness.app, "call_from_thread", failing_refresh_from_thread)
 
     await harness.pilot.press("ctrl+s")
 
@@ -527,6 +529,10 @@ async def test_verified_boot_ui_failure_does_not_terminate_server(
         lambda a: "UI update failed: refresh failed" in _log_text(harness)
     ), _log_text(harness)
     assert terminated == []
-    assert harness.app.operations.current is OperationKind.IDLE
-    assert not harness.app.query_one("#chat-input", ChatInput).disabled
-    assert not harness.app.query_one("#models-table", ModelsTable).disabled
+    assert await harness.wait_for(
+        lambda a: (
+            a.operations.current is OperationKind.IDLE
+            and not a.query_one("#chat-input", ChatInput).disabled
+            and not a.query_one("#models-table", ModelsTable).disabled
+        )
+    )

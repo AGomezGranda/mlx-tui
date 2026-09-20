@@ -33,6 +33,7 @@ from mlx_tui.comparison.summary import _summary
 from mlx_tui.config import AppConfig
 from mlx_tui.operations import OperationKind
 from mlx_tui.process import ProcessIdentity
+from mlx_tui.search_screen import SearchScreen
 from mlx_tui.status import ServerProbe
 from tests.conftest import AppHarness
 
@@ -613,3 +614,30 @@ async def test_comparison_layout_adapts_and_reveals_results(
     harness.app.last_comparison = replace(result, status="failed")
     pane._render_result(harness.app.last_comparison)
     assert not pane.query_one("#comparison-decision").display
+
+
+async def test_compare_download_uses_modal_pinned_discovery_and_returns(
+    harness: AppHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def no_metadata(_screen: SearchScreen, _repo_id: str) -> None:
+        return
+
+    monkeypatch.setattr(SearchScreen, "_schedule_metadata", no_metadata)
+    pane = harness.app.query_one(ComparePane)
+    pane._download()
+    await harness.pilot.pause()
+
+    screen = harness.app.screen
+    assert isinstance(screen, SearchScreen)
+    expected = {
+        entry.profile.repo_id: entry.profile.revision
+        for entry in harness.app.selected_comparison_profiles()
+    }
+    assert screen.discover._pinned_revisions == expected
+    assert screen._repo_ids == list(expected)
+
+    await harness.pilot.press("escape")
+    assert await harness.wait_for(
+        lambda _app: not isinstance(harness.app.screen, SearchScreen)
+    )

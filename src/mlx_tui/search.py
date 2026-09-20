@@ -9,6 +9,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, override
+from urllib.parse import urlparse
 
 from huggingface_hub import snapshot_download
 from huggingface_hub.constants import HF_HUB_CACHE
@@ -29,14 +30,19 @@ ALLOW_PATTERNS = [
     "*.jsonl",
     "*.jinja",
 ]
-_SEARCH_AUTHOR = "mlx-community"
 _SEARCH_LIMIT = 50
 _PROGRESS_MIN_INTERVAL_S = 0.5
 
 
 class HubApi(Protocol):
     def list_models(
-        self, *, author: str, search: str, limit: int
+        self,
+        *,
+        search: str | None,
+        filter: str,
+        sort: str,
+        limit: int,
+        author: str | None = None,
     ) -> Iterable[ModelInfo]: ...
 
     def model_info(
@@ -48,28 +54,66 @@ class CancelledDownload(Exception):
     pass
 
 
-def list_results(api: HubApi, query: str) -> list[str]:
-    return [
-        info.id
-        for info in api.list_models(
-            author=_SEARCH_AUTHOR, search=query, limit=_SEARCH_LIMIT
+def exact_repo_id(query: str) -> str | None:
+    """Accept a Hub model URL or an exact owner/repository identifier."""
+    value = query.strip()
+    if value.startswith(("https://", "http://")):
+        parsed = urlparse(value)
+        if parsed.hostname not in {"huggingface.co", "www.huggingface.co"}:
+            return None
+        value = parsed.path.strip("/")
+        if value.startswith("models/"):
+            value = value.removeprefix("models/")
+        value = "/".join(value.split("/")[:2])
+    parts = value.split("/")
+    if len(parts) == 2 and all(  # noqa: PLR2004
+        part
+        and part not in {".", ".."}
+        and all(c.isalnum() or c in "-_." for c in part)
+        for part in parts
+    ):
+        return value
+    return None
+
+
+def list_results(
+    api: HubApi, query: str, *, limit: int = _SEARCH_LIMIT, author: str | None = None
+) -> list[str]:
+    exact = exact_repo_id(query)
+    if exact is not None:
+        api.model_info(exact, files_metadata=False)
+        return [exact]
+    if author:
+        results = api.list_models(
+            search=query or None,
+            filter="mlx",
+            sort="downloads",
+            limit=limit,
+            author=author,
         )
-    ]
+    else:
+        results = api.list_models(
+            search=query or None, filter="mlx", sort="downloads", limit=limit
+        )
+    return [info.id for info in results]
 
 
-def filtered_download_size(files: Iterable[tuple[str, int]]) -> int:
+def filtered_download_size(files: Iterable[tuple[str, int | None]]) -> int | None:
     kept = filter_repo_objects(
         [{"path": name, "size": size} for name, size in files],
         allow_patterns=ALLOW_PATTERNS,
         key=lambda f: f["path"],
     )
-    return sum(entry["size"] for entry in kept)
+    selected = {entry["path"]: entry["size"] for entry in kept}
+    if any(size is None for size in selected.values()):
+        return None
+    return sum(size for size in selected.values() if size is not None)
 
 
 @dataclass(frozen=True)
 class RepoSnapshot:
     revision: str | None
-    files: tuple[tuple[str, int], ...]
+    files: tuple[tuple[str, int | None], ...]
 
 
 def repo_snapshot(
@@ -84,7 +128,7 @@ def repo_snapshot(
             f"Hub returned {sha!r}, expected pinned revision {requested_revision!r}"
         )
     siblings = info.siblings or []
-    files = tuple((s.rfilename, s.size or 0) for s in siblings)
+    files = tuple((s.rfilename, s.size) for s in siblings)
     return RepoSnapshot(revision=resolved_revision, files=files)
 
 

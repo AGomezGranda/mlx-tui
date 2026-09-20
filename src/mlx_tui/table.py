@@ -7,6 +7,7 @@ from typing import override
 from textual.coordinate import Coordinate
 from textual.widgets import DataTable
 
+from mlx_tui.catalog.assessment import ModelAssessment
 from mlx_tui.models import ModelRow, model_identity_matches
 
 
@@ -20,9 +21,9 @@ def quant_cell(quant: str) -> str:
     return f"{quant} hint" if quant != "—" else "unknown hint"
 
 
-def runtime_fit_cell() -> str:
-    """Disk size never proves runtime memory fit."""
-    return "unknown"
+def runtime_fit_cell(assessment: ModelAssessment | None = None) -> str:
+    """Only a complete local estimate can claim comfortable fit."""
+    return assessment.fit.value if assessment is not None else "Unknown"
 
 
 class ModelsTable(DataTable[str]):
@@ -36,30 +37,48 @@ class ModelsTable(DataTable[str]):
     def on_mount(self) -> None:
         for column_key in (
             "model",
-            "quant hint",
-            "size on disk",
+            "compatibility",
             "runtime fit",
+            "size on disk",
+            "quant hint",
             "selected",
         ):
-            self.add_column(column_key, key=column_key)
+            label = "Memory fit" if column_key == "runtime fit" else column_key
+            self.add_column(label, key=column_key)
 
     def set_rows(
         self,
         rows: list[ModelRow],
         *,
         selected_model: str | None,
+        assessments: dict[str, ModelAssessment] | None = None,
     ) -> None:
         """Replace every row; render disk facts and explicit selection."""
+        selected_id = None
+        if 0 <= self.cursor_row < self.row_count:
+            selected_id = self.get_row_at(self.cursor_row)[0]
         self.clear()
         for row in rows:
             self.add_row(
                 row.repo_id,
-                quant_cell(row.quant),
+                (
+                    assessments[row.repo_id].compatibility.value
+                    if assessments and row.repo_id in assessments
+                    else "Unknown"
+                ),
+                runtime_fit_cell((assessments or {}).get(row.repo_id)),
                 f"{row.size_on_disk / 2**30:.1f} GiB",
-                runtime_fit_cell(),
+                quant_cell(row.quant),
                 selected_cell(row.repo_id, selected_model),
                 key=row.repo_id,
             )
+        if selected_id is not None:
+            selected_index = next(
+                (index for index, row in enumerate(rows) if row.repo_id == selected_id),
+                None,
+            )
+            if selected_index is not None:
+                self.move_cursor(row=selected_index)
 
     def refresh_markers(
         self,
@@ -68,10 +87,9 @@ class ModelsTable(DataTable[str]):
         selected_model: str | None,
     ) -> None:
         """Update selection cells whose rendered value changed."""
-        # runtime fit is always "unknown" — no per-cell check needed.
         for index, row in enumerate(rows):
             new_selected = selected_cell(row.repo_id, selected_model)
-            if self.get_cell_at(Coordinate(index, 4)) != new_selected:
+            if self.get_cell_at(Coordinate(index, 5)) != new_selected:
                 self.update_cell(row.repo_id, "selected", new_selected)
 
     def action_load_swap(self) -> None:
@@ -87,8 +105,8 @@ class ModelsTable(DataTable[str]):
         self.app.query_one(ModelsPane).request_delete_model()
 
     def action_search_hf(self) -> None:
-        # Local import: search_screen hands off to models_pane lazily, so a
-        # module-top import would cycle (same reason as the ModelsPane imports).
-        from mlx_tui.search_screen import SearchScreen  # noqa: PLC0415
+        # Local import: models_pane imports ModelsTable, so keep the owner
+        # lookup lazy and let it mount discovery inline.
+        from mlx_tui.models_pane import ModelsPane  # noqa: PLC0415
 
-        self.app.push_screen(SearchScreen())
+        self.app.query_one(ModelsPane).open_discover()

@@ -26,6 +26,7 @@ import mlx_tui.app.ops as _app_ops
 import mlx_tui.app.polling as _app_polling
 import mlx_tui.app.state as _app_state
 import mlx_tui.app.ui as _app_ui
+from mlx_tui.catalog.cache import SearchCache
 from mlx_tui.chat_ui.pane import ChatPane
 from mlx_tui.compare.pane import ComparePane
 from mlx_tui.comparison.contracts import ComparisonResult, SavedChoice
@@ -126,6 +127,7 @@ class MlxTuiApp(App[None]):
         )
         self.latest_avail_gib: float | None = None
         self.operations = OperationCoordinator()
+        self.model_search_cache = SearchCache()
         self.history = HistoryStore()
         self.memory_store: deque[MemoryRecord] = deque(maxlen=256)
         self.presets: list[Preset] = load_presets()
@@ -387,6 +389,9 @@ class MlxTuiApp(App[None]):
 
     def refresh_models(self) -> None:
         return _app_polling.refresh_models(self)
+
+    def reassess_models(self) -> None:
+        return _app_ops.reassess_models(self)
 
     def _apply_preset(self, preset: Preset) -> None:
         return _app_ui._apply_preset(self, preset)

@@ -113,6 +113,20 @@ class ManagedRuntime:
         with self._lock:
             return self._child_is_running()
 
+    def inspect(self) -> dict[str, JSONValue]:
+        """Inspect the owned runtime without installing or starting it."""
+        with self._lock:
+            if self._closed:
+                raise ManagedRuntimeError("managed runtime is closed")
+            try:
+                _check_owner(self.root)
+                evidence = inspect_runtime(self.root)
+            except Exception:
+                self.install_evidence = {}
+                raise
+            self.install_evidence = dict(evidence)
+            return dict(evidence)
+
     def _port_is_occupied(self) -> bool:
         family = socket.AF_INET6 if ":" in self.host else socket.AF_INET
         with socket.socket(family, socket.SOCK_STREAM) as sock:
@@ -168,8 +182,7 @@ class ManagedRuntime:
             if self._closed:
                 raise ManagedRuntimeError("managed runtime is closed")
             self.cancel_event.clear()
-            _check_owner(self.root)
-            self.install_evidence = inspect_runtime(self.root)
+            self.inspect()
             try:
                 verify_cached_assets(target)
             except ValueError as exc:

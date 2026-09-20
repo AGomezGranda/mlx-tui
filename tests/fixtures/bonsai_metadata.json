@@ -1,0 +1,25 @@
+{
+  "repo_id": "prism-ml/Ternary-Bonsai-2-27B-mlx-2bit",
+  "revision": "3f926b415992eaa2ae9dd7b573706494d6bbf787",
+  "files": [
+    ["config.json", 58145],
+    ["tokenizer_config.json", 17928],
+    ["runtime/artifact.py", 5621],
+    ["model.safetensors", 8595477990]
+  ],
+  "config": {
+    "schema_version": 2,
+    "model_type": "prism_hadamard_qwen35",
+    "requires_runtime": "runtime/artifact.py",
+    "quantization": {"bits": 2, "group_size": 128, "mode": "affine"},
+    "text_config": {
+      "model_type": "qwen3_5_text",
+      "num_hidden_layers": 64,
+      "num_attention_heads": 24,
+      "num_key_value_heads": 4,
+      "head_dim": 256,
+      "layer_types": ["linear_attention", "full_attention"]
+    },
+    "modules": [{"path": "lm_head", "dtype": "float16"}]
+  }
+}

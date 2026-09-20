@@ -1,4 +1,4 @@
-"""Integration tests for HF search modal (Phase 2 + 3)."""
+"""Integration tests for embedded and modal HF discovery (Phase 3)."""
 
 from __future__ import annotations
 
@@ -7,9 +7,11 @@ import time
 
 import pytest
 from textual.coordinate import Coordinate
-from textual.widgets import Input, Static
+from textual.widgets import Input, Select, Static, TabbedContent
 
+from mlx_tui.discover_pane import DiscoverPane
 from mlx_tui.models_pane import ModelsPane
+from mlx_tui.operations import OperationKind
 from mlx_tui.search import (
     ALLOW_PATTERNS,
     CancelledDownload,
@@ -21,17 +23,22 @@ from mlx_tui.table import ModelsTable
 from tests.conftest import AppHarness
 
 ROW = "mlx-community/stub-test-4bit"
+SECOND_ROW = "other-publisher/second-model"
 SIZE_PAIRS = [("model.safetensors", 2_000_000_000), ("README.md", 10)]
 
 
-def _downloading(screen: SearchScreen) -> str | None:
+def _no_schedule_metadata(_self: DiscoverPane, _repo_id: str) -> None:
+    return
+
+
+def _downloading(screen: DiscoverPane) -> str | None:
     """Fresh-read helper: the checker must not narrow this across mutations."""
     return screen._downloading
 
 
 async def open_search(
     harness: AppHarness, monkeypatch: pytest.MonkeyPatch
-) -> SearchScreen:
+) -> DiscoverPane:
     def _stub_list(api: object, q: str) -> list[str]:
         return [ROW]
 
@@ -41,9 +48,9 @@ async def open_search(
     def _stub_free() -> int:
         return 10 * 2**30
 
-    monkeypatch.setattr("mlx_tui.search_screen.list_results", _stub_list)
-    monkeypatch.setattr("mlx_tui.search_screen.repo_snapshot", _stub_snapshot)
-    monkeypatch.setattr("mlx_tui.search_screen.free_disk_bytes", _stub_free)
+    monkeypatch.setattr("mlx_tui.discover_pane.list_results", _stub_list)
+    monkeypatch.setattr("mlx_tui.discover_pane.repo_snapshot", _stub_snapshot)
+    monkeypatch.setattr("mlx_tui.discover_pane.free_disk_bytes", _stub_free)
     # Focus the models table so slash binding fires deterministically.
     try:
         harness.app.query_one("#models-table", ModelsTable).focus()
@@ -52,12 +59,11 @@ async def open_search(
     await harness.pilot.press("/")
     # Pilot may need pause for screen push
     await harness.pilot.pause()
-    assert await harness.wait_for(lambda app: isinstance(app.screen, SearchScreen)), (
-        f"search screen never opened; screen={harness.app.screen!r}"
-    )
-    # harness.app.screen is SearchScreen after push
-    screen = harness.app.screen
-    assert isinstance(screen, SearchScreen)
+    assert await harness.wait_for(
+        lambda app: app.query_one(ModelsPane)._discover_pane is not None
+    ), f"discover pane never opened; screen={harness.app.screen!r}"
+    screen = harness.app.query_one(ModelsPane)._discover_pane
+    assert screen is not None
     return screen
 
 
@@ -91,9 +97,9 @@ async def test_open_query_and_browse(
         f"_repo_ids never filled; got {screen._repo_ids!r}"
     )
     table = screen.query_one("#search-results", ResultsTable)
-    # column 0 = model, 1 = quant, 2 = download
+    # Primary columns are model, compatibility, memory fit, download, quant.
     assert table.get_cell_at(Coordinate(0, 0)) == ROW
-    assert table.get_cell_at(Coordinate(0, 1)) == "4bit"
+    assert table.get_cell_at(Coordinate(0, 4)) == "4bit"
 
     # lazy size fetch should populate
     assert await harness.wait_for(lambda app: ROW in screen._sizes), (
@@ -101,13 +107,46 @@ async def test_open_query_and_browse(
     )
     # allow fill to propagate to table
     assert await harness.wait_for(
-        lambda app: table.get_cell_at(Coordinate(0, 2)) == "1.9 GiB ✓"
-    ), f"download cell not updated; got {table.get_cell_at(Coordinate(0, 2))!r}"
+        lambda app: table.get_cell_at(Coordinate(0, 3)) == "1.9 GiB ✓"
+    ), f"download cell not updated; got {table.get_cell_at(Coordinate(0, 3))!r}"
 
     await harness.pilot.press("escape")
     assert await harness.wait_for(
-        lambda app: not isinstance(app.screen, SearchScreen)
+        lambda app: app.query_one(ModelsPane)._discover_pane is None
     ), "search screen did not close on escape"
+
+
+async def test_discover_controls_fit_narrow_terminal(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    screen = await open_search(harness, monkeypatch)
+    await harness.pilot.resize_terminal(80, 24)
+    await harness.pilot.pause()
+    for selector in (
+        "#search-input",
+        "#discover-task",
+        "#search-results",
+    ):
+        widget = screen.query_one(selector)
+        assert widget.region.x >= 0
+        assert widget.region.right <= 80
+        assert widget.region.y >= 0
+        assert widget.region.bottom <= 24
+
+
+async def test_discover_unknown_filter_keeps_unassessed_models(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    screen = await open_search(harness, monkeypatch)
+    search_input = screen.query_one("#search-input", Input)
+    search_input.focus()
+    await harness.pilot.press(*"qwen", "enter")
+    assert await harness.wait_for(lambda app: screen._repo_ids == [ROW])
+    scope = screen.query_one("#discover-scope", Select)
+    scope.value = "recommended"
+    assert await harness.wait_for(lambda app: screen._repo_ids == [])
+    scope.value = "unknown"
+    assert await harness.wait_for(lambda app: screen._repo_ids == [ROW])
 
 
 async def test_empty_query_keeps_table_empty(
@@ -131,6 +170,56 @@ async def test_empty_query_keeps_table_empty(
     assert screen._repo_ids == []
     table = screen.query_one("#search-results", ResultsTable)
     assert table.row_count == 0
+
+
+async def test_inspected_details_follow_the_highlighted_row(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    screen = await open_search(harness, monkeypatch)
+    monkeypatch.setattr(DiscoverPane, "_schedule_metadata", _no_schedule_metadata)
+    screen._populate(screen._search_generation, [ROW, SECOND_ROW])
+    screen._fill_size_cell(screen._search_generation, ROW, 10, "—", "rev-a")
+    table = screen.query_one("#search-results", ResultsTable)
+
+    table.move_cursor(row=1)
+    await harness.pilot.pause()
+    screen._fill_size_cell(screen._search_generation, SECOND_ROW, 20, "—", "rev-b")
+    assert SECOND_ROW in _static_plain(screen.query_one("#discover-details", Static))
+
+    table.move_cursor(row=0)
+    await harness.pilot.pause()
+    details = _static_plain(screen.query_one("#discover-details", Static))
+    assert f"{ROW}@rev-a" in details
+    assert SECOND_ROW not in details
+
+
+async def test_late_metadata_for_another_row_does_not_replace_selected_details(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    screen = await open_search(harness, monkeypatch)
+    monkeypatch.setattr(DiscoverPane, "_schedule_metadata", _no_schedule_metadata)
+    screen._populate(screen._search_generation, [ROW, SECOND_ROW])
+    screen._fill_size_cell(screen._search_generation, ROW, 10, "—", "rev-a")
+    screen._fill_size_cell(screen._search_generation, SECOND_ROW, 20, "—", "rev-b")
+    details = _static_plain(screen.query_one("#discover-details", Static))
+    assert f"{ROW}@rev-a" in details
+    assert SECOND_ROW not in details
+
+
+async def test_filtering_to_no_rows_clears_discover_details(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    screen = await open_search(harness, monkeypatch)
+    monkeypatch.setattr(DiscoverPane, "_schedule_metadata", _no_schedule_metadata)
+    screen._populate(screen._search_generation, [ROW])
+    screen._fill_size_cell(screen._search_generation, ROW, 10, "—", "rev-a")
+    assert ROW in _static_plain(screen.query_one("#discover-details", Static))
+
+    screen.query_one("#discover-scope", Select).value = "recommended"
+    await harness.pilot.pause()
+    assert "Select a model" in _static_plain(
+        screen.query_one("#discover-details", Static)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +251,7 @@ async def test_enter_downloads_hands_off_and_dismisses(
             captured["allow_patterns"] = _kw["allow_patterns"]
         # simulate successful download
 
-    monkeypatch.setattr("mlx_tui.search_screen.download_snapshot", _recording_download)
+    monkeypatch.setattr("mlx_tui.discover_pane.download_snapshot", _recording_download)
 
     calls: list[int] = []
 
@@ -199,7 +288,7 @@ async def test_enter_downloads_hands_off_and_dismisses(
         assert "*.jinja" in ALLOW_PATTERNS and "*.py" in ALLOW_PATTERNS
     assert calls == [1]
     assert await harness.wait_for(
-        lambda app: not isinstance(app.screen, SearchScreen)
+        lambda app: app.query_one(ModelsPane)._discover_pane is None
     ), "search screen did not dismiss after success"
 
 
@@ -221,7 +310,7 @@ async def test_escape_mid_download_cancels(
             time.sleep(0.01)
         raise CancelledDownload("cancelled by user")  # noqa: PLC0415  # type: ignore[no-untyped-call]
 
-    monkeypatch.setattr("mlx_tui.search_screen.download_snapshot", _blocking_download)
+    monkeypatch.setattr("mlx_tui.discover_pane.download_snapshot", _blocking_download)
 
     screen = await open_search(harness, monkeypatch)
     await harness.pilot.press(*"qwen", "enter")
@@ -239,7 +328,7 @@ async def test_escape_mid_download_cancels(
 
     await harness.pilot.press("escape")
     assert await harness.wait_for(
-        lambda app: not isinstance(app.screen, SearchScreen)
+        lambda app: app.query_one(ModelsPane)._discover_pane is None
     ), "search screen did not close on escape"
     # event should be set by action_close_screen
     assert await harness.wait_for(lambda app: ev.is_set()), "cancel event not set"
@@ -264,7 +353,7 @@ async def test_download_failure_keeps_modal_usable(
     ) -> None:
         raise RuntimeError("disk full")
 
-    monkeypatch.setattr("mlx_tui.search_screen.download_snapshot", _failing_download)
+    monkeypatch.setattr("mlx_tui.discover_pane.download_snapshot", _failing_download)
 
     screen = await open_search(harness, monkeypatch)
     await harness.pilot.press(*"qwen", "enter")
@@ -283,7 +372,7 @@ async def test_download_failure_keeps_modal_usable(
     ), f"log lines: {harness.app_log_lines()!r}"
 
     # modal stays open
-    assert isinstance(harness.app.screen, SearchScreen)
+    assert harness.app.query_one(ModelsPane)._discover_pane is screen
     # widgets re-enabled
     assert screen.query_one("#search-input", Input).disabled is False
     assert screen.query_one("#search-results", ResultsTable).disabled is False
@@ -291,6 +380,48 @@ async def test_download_failure_keeps_modal_usable(
     # red-styled failure line in #dl-progress — fall back to plain text check
     dl_plain = _static_plain(screen.query_one("#dl-progress", Static))
     assert "download failed" in dl_plain, f"dl-progress plain={dl_plain!r}"
+
+
+async def test_tab_switch_keeps_inline_download_owned_until_completion(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = threading.Event()
+
+    def _blocking_download(
+        repo_id: str,
+        *,
+        on_progress=None,  # type: ignore[no-untyped-def]
+        cancel_event=None,  # type: ignore[no-untyped-def]
+        cache_dir=None,  # type: ignore[no-untyped-def]
+        revision=None,  # type: ignore[no-untyped-def]
+        **_kw: object,
+    ) -> None:
+        del repo_id, on_progress, cache_dir, revision
+        started.set()
+        assert cancel_event is not None
+        while not cancel_event.is_set():
+            time.sleep(0.01)
+        raise CancelledDownload("cancelled by user")
+
+    monkeypatch.setattr("mlx_tui.discover_pane.download_snapshot", _blocking_download)
+    screen = await open_search(harness, monkeypatch)
+    await harness.pilot.press(*"qwen", "enter")
+    assert await harness.wait_for(lambda app: len(screen._repo_ids) == 1)
+    assert await harness.wait_for(lambda app: ROW in screen._sizes)
+    await harness.pilot.press("enter")
+    assert await harness.wait_for(lambda app: started.is_set())
+    assert harness.app.operations.current is OperationKind.DOWNLOADING
+
+    harness.app.query_one(TabbedContent).active = "chat"
+    await harness.pilot.pause()
+    assert harness.app.query_one(ModelsPane)._discover_pane is screen
+    assert harness.app.operations.current is OperationKind.DOWNLOADING
+
+    await harness.pilot.press("escape")
+    assert await harness.wait_for(
+        lambda app: harness.app.query_one(ModelsPane)._discover_pane is None
+    )
+    assert harness.app.operations.current == OperationKind.IDLE
 
 
 async def test_low_disk_warns_then_proceeds(
@@ -323,11 +454,11 @@ async def test_low_disk_warns_then_proceeds(
         # before the success log + dismiss.
         time.sleep(0.35)
 
-    monkeypatch.setattr("mlx_tui.search_screen.list_results", _stub_list_low)
-    monkeypatch.setattr("mlx_tui.search_screen.repo_snapshot", _stub_snapshot_low)
-    monkeypatch.setattr("mlx_tui.search_screen.free_disk_bytes", _stub_free_low)
+    monkeypatch.setattr("mlx_tui.discover_pane.list_results", _stub_list_low)
+    monkeypatch.setattr("mlx_tui.discover_pane.repo_snapshot", _stub_snapshot_low)
+    monkeypatch.setattr("mlx_tui.discover_pane.free_disk_bytes", _stub_free_low)
     monkeypatch.setattr(
-        "mlx_tui.search_screen.download_snapshot", _recording_download_low
+        "mlx_tui.discover_pane.download_snapshot", _recording_download_low
     )
 
     # open manually (cannot use helper which patches free to 10GB)
@@ -337,9 +468,11 @@ async def test_low_disk_warns_then_proceeds(
         pass
     await harness.pilot.press("/")
     await harness.pilot.pause()
-    assert await harness.wait_for(lambda app: isinstance(app.screen, SearchScreen))
-    screen = harness.app.screen
-    assert isinstance(screen, SearchScreen)
+    assert await harness.wait_for(
+        lambda app: app.query_one(ModelsPane)._discover_pane is not None
+    )
+    screen = harness.app.query_one(ModelsPane)._discover_pane
+    assert screen is not None
 
     await harness.pilot.press(*"qwen", "enter")
     assert await harness.wait_for(lambda app: len(screen._repo_ids) == 1)
@@ -410,10 +543,10 @@ async def test_size_and_download_share_revision_and_expanded_patterns(
         captured["repo_id"] = repo_id
         captured["revision"] = revision
 
-    monkeypatch.setattr("mlx_tui.search_screen.list_results", _stub_list)
-    monkeypatch.setattr("mlx_tui.search_screen.repo_snapshot", _stub_snapshot)
-    monkeypatch.setattr("mlx_tui.search_screen.free_disk_bytes", _stub_free)
-    monkeypatch.setattr("mlx_tui.search_screen.download_snapshot", _recording_download)
+    monkeypatch.setattr("mlx_tui.discover_pane.list_results", _stub_list)
+    monkeypatch.setattr("mlx_tui.discover_pane.repo_snapshot", _stub_snapshot)
+    monkeypatch.setattr("mlx_tui.discover_pane.free_disk_bytes", _stub_free)
+    monkeypatch.setattr("mlx_tui.discover_pane.download_snapshot", _recording_download)
 
     def _noop_rescan(self: ModelsPane) -> None:
         return None
@@ -426,9 +559,11 @@ async def test_size_and_download_share_revision_and_expanded_patterns(
         pass
     await harness.pilot.press("/")
     await harness.pilot.pause()
-    assert await harness.wait_for(lambda app: isinstance(app.screen, SearchScreen))
-    screen = harness.app.screen
-    assert isinstance(screen, SearchScreen)
+    assert await harness.wait_for(
+        lambda app: app.query_one(ModelsPane)._discover_pane is not None
+    )
+    screen = harness.app.query_one(ModelsPane)._discover_pane
+    assert screen is not None
 
     await harness.pilot.press(*"qwen", "enter")
     assert await harness.wait_for(lambda app: len(screen._repo_ids) == 1)
@@ -468,7 +603,7 @@ async def test_cancel_pending_until_acknowledged(
         assert ack.wait(timeout=5)
         raise CancelledDownload("cancelled by user")  # noqa: PLC0415  # type: ignore[no-untyped-call]
 
-    monkeypatch.setattr("mlx_tui.search_screen.download_snapshot", _ack_download)
+    monkeypatch.setattr("mlx_tui.discover_pane.download_snapshot", _ack_download)
     rescans: list[int] = []
 
     def _spy_rescan(self: ModelsPane) -> None:
@@ -499,7 +634,7 @@ async def test_cancel_pending_until_acknowledged(
     assert await harness.wait_for(
         lambda app: "cancellation requested" in pending_line()
     )
-    assert isinstance(harness.app.screen, SearchScreen)
+    assert harness.app.query_one(ModelsPane)._discover_pane is screen
     assert screen._downloading == ROW
     assert screen.query_one("#search-input", Input).disabled is True
     assert not any("download cancelled" in line for line in harness.app_log_lines())
@@ -518,7 +653,9 @@ async def test_cancel_pending_until_acknowledged(
             "download cancelled" in line for line in harness.app_log_lines()
         )
     )
-    assert await harness.wait_for(lambda app: not isinstance(app.screen, SearchScreen))
+    assert await harness.wait_for(
+        lambda app: app.query_one(ModelsPane)._discover_pane is None
+    )
     assert _downloading(screen) is None
     assert screen._cancel_event is None
     assert rescans == [1]
@@ -562,7 +699,7 @@ async def test_repeated_escape_single_request(
         assert ack.wait(timeout=5)
         raise CancelledDownload("cancelled by user")  # noqa: PLC0415  # type: ignore[no-untyped-call]
 
-    monkeypatch.setattr("mlx_tui.search_screen.download_snapshot", _ack_download)
+    monkeypatch.setattr("mlx_tui.discover_pane.download_snapshot", _ack_download)
 
     screen = await open_search(harness, monkeypatch)
     await harness.pilot.press(*"qwen", "enter")
@@ -576,7 +713,7 @@ async def test_repeated_escape_single_request(
     await harness.pilot.press("escape")
     await harness.pilot.press("escape")
     await harness.pilot.pause()
-    assert isinstance(harness.app.screen, SearchScreen)
+    assert harness.app.query_one(ModelsPane)._discover_pane is screen
     assert screen._downloading == ROW
 
     ack.set()
@@ -585,7 +722,9 @@ async def test_repeated_escape_single_request(
             "download cancelled" in line for line in harness.app_log_lines()
         )
     )
-    assert await harness.wait_for(lambda app: not isinstance(app.screen, SearchScreen))
+    assert await harness.wait_for(
+        lambda app: app.query_one(ModelsPane)._discover_pane is None
+    )
     await harness.pilot.pause()
     assert (
         len(
@@ -620,7 +759,7 @@ async def test_error_before_ack_reports_failure_not_cancel(
             time.sleep(0.01)
         raise RuntimeError("disk full")
 
-    monkeypatch.setattr("mlx_tui.search_screen.download_snapshot", _fail_after_cancel)
+    monkeypatch.setattr("mlx_tui.discover_pane.download_snapshot", _fail_after_cancel)
 
     screen = await open_search(harness, monkeypatch)
     await harness.pilot.press(*"qwen", "enter")
@@ -636,7 +775,7 @@ async def test_error_before_ack_reports_failure_not_cancel(
             for line in harness.app_log_lines()
         )
     )
-    assert isinstance(harness.app.screen, SearchScreen)
+    assert harness.app.query_one(ModelsPane)._discover_pane is screen
     assert screen.query_one("#search-input", Input).disabled is False
     assert not any("download cancelled" in line for line in harness.app_log_lines())
     dl_plain = _static_plain(screen.query_one("#dl-progress", Static))
@@ -682,7 +821,7 @@ async def test_size_lookup_failure_logs_once_with_repo_id(
     assert await harness.wait_for(lambda app: len(screen._repo_ids) == 1)
     assert await harness.wait_for(lambda app: ROW in screen._sizes)
 
-    monkeypatch.setattr("mlx_tui.search_screen.repo_snapshot", failing_snapshot)
+    monkeypatch.setattr("mlx_tui.discover_pane.repo_snapshot", failing_snapshot)
     del screen._sizes[ROW]
     screen._fetch_size(ROW, screen._search_generation)
     assert await harness.wait_for(size_failed), harness.app_log_lines()
@@ -694,10 +833,10 @@ async def test_size_lookup_failure_logs_once_with_repo_id(
     assert len(size_failed_lines()) == 1
 
     # A successful fetch clears the source; recurrence becomes visible again.
-    monkeypatch.setattr("mlx_tui.search_screen.repo_snapshot", working_snapshot)
+    monkeypatch.setattr("mlx_tui.discover_pane.repo_snapshot", working_snapshot)
     screen._fetch_size(ROW, screen._search_generation)
     assert await harness.wait_for(lambda app: ROW in screen._sizes)
-    monkeypatch.setattr("mlx_tui.search_screen.repo_snapshot", failing_snapshot)
+    monkeypatch.setattr("mlx_tui.discover_pane.repo_snapshot", failing_snapshot)
     del screen._sizes[ROW]
     screen._fetch_size(ROW, screen._search_generation)
     assert await harness.wait_for(lambda app: len(size_failed_lines()) == 2), (
@@ -719,7 +858,7 @@ async def test_old_search_completion_cannot_replace_new_results(
         return ["new/repo"]
 
     screen = await open_search(harness, monkeypatch)
-    monkeypatch.setattr("mlx_tui.search_screen.list_results", delayed_list)
+    monkeypatch.setattr("mlx_tui.discover_pane.list_results", delayed_list)
     search_input = screen.query_one("#search-input", Input)
 
     search_input.focus()
@@ -750,7 +889,7 @@ async def test_empty_submit_invalidates_pending_search(
         return ["old/repo"]
 
     screen = await open_search(harness, monkeypatch)
-    monkeypatch.setattr("mlx_tui.search_screen.list_results", delayed_list)
+    monkeypatch.setattr("mlx_tui.discover_pane.list_results", delayed_list)
     search_input = screen.query_one("#search-input", Input)
 
     search_input.focus()
@@ -779,7 +918,7 @@ async def test_removed_row_ignores_pending_size_completion(
         return RepoSnapshot(revision="rev-old", files=tuple(SIZE_PAIRS))
 
     screen = await open_search(harness, monkeypatch)
-    monkeypatch.setattr("mlx_tui.search_screen.repo_snapshot", delayed_snapshot)
+    monkeypatch.setattr("mlx_tui.discover_pane.repo_snapshot", delayed_snapshot)
 
     await harness.pilot.press(*"qwen", "enter")
     assert await harness.wait_for(lambda app: size_started.is_set())
@@ -812,7 +951,7 @@ async def test_same_repo_new_generation_keeps_new_metadata(
         return RepoSnapshot(revision="rev-new", files=new_pairs)
 
     screen = await open_search(harness, monkeypatch)
-    monkeypatch.setattr("mlx_tui.search_screen.repo_snapshot", snapshots)
+    monkeypatch.setattr("mlx_tui.discover_pane.repo_snapshot", snapshots)
     search_input = screen.query_one("#search-input", Input)
 
     await harness.pilot.press(*"qwen", "enter")
@@ -841,7 +980,7 @@ async def test_stale_search_error_does_not_replace_current_status(
         return ["new/repo"]
 
     screen = await open_search(harness, monkeypatch)
-    monkeypatch.setattr("mlx_tui.search_screen.list_results", delayed_list)
+    monkeypatch.setattr("mlx_tui.discover_pane.list_results", delayed_list)
     search_input = screen.query_one("#search-input", Input)
 
     search_input.focus()
@@ -855,7 +994,7 @@ async def test_stale_search_error_does_not_replace_current_status(
     release_old.set()
     await harness.pilot.pause()
     status = _static_plain(screen.query_one("#search-status", Static))
-    assert status == "1 results"
+    assert status.startswith("1 results")
     assert not any("old search" in line for line in harness.app_log_lines())
 
 
@@ -876,7 +1015,7 @@ async def test_stale_size_error_does_not_clear_new_metadata(
         return RepoSnapshot(revision="rev-new", files=tuple(SIZE_PAIRS))
 
     screen = await open_search(harness, monkeypatch)
-    monkeypatch.setattr("mlx_tui.search_screen.repo_snapshot", snapshots)
+    monkeypatch.setattr("mlx_tui.discover_pane.repo_snapshot", snapshots)
     search_input = screen.query_one("#search-input", Input)
 
     await harness.pilot.press(*"qwen", "enter")
@@ -898,7 +1037,9 @@ async def test_modal_escape_owns_key_even_with_chat_active(
     pane = harness.chat_pane()
     pane._turn_active = True
     try:
-        screen = await open_search(harness, monkeypatch)
+        screen = SearchScreen()
+        harness.app.push_screen(screen)
+        await harness.pilot.pause()
         assert harness.app.screen is screen
         await harness.pilot.press(*"d/query")
         assert screen.query_one("#search-input", Input).value == "d/query"

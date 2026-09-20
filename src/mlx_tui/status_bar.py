@@ -40,7 +40,9 @@ class StatusBar(Horizontal):
         margin: 0 1;
     }
     #memory-label {
-        width: auto;
+        width: 1fr;
+        min-width: 0;
+        overflow: hidden;
         content-align: left middle;
     }
     """

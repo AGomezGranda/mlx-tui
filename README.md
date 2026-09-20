@@ -6,8 +6,9 @@ streaming responses, and compare two pinned coding profiles from one screen.
 
 ## What you can do
 
-- **Models:** inspect the Hugging Face cache, search and download from
-  `mlx-community`, select a model, or delete a cached repository.
+- **Models:** inspect cached revisions with local memory estimates, choose an
+  Installed estimate context, discover MLX candidates across Hugging Face,
+  select a model, or delete a cached repository.
 - **Chat:** stream responses, adjust request parameters, attach text files,
   and return to locally saved sessions.
 - **Compare:** run the fixed `coding-check-v1` task against two pinned profiles,

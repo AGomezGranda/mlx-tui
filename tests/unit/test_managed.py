@@ -660,3 +660,51 @@ def test_managed_repeat_activation_listener_mismatch_cannot_succeed(
         if child.poll() is None:
             child.terminate()
             child.wait(timeout=5)
+
+
+def test_managed_runtime_inspection_is_read_only_and_cached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _owned_root(tmp_path)
+    evidence: dict[str, JSONValue] = {
+        "schema_version": 1,
+        "runtime_commit": RUNTIME_COMMIT,
+    }
+    calls: list[Path] = []
+
+    def fake_inspect(path: Path) -> dict[str, JSONValue]:
+        calls.append(path)
+        return evidence
+
+    monkeypatch.setattr(managed_runtime, "inspect_runtime", fake_inspect)
+    runtime = managed_runtime.ManagedRuntime(root)
+
+    assert runtime.inspect() == evidence
+    assert runtime.process is None
+    assert runtime.install_evidence == evidence
+    assert calls == [root]
+
+
+def test_managed_runtime_failed_reinspection_clears_cached_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _owned_root(tmp_path)
+    runtime = managed_runtime.ManagedRuntime(root)
+    runtime.install_evidence = {"schema_version": 1}
+
+    def failed(_path: Path) -> dict[str, JSONValue]:
+        raise ManagedRuntimeError("inspection failed")
+
+    monkeypatch.setattr(managed_runtime, "inspect_runtime", failed)
+    with pytest.raises(ManagedRuntimeError, match="inspection failed"):
+        runtime.inspect()
+    assert runtime.install_evidence == {}
+
+
+def test_missing_managed_runtime_is_unverified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = managed_runtime.ManagedRuntime(tmp_path / "missing")
+    with pytest.raises(ManagedRuntimeError, match="missing"):
+        runtime.inspect()
+    assert runtime.install_evidence == {}

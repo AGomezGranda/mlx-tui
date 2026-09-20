@@ -126,6 +126,16 @@ def log_app(app: Any, message: str, style: str | None = None) -> None:
 
 def check_action(app: Any, action: str, parameters: tuple[object, ...]) -> bool | None:
     if action == "cancel_chat":
+        try:
+            from mlx_tui.discover_pane import DiscoverPane  # noqa: PLC0415
+
+            discover = app.query_one(DiscoverPane)
+        except NoMatches:
+            discover = None
+        if discover is not None and (
+            discover.visible or discover._downloading is not None
+        ):
+            return True
         if app.operations.current is OperationKind.COMPARING:
             try:
                 pane = app.query_one(ComparePane)

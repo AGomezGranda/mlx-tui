@@ -29,7 +29,7 @@ def test_quant_cell_is_explicitly_a_name_hint() -> None:
 
 
 def test_runtime_fit_is_unknown() -> None:
-    assert runtime_fit_cell() == "unknown"
+    assert runtime_fit_cell() == "Unknown"
 
 
 def test_unknown_quant_hint_is_explicit() -> None:

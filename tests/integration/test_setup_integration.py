@@ -8,7 +8,9 @@ import pytest
 from huggingface_hub import scan_cache_dir
 from textual.widgets import Button, Static, TabbedContent
 
-from mlx_tui.search_screen import SearchScreen
+from mlx_tui.models_pane import ModelsPane
+from mlx_tui.search import RepoSnapshot
+from mlx_tui.search_screen import ResultsTable, SearchScreen
 from mlx_tui.setup_screen import SetupScreen
 from tests.conftest import AppHarness
 
@@ -115,6 +117,66 @@ async def test_keyboard_setup_selects_managed_downloads_and_reaches_compare(
     await stub_harness.pilot.press("enter")
     await stub_harness.pilot.pause()
     assert stub_harness.app.query_one(TabbedContent).active == "compare"
+
+
+async def test_modal_discover_preserves_pinned_revision_through_download(
+    stub_harness: AppHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_id = "mlx-community/pinned-model"
+    revision = "b" * 40
+    observed: dict[str, str | None] = {}
+
+    def snapshot(
+        _api: object,
+        _repo_id: str,
+        *,
+        revision: str | None = None,
+    ) -> RepoSnapshot:
+        observed["revision"] = revision
+        return RepoSnapshot(
+            revision=revision,
+            files=(("model.safetensors", 2_000_000_000),),
+        )
+
+    def download(
+        _repo_id: str,
+        *,
+        on_progress=None,  # type: ignore[no-untyped-def]
+        cancel_event=None,  # type: ignore[no-untyped-def]
+        revision: str | None = None,
+        **_kwargs: object,
+    ) -> None:
+        del on_progress, cancel_event
+        observed["download_revision"] = revision
+
+    monkeypatch.setattr("mlx_tui.search_screen.repo_snapshot", snapshot)
+    monkeypatch.setattr("mlx_tui.search_screen.download_snapshot", download)
+
+    def noop_rescan(_self: ModelsPane) -> None:
+        return None
+
+    monkeypatch.setattr(ModelsPane, "rescan", noop_rescan)
+
+    screen = SearchScreen(((repo_id, revision),))
+    stub_harness.app.push_screen(screen)
+    await stub_harness.pilot.pause()
+    assert await stub_harness.wait_for(
+        lambda _app: observed.get("revision") == revision
+    )
+    assert await stub_harness.wait_for(
+        lambda _app: repo_id in screen.discover._inspected
+    )
+
+    table = screen.query_one("#search-results", ResultsTable)
+    table.focus()
+    await stub_harness.pilot.press("enter")
+    assert await stub_harness.wait_for(
+        lambda _app: observed.get("download_revision") == revision
+    )
+    assert await stub_harness.wait_for(
+        lambda _app: not isinstance(stub_harness.app.screen, SearchScreen)
+    )
 
 
 async def test_install_cancel_waits_for_worker_cleanup(

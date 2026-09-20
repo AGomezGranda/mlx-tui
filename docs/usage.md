@@ -8,13 +8,42 @@ is process memory, not memory used by one model.
 
 ## Models, search, and Activity
 
-**Models** lists repositories in the Hugging Face cache with their disk size
-and a name-derived quantization hint. Runtime fit is unknown. Select a row and
-press `Enter` to load or switch the request target; press `d` to delete the
-selected cached repository after confirmation. Press `/` to search
-`mlx-community` and download a model. Search displays up to 50 results with
-quantization and free-disk indicators. Downloads show progress, resume on
-retry, and trigger a cache rescan on success.
+**Models** lists cached repositories with compatibility, a local memory-fit
+estimate when enough metadata is available, aggregate cache disk size, and a
+name-derived quantization hint. The left side shows labelled Mac memory
+probes, the stable assessment budget, and the Installed estimate context; the
+table and selected-model details stay together on the right. The details use
+the revision selected by the loader. An estimate assumes one active sequence
+and the applied context length; it is advisory and does not guarantee a
+successful load.
+
+Choose 2K, 4K, 8K, 16K, or 32K in **Estimate context** to recalculate
+immediately. Choose **Custom**, enter a positive token count, and press
+`Enter` to apply it. Invalid custom input leaves the previous estimate in
+place. This control is for estimates only; it does not change configuration or
+the executing server. **More details** opens the selected model's full
+read-only assessment, including its exact revision and assumptions.
+
+Select a row and press `Enter` to load or switch the request target; press `d`
+to delete the selected cached repository after confirmation. Known unsupported
+models cannot be launched with the app's current runtime. Unknown compatibility
+is shown before an explicit load attempt.
+
+Press `/` or **Discover on Hugging Face** to replace the Installed view with
+the inline discovery workspace; `Esc` or **← Installed** returns to the same
+table selection. Setup and Compare open the same workspace as a modal and
+return to their caller. Paste an exact `owner/repository` ID or model URL to
+inspect it regardless of tags.
+The optional publisher field narrows broad searches.
+Discovery inspects a pinned revision before download. Missing file sizes remain
+unknown; a disk-space check does not establish runtime compatibility. Select
+Chat, Coding, or Reasoning and a context length to inspect the assessment and
+its evidence. The result filter separates recommended, comfortable, tight,
+unsupported, and unknown candidates; uninspected rows remain unknown. **Load
+more** expands the popularity-ordered result set by 50.
+Search lists are cached for this session for up to 24 hours; **Refresh** asks
+the Hub again.
+Downloads show progress, resume on retry, and trigger a cache rescan on success.
 
 Press `F2` to expand **Activity** for server output, downloads, and notices.
 Its collapsed summary retains the last unseen warning or error. Incoming
@@ -98,7 +127,7 @@ Temporary-session snapshots stay in memory.
 | --- | --- | --- |
 | `Enter` | Models row | Load or swap to the selected model |
 | `d` | Models | Delete the selected cached repository, with confirmation |
-| `/` | Models | Search `mlx-community` |
+| `/` | Models | Discover models on Hugging Face |
 | `Enter` | Chat composer | Insert a newline |
 | `Ctrl+Enter` | Chat composer | Send the message |
 | `Tab` | Chat composer or controls | Move focus |
@@ -108,7 +137,7 @@ Temporary-session snapshots stay in memory.
 | `Ctrl+S` | Server startup available | Start the server |
 | `Ctrl+G` | Main screen | Open config in `$EDITOR` and reload on save |
 | `Ctrl+N` / `Ctrl+O` | Main screen | Cycle presets forward / back |
-| `Esc` | Active operation | Request cancellation or close the search modal |
+| `Esc` | Active operation | Request cancellation or return from Discover |
 | `Ctrl+Q` | Main screen | Quit |
 
 Download cancellation waits for the worker to acknowledge it, then rescans

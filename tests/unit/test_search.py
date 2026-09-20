@@ -17,6 +17,7 @@ from mlx_tui.search import (
     CancelledDownload,
     RepoSnapshot,
     _throttled_tqdm,
+    exact_repo_id,
     filtered_download_size,
     fits_disk,
     free_disk_bytes,
@@ -46,8 +47,23 @@ class _StubApi:
         self.captured_model_info: tuple[str, bool] | None = None
         self.captured_revision: str | None = None
 
-    def list_models(self, *, author: str, search: str, limit: int):  # type: ignore[no-untyped-def]
-        self.captured_list_kwargs = {"author": author, "search": search, "limit": limit}
+    def list_models(
+        self,
+        *,
+        search: str | None,
+        filter: str,
+        sort: str,
+        limit: int,
+        author: str | None = None,
+    ):  # type: ignore[no-untyped-def]
+        self.captured_list_kwargs = {
+            "search": search,
+            "filter": filter,
+            "sort": sort,
+            "limit": limit,
+        }
+        if author:
+            self.captured_list_kwargs["author"] = author
         return self.list_infos
 
     def model_info(
@@ -67,20 +83,45 @@ def _siblings_with_sizes(*pairs: tuple[str, int | None]):  # type: ignore[no-unt
 # ---------------------------------------------------------------------------
 
 
-def test_list_results_maps_ids_and_pins_scope() -> None:
+def test_list_results_maps_ids_across_publishers() -> None:
     from huggingface_hub.hf_api import ModelInfo  # noqa: PLC0415
 
     infos = [
         ModelInfo(id="mlx-community/foo-4bit"),
-        ModelInfo(id="mlx-community/bar-8bit"),
+        ModelInfo(id="other/bar-8bit"),
     ]
     stub = _StubApi(list_infos=infos)
     ids = list_results(stub, "qwen")  # type: ignore[arg-type]
-    assert ids == ["mlx-community/foo-4bit", "mlx-community/bar-8bit"]
+    assert ids == ["mlx-community/foo-4bit", "other/bar-8bit"]
     assert stub.captured_list_kwargs == {
-        "author": "mlx-community",
         "search": "qwen",
+        "filter": "mlx",
+        "sort": "downloads",
         "limit": 50,
+    }
+
+
+def test_direct_model_url_bypasses_tag_filter() -> None:
+    stub = _StubApi()
+    ids = list_results(
+        stub,  # type: ignore[arg-type]
+        "https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-mlx-2bit",
+    )
+    assert ids == ["prism-ml/Ternary-Bonsai-2-27B-mlx-2bit"]
+    assert stub.captured_model_info == (ids[0], False)
+    assert stub.captured_list_kwargs is None
+    assert exact_repo_id("https://example.com/owner/model") is None
+
+
+def test_publisher_filter_is_optional_and_keeps_mlx_filter() -> None:
+    stub = _StubApi()
+    list_results(stub, "qwen", author="another-publisher")  # type: ignore[arg-type]
+    assert stub.captured_list_kwargs == {
+        "search": "qwen",
+        "filter": "mlx",
+        "sort": "downloads",
+        "limit": 50,
+        "author": "another-publisher",
     }
 
 
@@ -137,6 +178,13 @@ def test_repo_snapshot_returns_revision_and_files() -> None:
     assert snapshot.revision == "rev-a"
     assert snapshot.files == (("model.safetensors", 100), ("config.json", 50))
     assert stub.captured_model_info == ("mlx-community/x", True)
+
+
+def test_repo_snapshot_preserves_unknown_file_size() -> None:
+    stub = _StubApi(siblings=_siblings_with_sizes(("model.safetensors", None)))
+    snapshot = repo_snapshot(stub, "other/x")  # type: ignore[arg-type]
+    assert snapshot.files == (("model.safetensors", None),)
+    assert filtered_download_size(snapshot.files) is None
 
 
 def test_repo_snapshot_none_sha_passthrough() -> None:

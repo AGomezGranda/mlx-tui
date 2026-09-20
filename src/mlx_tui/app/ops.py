@@ -110,6 +110,15 @@ def ensure_managed_runtime(app: Any) -> ManagedRuntime:
     return app.managed_runtime
 
 
+def reassess_models(app: Any) -> None:
+    """Recompute model assessments after an explicit runtime change."""
+    try:
+        pane = app.query_one(ModelsPane)
+        pane.reassess(context=pane.applied_context)
+    except NoMatches:
+        return
+
+
 def set_runtime_mode(app: Any, mode: str) -> None:
     if mode not in ("attach", "managed"):
         mode = "attach"
@@ -118,6 +127,7 @@ def set_runtime_mode(app: Any, mode: str) -> None:
     app.config = replace(app.config, runtime_mode=mode)  # type: ignore[arg-type]
     if mode == "managed":
         app.ensure_managed_runtime()
+    reassess_models(app)
 
 
 def _managed_target(app: Any) -> object:
@@ -230,6 +240,15 @@ def cancel_chat_for_swap(app: Any) -> None:
 
 
 def action_cancel_chat(app: Any) -> None:
+    try:
+        from mlx_tui.discover_pane import DiscoverPane  # noqa: PLC0415
+
+        discover = app.query_one(DiscoverPane)
+    except NoMatches:
+        discover = None
+    if discover is not None and (discover.visible or discover._downloading is not None):
+        discover.request_close()
+        return
     if app.operations.current is OperationKind.COMPARING:
         try:
             from mlx_tui.compare.pane import ComparePane  # noqa: PLC0415

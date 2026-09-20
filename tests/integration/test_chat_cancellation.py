@@ -55,6 +55,7 @@ async def test_chat_lease_blocks_swap_and_delete_until_cleanup(
     )
     table = harness.app.query_one("#models-table")
     table.focus()
+    await harness.pilot.pause()
 
     inp = harness.app.query_one("#chat-input", ChatInput)
     inp.text = "hi"
