@@ -150,6 +150,9 @@ def _do_submit(pane: Any, raw: str, editor: ChatInput) -> None:  # noqa: PLR0911
     pane._pending_draft = raw
     pane._cancel_requested = False
     pane._turn_active = True
+    pane._zen_turn_stats = ""
+    pane._refresh_composer_hint()
+    pane.refresh_zen_info()
     pane._turn_started = False
     # Pre-send checkpoint state: capture normalized controls and the exact
     # model through the single dirty path; the worker persists the running
@@ -404,6 +407,17 @@ async def _run_turn(  # noqa: PLR0913, PLR0915, PLR0912, PLR0917
             return
         pane.tui.record_generation_success(model_at_send, result.response_model)
         outcome = pane._classify_outcome(result)
+        from mlx_tui.chat_ui.pane import format_zen_stats  # noqa: PLC0415
+
+        completion_tokens = result.accounting.completion_tokens
+        if not result.stream_complete and result.accounting.completion_estimated:
+            completion_tokens = None
+        pane._zen_turn_stats = format_zen_stats(
+            completion_tokens,
+            result.total_s,
+            estimated=result.accounting.completion_estimated,
+        )
+        pane.refresh_zen_info()
         stamp = pane._format_stamp(result, max_tok)
         notices = pane._outcome_notices(result, max_tok, excluded_turns)
         # Final success still comes only from TurnResult and the pane's
@@ -694,6 +708,7 @@ def _on_turn_progress(pane: Any, progress: TurnProgress) -> None:
     _merge_tool_fragments(pane._progress_tools, progress.tool_fragments)
     if progress.response_model:
         pane._progress_response_model = progress.response_model
+    pane.refresh_zen_info()
     # Stream at most once per second; terminal/switch/clear/shutdown flush.
     now = time.monotonic()
     if now - pane._last_checkpoint >= 1.0:
@@ -908,6 +923,7 @@ def end_turn(pane: Any) -> None:
     turn, pane._active_turn = pane._active_turn, None
     pane._turn_worker = None
     pane._turn_active = False
+    pane._refresh_composer_hint()
     pane._turn_started = False
     restore_focus, pane._restore_composer_focus = (
         pane._restore_composer_focus,
@@ -955,6 +971,7 @@ def end_turn(pane: Any) -> None:
             ):
                 inp.focus()
         pane.tui.refresh_activity()
+        pane.refresh_zen_info()
 
 
 # -- Session controls (2g), reopen (2i), shutdown (2j) --

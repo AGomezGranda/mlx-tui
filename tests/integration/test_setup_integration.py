@@ -122,10 +122,13 @@ async def test_keyboard_setup_selects_managed_downloads_and_reaches_compare(
 async def test_modal_discover_preserves_pinned_revision_through_download(
     stub_harness: AppHarness,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     repo_id = "mlx-community/pinned-model"
     revision = "b" * 40
-    observed: dict[str, str | None] = {}
+    observed: dict[str, object] = {}
+    config_file = tmp_path / "config.json"
+    config_file.write_text("{}")
 
     def snapshot(
         _api: object,
@@ -150,8 +153,15 @@ async def test_modal_discover_preserves_pinned_revision_through_download(
         del on_progress, cancel_event
         observed["download_revision"] = revision
 
+    def download_metadata(
+        requested_repo: str, filename: str, *, revision: str | None = None
+    ) -> str:
+        observed["metadata_request"] = (requested_repo, filename, revision)
+        return str(config_file)
+
     monkeypatch.setattr("mlx_tui.search_screen.repo_snapshot", snapshot)
     monkeypatch.setattr("mlx_tui.search_screen.download_snapshot", download)
+    monkeypatch.setattr("mlx_tui.search_screen.hf_hub_download", download_metadata)
 
     def noop_rescan(_self: ModelsPane) -> None:
         return None
@@ -167,6 +177,7 @@ async def test_modal_discover_preserves_pinned_revision_through_download(
     assert await stub_harness.wait_for(
         lambda _app: repo_id in screen.discover._inspected
     )
+    assert observed["metadata_request"] == (repo_id, "config.json", revision)
 
     table = screen.query_one("#search-results", ResultsTable)
     table.focus()

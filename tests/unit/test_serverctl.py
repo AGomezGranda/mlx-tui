@@ -24,6 +24,24 @@ from tests.unit.test_chat import install_transport
 MODELS_URL = "http://stub/v1/models"
 
 
+class FakeClock:
+    def __init__(self) -> None:
+        self.elapsed = 0.0
+
+    def monotonic(self) -> float:
+        return self.elapsed
+
+    def sleep(self, seconds: float) -> None:
+        self.elapsed += seconds
+
+
+@pytest.fixture
+def serverctl_clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
+    clock = FakeClock()
+    monkeypatch.setattr(serverctl, "time", clock)
+    return clock
+
+
 @pytest.mark.parametrize(
     ("start_cmd", "model_id", "expected"),
     [
@@ -595,15 +613,18 @@ def test_wait_healthy_green_first_poll_with_matching_model(
 
 
 def test_wait_healthy_wrong_model_then_right(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, serverctl_clock: FakeClock
 ) -> None:
     generation_calls = 0
+    request_counts = {"health": 0, "catalogue": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal generation_calls
         if request.url.path == "/health":
+            request_counts["health"] += 1
             return httpx.Response(200, json={"status": "ok"})
         if request.method == "GET":
+            request_counts["catalogue"] += 1
             return httpx.Response(200, json={"data": [{"id": "other"}]})
         generation_calls += 1
         model = "other" if generation_calls == 1 else "m"
@@ -620,6 +641,8 @@ def test_wait_healthy_wrong_model_then_right(
     assert probe is not None
     assert probe.model_id == "m"
     assert generation_calls == 2
+    assert request_counts == {"health": 2, "catalogue": 2}
+    assert serverctl_clock.elapsed == 1.0
 
 
 def test_wait_healthy_catalog_verifies_target_with_completion(
@@ -644,14 +667,19 @@ def test_wait_healthy_catalog_verifies_target_with_completion(
 
 
 def test_wait_healthy_times_out_when_always_red(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, serverctl_clock: FakeClock
 ) -> None:
+    request_counts = {"health": 0, "catalogue": 0}
+
+    def always_red(request: httpx.Request) -> httpx.Response:
+        request_counts["health" if request.url.path == "/health" else "catalogue"] += 1
+        return httpx.Response(502, text="<html>proxy</html>")
+
     install_transport(
         monkeypatch,
-        lambda request: httpx.Response(502, text="<html>proxy</html>"),
+        always_red,
     )
     ticks: list[int] = []
-    start = time.monotonic()
 
     probe = serverctl.wait_healthy(
         MODELS_URL,
@@ -661,8 +689,9 @@ def test_wait_healthy_times_out_when_always_red(
     )
 
     assert probe is None
-    assert time.monotonic() - start >= 0.9
-    assert ticks  # progress ticks were emitted while waiting
+    assert serverctl_clock.elapsed == 1.0
+    assert ticks == [0, 1]
+    assert request_counts == {"health": 2, "catalogue": 2}
 
 
 def test_wait_healthy_target_none_accepts_any_green(
@@ -688,13 +717,18 @@ def test_wait_healthy_target_none_accepts_any_green(
 
 
 def test_wait_healthy_wrong_endpoint_model_times_out(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, serverctl_clock: FakeClock
 ) -> None:
+    request_counts = {"health": 0, "catalogue": 0, "generation": 0}
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/health":
+            request_counts["health"] += 1
             return httpx.Response(200, json={"status": "ok"})
         if request.method == "GET":
+            request_counts["catalogue"] += 1
             return httpx.Response(200, json={"data": [{"id": "other"}]})
+        request_counts["generation"] += 1
         return httpx.Response(200, json={"model": "other", "choices": [{}]})
 
     install_transport(monkeypatch, handler)
@@ -706,16 +740,23 @@ def test_wait_healthy_wrong_endpoint_model_times_out(
     )
 
     assert probe is None
+    assert serverctl_clock.elapsed == 1.0
+    assert request_counts == {"health": 2, "catalogue": 2, "generation": 1}
 
 
 def test_wait_healthy_missing_response_identity_times_out(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, serverctl_clock: FakeClock
 ) -> None:
+    request_counts = {"health": 0, "catalogue": 0, "generation": 0}
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/health":
+            request_counts["health"] += 1
             return httpx.Response(200, json={"status": "ok"})
         if request.method == "GET":
+            request_counts["catalogue"] += 1
             return httpx.Response(200, json={"data": [{"id": ""}]})
+        request_counts["generation"] += 1
         return httpx.Response(200, json={"choices": [{}]})
 
     install_transport(monkeypatch, handler)
@@ -727,17 +768,21 @@ def test_wait_healthy_missing_response_identity_times_out(
     )
 
     assert probe is None
+    assert serverctl_clock.elapsed == 1.0
+    assert request_counts == {"health": 2, "catalogue": 2, "generation": 1}
 
 
 def test_wait_healthy_probe_timeout_returns_none(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, serverctl_clock: FakeClock
 ) -> None:
+    request_counts = {"health": 0, "catalogue": 0}
+
     def boom(request: httpx.Request) -> httpx.Response:
+        request_counts["health" if request.url.path == "/health" else "catalogue"] += 1
         raise httpx.ConnectError("boom")
 
     install_transport(monkeypatch, boom)
 
-    start = time.monotonic()
     probe = serverctl.wait_healthy(
         MODELS_URL,
         target_model="m",
@@ -745,4 +790,5 @@ def test_wait_healthy_probe_timeout_returns_none(
     )
 
     assert probe is None
-    assert time.monotonic() - start >= 0.9
+    assert serverctl_clock.elapsed == 1.0
+    assert request_counts == {"health": 2, "catalogue": 2}

@@ -95,6 +95,7 @@ def _refresh_attachment_ui(pane: Any) -> None:
         pane.query_one("#chat-attachments", Static).update(Text(summary))
     except NoMatches:
         pass
+    pane.refresh_zen_info()
 
 
 def _current_window(pane: Any) -> tuple[str, ContextWindow] | None:
@@ -318,3 +319,8 @@ def update_ctx_bar(pane: Any, ctx_len: int, excluded: int = 0) -> None:
         label.add_class("ctx-bar-amber")
     elif style == "red":
         label.add_class("ctx-bar-red")
+    pane._zen_context_text = f"ctx ≈{round(max(0, ctx_len) / max_ctx * 100)}%"
+    if excluded > 0:
+        pane._zen_context_text += f" · {excluded} excluded"
+    pane._zen_context_style = style
+    pane.refresh_zen_info()

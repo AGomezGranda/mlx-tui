@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
 from collections.abc import Callable
 
 import pytest
@@ -25,6 +26,7 @@ from tests.integration.model_helpers import (
     _log_text,
     _select_row,
 )
+from tests.unit.test_boot import FakeProcess
 
 _LONG_BOOT_CMD = (
     f"{sys.executable} -c \"print('booting', flush=True); import time; time.sleep(30)\""
@@ -97,14 +99,38 @@ async def test_double_cold_start_is_guarded(
     monkeypatch.setattr(MlxTuiApp, "_classify_liveness", _always_red)
     await harness.app._poll()
     harness.app.config = AppConfig(start_cmd="sleep 0.5")
+    started = threading.Event()
+    release = threading.Event()
 
-    await harness.pilot.press("ctrl+s")
-    await harness.pilot.press("ctrl+s")
+    def fake_execute(  # noqa: PLR0913
+        plan: BootPlan,
+        config: AppConfig,
+        *,
+        host: str,
+        port: int,
+        on_line: Callable[[str], None],
+        on_tick: Callable[[int], None],
+    ) -> ServerProbe:
+        started.set()
+        if not release.wait(timeout=5):
+            raise TimeoutError("test did not release the boot")
+        return ServerProbe(state="green", model_id=plan.model_id)
 
-    assert await harness.wait_for(
-        lambda a: "operation already in progress" in _log_text(harness)
-    ), _log_text(harness)
-    assert harness.app.operations.current is OperationKind.RESTARTING
+    monkeypatch.setattr("mlx_tui.models_pane.execute_boot", fake_execute)
+
+    try:
+        await harness.pilot.press("ctrl+s")
+        assert await harness.wait_for(lambda _app: started.is_set())
+        await harness.pilot.press("ctrl+s")
+
+        assert await harness.wait_for(
+            lambda a: "operation already in progress" in _log_text(harness)
+        ), _log_text(harness)
+        assert harness.app.operations.current is OperationKind.RESTARTING
+    finally:
+        release.set()
+
+    assert await harness.wait_for(lambda a: a.operations.current is OperationKind.IDLE)
 
 
 async def test_cold_start_when_server_already_up_never_spawns(
@@ -260,9 +286,12 @@ async def test_cold_start_instant_crash_fails_fast(
     harness = stub_harness
     monkeypatch.setattr(MlxTuiApp, "_classify_liveness", _always_red)
     await harness.app._poll()
-    harness.app.config = AppConfig(
-        start_cmd=f"{sys.executable} -c 'raise SystemExit(3)'"
-    )
+
+    def fail_boot(*_args: object, **_kwargs: object) -> ServerProbe:
+        raise RuntimeError("[swap] start_cmd exited 3")
+
+    monkeypatch.setattr("mlx_tui.models_pane.execute_boot", fail_boot)
+    harness.app.config = AppConfig(start_cmd="server")
 
     await harness.pilot.press("ctrl+s")
 
@@ -282,38 +311,39 @@ async def test_cold_start_reports_mid_boot_death(
     harness.server.model_id = "other-model"
     await harness.app._poll()
     harness.server.mode = "error500"
-    harness.app.config = AppConfig(
-        model=ROW.repo_id,
-        start_cmd=(
-            f'{sys.executable} -c "import time; time.sleep(3); raise SystemExit(1)"'
-        ),
-    )
-    procs: list[subprocess.Popen[str]] = []
-    orig_spawn = serverctl.spawn_command
+    harness.app.config = AppConfig(model=ROW.repo_id, start_cmd="server")
+    proc = FakeProcess(None)
+    cleaned: list[object] = []
 
-    def recording_spawn(cmd, *, on_line, shell=False, env=None):  # type: ignore[no-untyped-def]
-        proc = orig_spawn(cmd, on_line=on_line, shell=shell, env=env)
-        procs.append(proc)
-        return proc
+    def fake_spawn(*_args: object, **_kwargs: object) -> tuple[FakeProcess, bool]:
+        return proc, True
 
-    monkeypatch.setattr(serverctl, "spawn_command", recording_spawn)
+    def fake_wait(
+        url: str,
+        *,
+        target_model: str | None = None,
+        is_running: Callable[[], bool] | None = None,
+        timeout_s: float,
+        on_tick: Callable[[int], None] | None = None,
+    ) -> ServerProbe | None:
+        assert is_running is not None
+        assert is_running()
+        proc.poll_result = 1
+        assert not is_running()
+        return None
 
-    try:
-        await harness.pilot.press("ctrl+s")
+    monkeypatch.setattr(serverctl, "spawn_with_grace", fake_spawn)
+    monkeypatch.setattr(serverctl, "wait_healthy", fake_wait)
+    monkeypatch.setattr(serverctl, "terminate_failed_process", cleaned.append)
 
-        assert await harness.wait_for(
-            lambda a: "[swap] start_cmd exited 1" in _log_text(harness),
-            attempts=500,
-        ), _log_text(harness)
-        assert harness.app.operations.current is OperationKind.IDLE
-        assert not harness.app.query_one("#chat-input", ChatInput).disabled
-    finally:
-        for proc in procs:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except Exception:
-                pass
+    await harness.pilot.press("ctrl+s")
+
+    assert await harness.wait_for(
+        lambda a: "[swap] start_cmd exited 1" in _log_text(harness),
+    ), _log_text(harness)
+    assert cleaned == [proc]
+    assert harness.app.operations.current is OperationKind.IDLE
+    assert not harness.app.query_one("#chat-input", ChatInput).disabled
 
 
 async def test_cold_start_timeout_scales_with_model_size(
@@ -327,6 +357,8 @@ async def test_cold_start_timeout_scales_with_model_size(
     harness.app.query_one(ModelsPane)._populate([ROW, big_row])
     harness.app.config = AppConfig(model=big_row.repo_id, start_cmd="true")
     timeouts: list[float] = []
+    proc = FakeProcess(0)
+    cleaned: list[object] = []
 
     def fake_wait(  # noqa: PLR0913
         url: str,
@@ -339,11 +371,12 @@ async def test_cold_start_timeout_scales_with_model_size(
         timeouts.append(timeout_s)
         return ServerProbe(state="green", model_id=target_model)
 
-    def fake_spawn(cmd, *, on_line, shell=False, env=None):  # type: ignore[no-untyped-def]
-        return subprocess.Popen([sys.executable, "-c", "pass"])
+    def fake_spawn(*_args: object, **_kwargs: object) -> tuple[FakeProcess, bool]:
+        return proc, False
 
     monkeypatch.setattr(serverctl, "wait_healthy", fake_wait)
-    monkeypatch.setattr(serverctl, "spawn_command", fake_spawn)
+    monkeypatch.setattr(serverctl, "spawn_with_grace", fake_spawn)
+    monkeypatch.setattr(serverctl, "terminate_failed_process", cleaned.append)
 
     await harness.pilot.press("ctrl+s")
 
@@ -351,6 +384,7 @@ async def test_cold_start_timeout_scales_with_model_size(
         lambda a: "✓ generation verified" in _log_text(harness)
     ), _log_text(harness)
     assert timeouts == [pytest.approx(health_timeout(8 * 2**30))]
+    assert cleaned == []
 
 
 async def test_invalid_start_config_runs_no_stop(
@@ -474,17 +508,34 @@ async def test_failed_boot_terminates_proc_and_restores_controls(
         return None
 
     monkeypatch.setattr(serverctl, "wait_healthy", fake_unhealthy)
+    procs: list[subprocess.Popen[str]] = []
+    orig_spawn = serverctl.spawn_command
+
+    def recording_spawn(cmd, *, on_line, shell=False, env=None):  # type: ignore[no-untyped-def]
+        proc = orig_spawn(cmd, on_line=on_line, shell=shell, env=env)
+        procs.append(proc)
+        return proc
+
+    monkeypatch.setattr(serverctl, "spawn_command", recording_spawn)
     await _select_row(harness)
 
-    await harness.pilot.press("enter")
+    try:
+        await harness.pilot.press("enter")
 
-    assert await harness.wait_for(
-        lambda a: "swap timed out" in _log_text(harness),
-        attempts=500,
-    ), _log_text(harness)
-    assert harness.app.operations.current is OperationKind.IDLE
-    assert not harness.app.query_one("#chat-input", ChatInput).disabled
-    assert not harness.app.query_one("#models-table", ModelsTable).disabled
+        assert await harness.wait_for(
+            lambda a: "swap timed out" in _log_text(harness),
+            attempts=500,
+        ), _log_text(harness)
+        assert harness.app.operations.current is OperationKind.IDLE
+        assert not harness.app.query_one("#chat-input", ChatInput).disabled
+        assert not harness.app.query_one("#models-table", ModelsTable).disabled
+        assert len(procs) == 1
+        assert procs[0].poll() is not None
+    finally:
+        for proc in procs:
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=5)
 
 
 async def test_verified_boot_ui_failure_does_not_terminate_server(

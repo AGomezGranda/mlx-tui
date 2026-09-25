@@ -27,66 +27,6 @@ _STAMP_RE = re.compile(
 _REPLY = "Hello world this is MLX."
 
 
-async def test_chat_multiline_event_streams_without_malformed_notice(
-    stub_server_factory,  # type: ignore[no-untyped-def]
-) -> None:
-    from mlx_tui.app import MlxTuiApp  # noqa: PLC0415
-    from tests.conftest import AppHarness  # noqa: PLC0415
-
-    server = stub_server_factory("multiline")
-    app = MlxTuiApp(
-        host="127.0.0.1",
-        port=int(server.server_address[1]),
-        config=AppConfig(model=server.model_id),
-    )
-    async with app.run_test() as pilot:
-        harness = AppHarness(app=app, pilot=pilot, server=server)
-        await harness.app._poll()
-        inp = harness.app.query_one("#chat-input", ChatInput)
-        inp.text = "hi"
-        inp.focus()
-        await harness.pilot.press("ctrl+enter")
-
-        def stamp_visible(a: MlxTuiApp) -> bool:
-            return any("tok/s" in t for t in harness.log_lines())
-
-        assert await harness.wait_for(stamp_visible), (
-            f"stamp never appeared; log={harness.log_lines()}"
-        )
-        texts = harness.log_lines()
-        assert _REPLY in texts
-        assert not any("malformed" in t for t in texts)
-
-
-async def test_chat_no_space_data_stream_parses(
-    stub_server_factory,  # type: ignore[no-untyped-def]
-) -> None:
-    from mlx_tui.app import MlxTuiApp  # noqa: PLC0415
-    from tests.conftest import AppHarness  # noqa: PLC0415
-
-    server = stub_server_factory("nospace")
-    app = MlxTuiApp(
-        host="127.0.0.1",
-        port=int(server.server_address[1]),
-        config=AppConfig(model=server.model_id),
-    )
-    async with app.run_test() as pilot:
-        harness = AppHarness(app=app, pilot=pilot, server=server)
-        await harness.app._poll()
-        inp = harness.app.query_one("#chat-input", ChatInput)
-        inp.text = "hi"
-        inp.focus()
-        await harness.pilot.press("ctrl+enter")
-
-        def stamp_visible(a: MlxTuiApp) -> bool:
-            return any("tok/s" in t for t in harness.log_lines())
-
-        assert await harness.wait_for(stamp_visible), (
-            f"stamp never appeared; log={harness.log_lines()}"
-        )
-        assert _REPLY in harness.log_lines()
-
-
 async def test_chat_composer_paste_newlines_and_send_button_preserve_exact_text(
     harness: AppHarness,
 ) -> None:

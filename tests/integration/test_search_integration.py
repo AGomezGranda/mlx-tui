@@ -230,6 +230,21 @@ async def test_filtering_to_no_rows_clears_discover_details(
 async def test_enter_downloads_hands_off_and_dismisses(
     harness: AppHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    expanded = [
+        ("model.safetensors", 1000),
+        ("config.json", 100),
+        ("tokenizer.json", 200),
+        ("modeling_custom.py", 300),
+        ("o200k_base.tiktoken", 400),
+        ("tiktoken.model", 500),
+        ("vocab.txt", 600),
+        ("metadata.jsonl", 700),
+        ("chat_template.jinja", 800),
+        ("README.md", 9999),
+    ]
+    expected_size = filtered_download_size(expanded)
+    assert expected_size == 4600
+
     captured: dict[str, object] = {}
 
     def _recording_download(
@@ -262,12 +277,21 @@ async def test_enter_downloads_hands_off_and_dismisses(
 
     screen = await open_search(harness, monkeypatch)
 
+    def _stub_expanded_snapshot(_api: object, _repo_id: str) -> RepoSnapshot:
+        return RepoSnapshot(revision="rev-a", files=tuple(expanded))
+
+    monkeypatch.setattr(
+        "mlx_tui.discover_pane.repo_snapshot",
+        _stub_expanded_snapshot,
+    )
+
     await harness.pilot.press(*"qwen", "enter")
     assert await harness.wait_for(lambda app: len(screen._repo_ids) == 1), (
         f"_repo_ids never filled; got {screen._repo_ids!r}"
     )
     # ensure table is focused and size fetched (not strictly required)
     assert await harness.wait_for(lambda app: ROW in screen._sizes), "size not fetched"
+    assert screen._sizes[ROW] == expected_size
     # trigger download via enter on the results table
     await harness.pilot.press("enter")
 
@@ -438,6 +462,8 @@ async def test_low_disk_warns_then_proceeds(
         return 1_000_000_000
 
     captured: dict[str, object] = {}
+    download_started = threading.Event()
+    release_download = threading.Event()
 
     def _recording_download_low(
         repo_id: str,
@@ -450,9 +476,8 @@ async def test_low_disk_warns_then_proceeds(
     ) -> None:
         captured["repo_id"] = repo_id
         captured["revision"] = revision
-        # Hold the modal open briefly so the warning line is observable
-        # before the success log + dismiss.
-        time.sleep(0.35)
+        download_started.set()
+        release_download.wait()
 
     monkeypatch.setattr("mlx_tui.discover_pane.list_results", _stub_list_low)
     monkeypatch.setattr("mlx_tui.discover_pane.repo_snapshot", _stub_snapshot_low)
@@ -480,8 +505,6 @@ async def test_low_disk_warns_then_proceeds(
     # ensure size fetched (will use low free → glyph ⚠ but not asserted)
     assert await harness.wait_for(lambda app: ROW in screen._sizes)
 
-    await harness.pilot.press("enter")
-
     # warning line appears in #dl-progress
     def warning_present(app) -> bool:  # type: ignore[no-untyped-def]
         try:
@@ -490,91 +513,18 @@ async def test_low_disk_warns_then_proceeds(
             return False
         return "warning: needs 1.9 GiB" in plain
 
-    assert await harness.wait_for(warning_present), (
-        f"warning not found; plain={_static_plain(screen.query_one('#dl-progress', Static))!r}"
-    )
+    try:
+        await harness.pilot.press("enter")
+        assert download_started.wait(timeout=5)
+        assert await harness.wait_for(warning_present), (
+            f"warning not found; plain={_static_plain(screen.query_one('#dl-progress', Static))!r}"
+        )
+    finally:
+        release_download.set()
     # and eventual success log
     assert await harness.wait_for(
         lambda app: any("✓ downloaded" in line for line in harness.app_log_lines())
     ), f"log lines: {harness.app_log_lines()!r}"
-    assert captured.get("repo_id") == ROW
-    assert captured.get("revision") == "rev-a"
-
-
-async def test_size_and_download_share_revision_and_expanded_patterns(
-    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    expanded = [
-        ("model.safetensors", 1000),
-        ("config.json", 100),
-        ("tokenizer.json", 200),
-        ("modeling_custom.py", 300),
-        ("o200k_base.tiktoken", 400),
-        ("tiktoken.model", 500),
-        ("vocab.txt", 600),
-        ("metadata.jsonl", 700),
-        ("chat_template.jinja", 800),
-        ("README.md", 9999),
-    ]
-    expected_size = filtered_download_size(expanded)
-    # sanity: expanded loader files are counted, README is not
-    assert expected_size == 1000 + 100 + 200 + 300 + 400 + 500 + 600 + 700 + 800
-
-    def _stub_list(api: object, q: str) -> list[str]:
-        return [ROW]
-
-    def _stub_snapshot(api: object, rid: str) -> RepoSnapshot:
-        return RepoSnapshot(revision="rev-a", files=tuple(expanded))
-
-    def _stub_free() -> int:
-        return 10 * 2**30
-
-    captured: dict[str, object] = {}
-
-    def _recording_download(
-        repo_id: str,
-        *,
-        on_progress=None,  # type: ignore[no-untyped-def]
-        cancel_event=None,  # type: ignore[no-untyped-def]
-        cache_dir=None,  # type: ignore[no-untyped-def]
-        revision=None,  # type: ignore[no-untyped-def]
-        **_kw: object,
-    ) -> None:
-        captured["repo_id"] = repo_id
-        captured["revision"] = revision
-
-    monkeypatch.setattr("mlx_tui.discover_pane.list_results", _stub_list)
-    monkeypatch.setattr("mlx_tui.discover_pane.repo_snapshot", _stub_snapshot)
-    monkeypatch.setattr("mlx_tui.discover_pane.free_disk_bytes", _stub_free)
-    monkeypatch.setattr("mlx_tui.discover_pane.download_snapshot", _recording_download)
-
-    def _noop_rescan(self: ModelsPane) -> None:
-        return None
-
-    monkeypatch.setattr(ModelsPane, "rescan", _noop_rescan)
-
-    try:
-        harness.app.query_one("#models-table", ModelsTable).focus()
-    except Exception:
-        pass
-    await harness.pilot.press("/")
-    await harness.pilot.pause()
-    assert await harness.wait_for(
-        lambda app: app.query_one(ModelsPane)._discover_pane is not None
-    )
-    screen = harness.app.query_one(ModelsPane)._discover_pane
-    assert screen is not None
-
-    await harness.pilot.press(*"qwen", "enter")
-    assert await harness.wait_for(lambda app: len(screen._repo_ids) == 1)
-    assert await harness.wait_for(lambda app: ROW in screen._sizes)
-    assert screen._sizes[ROW] == expected_size
-    assert screen._revisions.get(ROW) == "rev-a"
-
-    await harness.pilot.press("enter")
-    assert await harness.wait_for(
-        lambda app: any("✓ downloaded" in line for line in harness.app_log_lines())
-    )
     assert captured.get("repo_id") == ROW
     assert captured.get("revision") == "rev-a"
 

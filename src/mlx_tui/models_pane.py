@@ -10,7 +10,7 @@ from textual import events, on, work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
-from textual.widgets import Button, Collapsible, DataTable, Input, Label, Select, Static
+from textual.widgets import Button, Collapsible, DataTable, Label, Static
 
 from mlx_tui import process, serverctl
 from mlx_tui.boot import execute_boot
@@ -30,13 +30,6 @@ from mlx_tui.catalog.facts import (
 from mlx_tui.catalog.hardware import local_hardware, runtime_capabilities
 from mlx_tui.confirm import ConfirmScreen
 from mlx_tui.discover_pane import DiscoverPane
-from mlx_tui.model_context import (
-    CONTEXT_PRESETS,
-    CUSTOM_CONTEXT_LABEL,
-    context_preset_for_tokens,
-    context_tokens_from_preset,
-    validate_custom_context,
-)
 from mlx_tui.models import (
     CacheNotFound,
     ModelRow,
@@ -89,12 +82,6 @@ class ModelsPane(Vertical):
     .models-field-label { height: 1; color: $text-muted; }
     .models-field-value { height: 1; }
     #models-discover { width: 1fr; margin: 1 0; }
-    #models-context-heading { height: 1; text-style: bold; }
-    #models-context-row { width: 1fr; height: 3; }
-    #models-context-preset { width: 10; min-width: 10; }
-    #models-context { width: 1fr; margin-left: 1; }
-    #models-context-help { height: auto; color: $text-muted; }
-    #models-context-error { height: auto; color: $error; }
     #swap-progress { height: auto; }
     #models-table { height: 1fr; min-height: 4; }
     #models-details-panel {
@@ -134,7 +121,6 @@ class ModelsPane(Vertical):
         self._facts_lock = threading.RLock()
         self._assessment_generation = 0
         self._assessment_context: int | None = None
-        self._applied_context: int | None = None
         self._details_text = ""
         self._full_details_text = ""
         self._pending_delete_row: ModelRow | None = None
@@ -156,9 +142,6 @@ class ModelsPane(Vertical):
 
     @override
     def compose(self) -> ComposeResult:
-        options = tuple((label, label) for label, _tokens in CONTEXT_PRESETS) + (
-            (CUSTOM_CONTEXT_LABEL, CUSTOM_CONTEXT_LABEL),
-        )
         with Horizontal(id="models-workspace"):
             with Vertical(id="models-sidebar"):
                 with Collapsible(
@@ -193,16 +176,6 @@ class ModelsPane(Vertical):
                         classes="models-field-value",
                     )
                 yield Button("Discover on Hugging Face", id="models-discover")
-                yield Static("Estimate context", id="models-context-heading")
-                with Horizontal(id="models-context-row"):
-                    yield Select(options, id="models-context-preset", allow_blank=False)
-                    yield Input(
-                        placeholder="tokens",
-                        id="models-context",
-                        type="integer",
-                    )
-                yield Static("Used for estimates only", id="models-context-help")
-                yield Static("", id="models-context-error")
             with Vertical(id="models-main"):
                 yield Static("", id="swap-progress")
                 with Vertical(id="models-installed-view"):
@@ -218,9 +191,6 @@ class ModelsPane(Vertical):
                         )
 
     def on_mount(self) -> None:
-        configured = self.tui.config.max_ctx
-        self._applied_context = configured if configured > 0 else 8_192
-        self._set_context_widgets(self._applied_context)
         self._update_layout(self.size.width)
         self._refresh_hardware()
 
@@ -238,36 +208,10 @@ class ModelsPane(Vertical):
         if panel.collapsed != compact:
             panel.collapsed = compact
 
-    def _set_context_widgets(self, tokens: int) -> None:
-        label = context_preset_for_tokens(tokens)
-        try:
-            preset = self.query_one("#models-context-preset", Select)
-            context = self.query_one("#models-context", Input)
-            if preset.value != label:
-                preset.value = label
-            if context.value != str(tokens):
-                context.value = str(tokens)
-        except NoMatches:
-            return
-        self._set_context_error(None)
-
-    def _set_context_error(self, message: str | None) -> None:
-        try:
-            error = self.query_one("#models-context-error", Static)
-        except NoMatches:
-            return
-        error.update(message or "")
-        error.display = bool(message)
-
-    def _apply_context(self, tokens: int) -> None:
-        self._applied_context = tokens
-        self._set_context_widgets(tokens)
-        self.reassess(context=tokens)
-
     @property
     def applied_context(self) -> int:
-        """The last valid context used by an Installed assessment."""
-        return self._applied_context or self.tui.config.max_ctx
+        """Context used by Installed assessments."""
+        return self.tui.config.max_ctx if self.tui.config.max_ctx > 0 else 8_192
 
     def _refresh_hardware(self) -> None:
         hardware = local_hardware()
@@ -296,7 +240,7 @@ class ModelsPane(Vertical):
         return f"{value / 2**30:.1f} GiB" if value is not None else "unavailable"
 
     def rescan(self) -> None:
-        context = self._context_tokens()
+        context = self.applied_context
         self._assessment_generation += 1
         generation = self._assessment_generation
         self._assessment_context = context
@@ -305,27 +249,11 @@ class ModelsPane(Vertical):
     def reassess(self, *, context: int | None = None) -> None:
         """Recompute cached facts after scenario or runtime changes."""
         if context is None:
-            draft = self._draft_context_tokens()
-            context = self.applied_context if draft is None else draft
-            if context != self.applied_context:
-                self._applied_context = context
-                self._set_context_widgets(context)
+            context = self.applied_context
         self._assessment_generation += 1
         generation = self._assessment_generation
         self._assessment_context = context
         self._reassess_cached(list(self.rows), context, generation)
-
-    def _context_tokens(self) -> int:
-        return self.applied_context
-
-    def _draft_context_tokens(self) -> int | None:
-        try:
-            result = validate_custom_context(
-                self.query_one("#models-context", Input).value
-            )
-        except NoMatches:
-            return None
-        return result.tokens
 
     def invalidate_facts(self, repo_id: str) -> None:
         with self._facts_lock:
@@ -551,39 +479,6 @@ class ModelsPane(Vertical):
     def _row_highlighted(self) -> None:
         self._show_selected_details()
 
-    @on(Input.Submitted, "#models-context")
-    def _context_changed(self, event: Input.Submitted) -> None:
-        result = validate_custom_context(event.value)
-        if result.error is not None:
-            self._set_context_error(result.error)
-            return
-        assert result.tokens is not None
-        self._apply_context(result.tokens)
-
-    @on(Select.Changed, "#models-context-preset")
-    def _context_preset_changed(self, event: Select.Changed) -> None:
-        label = event.value
-        try:
-            current = self.query_one("#models-context-preset", Select).value
-        except NoMatches:
-            return
-        # A programmatic value sync can leave an older Changed event queued.
-        # Only the value still shown by the control represents a user choice.
-        if current != label:
-            return
-        if label == CUSTOM_CONTEXT_LABEL:
-            self._set_context_error(None)
-            try:
-                self.query_one("#models-context", Input).focus()
-            except NoMatches:
-                pass
-            return
-        if not isinstance(label, str):
-            return
-        tokens = context_tokens_from_preset(label)
-        if tokens is not None:
-            self._apply_context(tokens)
-
     @on(Button.Pressed, "#models-discover")
     def _open_discover(self) -> None:
         self.open_discover()
@@ -595,14 +490,7 @@ class ModelsPane(Vertical):
             return
         installed = self.query_one("#models-installed-view", Vertical)
         installed.display = False
-        for selector in (
-            "#models-discover",
-            "#models-context-heading",
-            "#models-context-row",
-            "#models-context-help",
-            "#models-context-error",
-        ):
-            self.query_one(selector).display = False
+        self.query_one("#models-discover").display = False
         pane = DiscoverPane(host=self, id="models-discover-pane")
         self._discover_pane = pane
         self.query_one("#models-main", Vertical).mount(pane)
@@ -631,14 +519,7 @@ class ModelsPane(Vertical):
         try:
             installed = self.query_one("#models-installed-view", Vertical)
             installed.display = True
-            for selector in (
-                "#models-discover",
-                "#models-context-heading",
-                "#models-context-row",
-                "#models-context-help",
-                "#models-context-error",
-            ):
-                self.query_one(selector).display = True
+            self.query_one("#models-discover").display = True
             self.query_one("#models-table", ModelsTable).focus()
         except NoMatches:
             return
@@ -691,7 +572,7 @@ class ModelsPane(Vertical):
                 else "unavailable"
             ),
             f"Cache disk: {self._format_bytes(row.size_on_disk)}",
-            f"Estimate context: {self.applied_context:,} tokens",
+            f"Estimate context: {self._assessment_context or self.applied_context:,} tokens",
         ]
         if assessment is None:
             failure = self._assessment_failures.get(row.repo_id, "metadata unavailable")

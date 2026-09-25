@@ -80,6 +80,74 @@ def action_toggle_activity(app: Any) -> None:
     activity.collapsed = not activity.collapsed
 
 
+def _focusable(widget: Any) -> bool:
+    return bool(
+        widget is not None
+        and widget.is_mounted
+        and widget.visible
+        and widget.display
+        and widget.can_focus
+        and not getattr(widget, "disabled", False)
+    )
+
+
+def _focus_chat_after_layout(app: Any, previous_focus: Any) -> None:
+    if _focusable(previous_focus):
+        previous_focus.focus()
+        return
+    for selector in ("#chat-input", "#chat-transcript"):
+        try:
+            widget = app.query_one(selector)
+        except NoMatches:
+            continue
+        if _focusable(widget):
+            widget.focus()
+            return
+
+
+def _restore_zen_view_after_layout(app: Any, previous_tab: str, focus: Any) -> None:
+    if _focusable(focus):
+        focus.focus()
+    elif previous_tab == "chat":
+        _focus_chat_after_layout(app, None)
+
+
+def action_toggle_zen(app: Any) -> None:
+    """Toggle the chat presentation while keeping its widgets mounted."""
+    if not app.is_mounted or len(app.screen_stack) != 1:
+        return
+    tabs = app.query_one(TabbedContent)
+    base_screen = app.screen_stack[0]
+    if app.zen_mode:
+        previous_tab = app._zen_previous_tab or "chat"
+        previous_focus = app._zen_previous_focus
+        app.zen_mode = False
+        base_screen.set_class(False, "zen")
+        tabs.active = previous_tab
+        app._zen_previous_tab = None
+        app._zen_previous_focus = None
+        chat = app._chat_pane_or_none()
+        if chat is not None:
+            chat._refresh_composer_hint()
+            chat.refresh_zen_info()
+        app.call_after_refresh(
+            lambda: _restore_zen_view_after_layout(app, previous_tab, previous_focus)
+        )
+        return
+
+    app._zen_previous_tab = tabs.active
+    app._zen_previous_focus = app.focused
+    chat_focus = app.focused if tabs.active == "chat" else None
+    app.zen_mode = True
+    base_screen.set_class(True, "zen")
+    tabs.active = "chat"
+    chat = app._chat_pane_or_none()
+    if chat is not None:
+        chat._refresh_composer_hint()
+        chat.refresh_zen_info()
+    app.call_after_refresh(lambda: _focus_chat_after_layout(app, chat_focus))
+
+
 def _activity_toggled(app: Any, event: Collapsible.Toggled) -> None:
     activity = event.collapsible
     if not activity.collapsed:
@@ -118,13 +186,29 @@ def log_app(app: Any, message: str, style: str | None = None) -> None:
     app.query_one("#app-log", RichLog).write(text)
     app._latest_event = message
     activity = app.query_one("#activity", Collapsible)
-    if activity.collapsed and style in ("red", "yellow"):
+    if (activity.collapsed or app.zen_mode) and style in ("red", "yellow"):
         label = "Last error" if style == "red" else "Last warning"
         app._unseen_notice = f"{label}: {message}"
+    if app.zen_mode and style in ("red", "yellow"):
+        app.notify(
+            message,
+            title="Last error" if style == "red" else "Last warning",
+            severity="error" if style == "red" else "warning",
+            markup=False,
+        )
+        pane = app._chat_pane_or_none()
+        if pane is not None:
+            pane.refresh_zen_info()
     app.refresh_activity()
 
 
-def check_action(app: Any, action: str, parameters: tuple[object, ...]) -> bool | None:
+def check_action(  # noqa: PLR0911
+    app: Any, action: str, parameters: tuple[object, ...]
+) -> bool | None:
+    if action == "toggle_zen":
+        return len(app.screen_stack) == 1
+    if action == "toggle_activity" and app.zen_mode:
+        return False
     if action == "cancel_chat":
         try:
             from mlx_tui.discover_pane import DiscoverPane  # noqa: PLC0415

@@ -11,17 +11,13 @@ is process memory, not memory used by one model.
 **Models** lists cached repositories with compatibility, a local memory-fit
 estimate when enough metadata is available, aggregate cache disk size, and a
 name-derived quantization hint. The left side shows labelled Mac memory
-probes, the stable assessment budget, and the Installed estimate context; the
+probes and the stable assessment budget; the
 table and selected-model details stay together on the right. The details use
 the revision selected by the loader. An estimate assumes one active sequence
-and the applied context length; it is advisory and does not guarantee a
+and the configured context length; it is advisory and does not guarantee a
 successful load.
 
-Choose 2K, 4K, 8K, 16K, or 32K in **Estimate context** to recalculate
-immediately. Choose **Custom**, enter a positive token count, and press
-`Enter` to apply it. Invalid custom input leaves the previous estimate in
-place. This control is for estimates only; it does not change configuration or
-the executing server. **More details** opens the selected model's full
+**More details** opens the selected model's full
 read-only assessment, including its exact revision and assumptions.
 
 Select a row and press `Enter` to load or switch the request target; press `d`
@@ -50,8 +46,23 @@ Its collapsed summary retains the last unseen warning or error. Incoming
 events do not take focus. Press `F3` for an endpoint preview with URLs, model
 names, and request examples; see [Local clients](clients.md).
 
-**Metrics** shows the last 64 chat turns with throughput and server-memory
-sparklines. **Compare** has its own [workflow guide](comparison.md).
+**Metrics** shows live local resource and app-activity graphs over a rolling
+two-minute window, sampled once per second, above the last 64 chat turns.
+The CPU graph covers This Mac on a fixed 0–100% scale; CPU excludes GPU
+utilization, so low CPU never proves low inference load. The memory graph
+shows system usage (total minus available) as a filled area against physical
+capacity in GiB, with server RSS as a separate trace; RSS is process-wide
+server memory, not memory used by one model. The activity ribbon marks
+sampled operations — G generating, C comparing, L loading, R restarting,
+I installing, D downloading, X deleting, · idle (no request from this app).
+Sampling continues on other tabs, but sub-second operations may not appear.
+Unknown readings show `—`, never zero; readings older than three seconds are
+labelled stale, and gaps stay blank. The request table keeps Time, Model,
+First output s, Answer s, Total s, Request tok/s, Context, Prompt, and
+Output; Request tok/s remains a full-request average over total request time,
+not engine decode speed. Selecting a model sets the request target shown in
+the context strip; it never relabels earlier samples or proves residency.
+**Compare** has its own [workflow guide](comparison.md).
 
 ## Chat
 
@@ -61,6 +72,21 @@ their prompts in one scrollable transcript; scrolling to the bottom resumes
 following new output. Answers and partial answers offer View/copy. Copy all
 preserves exact text; Copy selection preserves the selected text, including
 code fences.
+
+### Zen mode
+
+Press `Ctrl+Z` from any main tab to focus the existing conversation. It preserves
+the conversation, draft, selection, attachments, and active request; another
+`Ctrl+Z` restores the previous tab and focus. Zen lasts for this app run and is not
+saved across launches. `Ctrl+Enter` still sends, `Enter` still inserts a
+newline, and `Esc` retains its existing modal and cancellation behavior; it does
+not leave Zen. `F2` is unavailable while Zen is active. The muted information
+row shows the selected request model and latest output count and duration.
+`ctx ≈N%` is a character-based estimate of input plus reserved maximum output
+against the configured context limit. It may show excluded messages and
+attached-file count when relevant; it does not establish that a model is loaded.
+Press `Ctrl+Z` to return to parameters, session controls, and attachment actions.
+Warnings and recovery controls remain visible when the session is blocked.
 
 The **Params** section summarizes the next request's temperature, top-p, and
 maximum tokens. Open it by click or `Enter` on its title, then tab through its
@@ -134,6 +160,7 @@ Temporary-session snapshots stay in memory.
 | `Enter` | Params field | Normalize the value without sending |
 | `F2` | Main screen | Expand or collapse Activity |
 | `F3` | Main screen | Show the endpoint preview |
+| `Ctrl+Z` | Main screen | Enter or exit Zen chat view (`F2` is unavailable in Zen) |
 | `Ctrl+S` | Server startup available | Start the server |
 | `Ctrl+G` | Main screen | Open config in `$EDITOR` and reload on save |
 | `Ctrl+N` / `Ctrl+O` | Main screen | Cycle presets forward / back |

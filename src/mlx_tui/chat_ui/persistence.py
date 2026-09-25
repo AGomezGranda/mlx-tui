@@ -339,6 +339,7 @@ def _update_action_visibility(pane: Any) -> None:
             )
     except (NoMatches, Exception):
         pass
+    pane.refresh_zen_info()
 
 
 def save_failed(pane: Any) -> bool:

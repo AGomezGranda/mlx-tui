@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections import deque
 from collections.abc import Callable
 from contextlib import suppress
@@ -31,7 +32,7 @@ from mlx_tui.chat_ui.pane import ChatPane
 from mlx_tui.compare.pane import ComparePane
 from mlx_tui.comparison.contracts import ComparisonResult, SavedChoice
 from mlx_tui.config import AppConfig
-from mlx_tui.history.store import HistoryStore, MemoryRecord
+from mlx_tui.history.store import HistoryStore, ResourceSample
 from mlx_tui.managed.runtime import ManagedRuntime
 from mlx_tui.metrics_pane import MetricsPane
 from mlx_tui.models_pane import ModelsPane
@@ -59,6 +60,7 @@ class MlxTuiApp(App[None]):
         Binding("ctrl+o", "cycle_preset_back", "Preset back", show=False),
         ("f2", "toggle_activity", "Activity"),
         ("f3", "endpoint_info", "Endpoint"),
+        Binding("ctrl+z", "toggle_zen", "Zen mode", priority=True),
     ]
 
     DEFAULT_CSS = """
@@ -86,6 +88,41 @@ class MlxTuiApp(App[None]):
     .compact #app-log { height: 3; }
     .compact #chat-input { height: 2; min-height: 2; }
     .compact #chat-composer-row Button { height: 2; min-height: 2; }
+    .zen #status-bar, .zen Footer, .zen #activity { display: none; }
+    .zen TabbedContent > ContentTabs { display: none; }
+    .zen #chat { align: center top; padding: 1 2; }
+    .zen #chat-pane { width: 100%; max-width: 96; padding: 0; }
+    .zen #chat-pane > ParamsPane,
+    .zen #chat-context,
+    .zen #chat-session-row,
+    .zen #chat-attachment-row { display: none; }
+    .zen #chat-reconcile-row,
+    .zen #chat-save-row { height: auto; margin: 0 1; }
+    .zen #zen-info {
+        display: block;
+        width: 1fr;
+        height: auto;
+        min-height: 1;
+        margin: 0 1;
+        color: $text-muted;
+    }
+    .zen #zen-info.ctx-bar-amber,
+    .zen #zen-info.zen-info-warning { color: $warning; }
+    .zen #zen-info.ctx-bar-red,
+    .zen #zen-info.zen-info-error { color: $error; }
+    .zen #chat-composer-row { height: auto; margin: 0; }
+    .zen #chat-input {
+        height: 4;
+        min-height: 3;
+        max-height: 6;
+        border: round $primary-muted;
+    }
+    .zen #chat-composer-row Button { height: 3; min-height: 3; }
+    .zen .chat-turn { margin-bottom: 1; }
+    .zen .chat-stamp,
+    .zen .chat-reasoning,
+    .zen .chat-tools,
+    .zen .view-answer { display: none; }
     Footer { height: 1; padding: 0 1; }
     """
 
@@ -129,7 +166,11 @@ class MlxTuiApp(App[None]):
         self.operations = OperationCoordinator()
         self.model_search_cache = SearchCache()
         self.history = HistoryStore()
-        self.memory_store: deque[MemoryRecord] = deque(maxlen=256)
+        self.resource_store: deque[ResourceSample] = deque(maxlen=121)
+        self._resource_stop: threading.Event | None = None
+        self._resource_thread: threading.Thread | None = None
+        self._resource_first: bool = True
+        self._last_ownership_state: str | None = None
         self.presets: list[Preset] = load_presets()
         self.preset_idx: int = -1
         try:
@@ -151,6 +192,9 @@ class MlxTuiApp(App[None]):
         }
         self._applying_profile = False
         self._closing = False
+        self.zen_mode = False
+        self._zen_previous_tab: str | None = None
+        self._zen_previous_focus: object | None = None
         self.managed_runtime = (
             ManagedRuntime(host=self.host, port=self.port)
             if self.config.runtime_mode == "managed"
@@ -216,6 +260,7 @@ class MlxTuiApp(App[None]):
             timeout=httpx.Timeout(0.5),
         )
         self.set_interval(2.0, self._poll)
+        _app_polling.start_resource_sampler(self)
         self.query_one(ModelsPane).rescan()
         try:
             self.query_one(MetricsPane).refresh_metrics()
@@ -241,6 +286,8 @@ class MlxTuiApp(App[None]):
 
     async def on_unmount(self) -> None:  # noqa: PLR0912
         self._closing = True
+        with suppress(Exception):
+            _app_polling.stop_resource_sampler(self)
         from mlx_tui.setup_screen import SetupScreen  # noqa: PLC0415
 
         def report_shutdown_error(label: str, exc: Exception) -> None:
@@ -466,6 +513,9 @@ class MlxTuiApp(App[None]):
 
     def action_toggle_activity(self) -> None:
         return _app_ui.action_toggle_activity(self)
+
+    def action_toggle_zen(self) -> None:
+        return _app_ui.action_toggle_zen(self)
 
     @on(Collapsible.Toggled, "#activity")
     def _activity_toggled(self, event: Collapsible.Toggled) -> None:

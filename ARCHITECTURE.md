@@ -28,7 +28,8 @@ identity and are reported with bounded, per-source diagnostics rather than
 being presented as ordinary downtime. Stale polls carry a monotonic sequence
 so older in-flight results cannot overwrite newer request evidence.
 Polling is skipped while a comparison owns the lease, avoiding competing
-health/catalogue/process samples during short trials. Cleanup restores the
+health/catalogue/process samples during short trials. The independent
+one-second resource sampler keeps running during comparisons. Cleanup restores the
 pre-run request controls as generation-unknown, releases the lease, and forces
 one fresh poll.
 
@@ -50,9 +51,18 @@ and process validation; it is never trusted by itself. Cached identities are
 also rejected when the listener or process generation no longer matches.
 Model identity is not inferred from an arbitrary command-line `--model`
 value. RSS sampling stays observational and is never generation evidence;
-process-wide RSS is not attributed as exclusive model memory. The app keeps
-a bounded deque of RSS and available-memory samples for the Metrics tab;
-`MetricsPane` renders those samples and does not own their collection.
+process-wide RSS is not attributed as exclusive model memory. The app owns a
+bounded deque of 121 timestamped `ResourceSample` values (two minutes at a
+one-second cadence) collected by a single long-lived sampler thread in
+`app/polling.py`, independent of the two-second health/catalogue path: the
+operation and latest trusted process identity are captured on the app
+thread, `process.sample_resources()` samples without listener scans, and the
+sample is appended on the app thread. Restarting, a missing/exited child, a
+remote endpoint, or an identity mismatch yields unknown RSS gaps, never
+zeros. Comparison RSS evidence in `comparison/runner.py` is a separate
+pipeline and is untouched. `MetricsPane` renders the shared buffer and does
+not own collection; it paints charts only while Metrics is visible and
+rebuilds the request table only when turn records change.
 
 `StatusBar` owns the status and memory widgets. The app supplies explicit
 status and memory values while retaining ownership of polling, endpoint
@@ -225,8 +235,10 @@ start, total, and client request tok/s (all server completion tokens over
 full request duration, explicitly not engine speed); estimates carry `~` and
 unknowns show `—`. Complete-but-usage-missing output is estimated and marked;
 incomplete outcomes stay unknown regardless of usage, and failed/cancelled
-counts/timings are unknown, never fabricated zeros. Unsuccessful/unknown
-rates are filtered from the sparkline consistently. Cached-token usage means
+counts/timings are unknown, never fabricated zeros. `history/charts.py`
+renders the resource buffer as pure functions over elapsed-time bins (fixed
+CPU 0–100%, memory 0–capacity, gaps for missing/stale readings, activity
+ribbon from sampled operations); no chart state persists. Cached-token usage means
 server-reported reuse, not guaranteed residency; ordinary chat has unknown
 load/cache state. Memory uses GiB throughout; RSS is sampled process memory
 distinct from allocator peaks, and a latest-unknown sample never displays an
@@ -335,8 +347,8 @@ src/mlx_tui/
     runner.py              # sequential twelve-slot execution
   compare/                 # Compare tab workflow, presenter, and worker lifecycle
   confirm.py               # delete confirmation modal
-  history/                 # token bounds, turn/memory rings, sparklines
-  metrics_pane.py          # metrics table and sparklines
+  history/                 # token bounds, turn/resource rings, pure charts
+  metrics_pane.py          # live resource charts, activity ribbon, request table
   models.py                # public HF cache adapter and ModelRow
   models_pane.py           # model UI and lifecycle workers
   operations.py             # UI-free operation lease

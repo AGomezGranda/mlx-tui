@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, cast
 
 import psutil
 
+from mlx_tui.history.store import ResourceSample
+from mlx_tui.operations import OperationKind
 from mlx_tui.status import MemorySnapshot
 
 _SERVER_TOKEN_SUFFIXES = ("mlx_lm.server", "mlx_vlm.server")
@@ -170,3 +173,58 @@ def memory_snapshot() -> MemorySnapshot:
     """Current system memory in GiB, ready for the status formatter."""
     vm = psutil.virtual_memory()
     return MemorySnapshot(vm.available / 2**30, vm.total / 2**30)
+
+
+def sample_resources(
+    identity: ProcessIdentity | None, operation: OperationKind
+) -> ResourceSample:
+    """Sample machine CPU/memory plus verified server RSS without discovery.
+
+    Never scans listeners or verifies residency; RSS requires the supplied
+    identity's PID creation time to still match. Each signal tolerates
+    failure independently so one unavailable reading stays unknown.
+    """
+    import time  # noqa: PLC0415
+
+    ts = time.monotonic()
+    try:
+        cpu: float | None = psutil.cpu_percent(interval=None)
+    except Exception:
+        cpu = None
+    try:
+        vm = psutil.virtual_memory()
+        avail: float | None = vm.available / 2**30
+        total: float | None = vm.total / 2**30
+    except Exception:
+        avail = None
+        total = None
+    try:
+        swap: float | None = psutil.swap_memory().used / 2**30
+    except Exception:
+        swap = None
+    rss: float | None = None
+    if identity is not None:
+        try:
+            proc = psutil.Process(identity.pid)
+            if proc.create_time() == identity.create_time:
+                rss = proc.memory_info().rss / 2**30
+        except (
+            psutil.NoSuchProcess,
+            psutil.AccessDenied,
+            psutil.ZombieProcess,
+            OSError,
+        ):
+            rss = None
+        except Exception:
+            rss = None
+    return ResourceSample(
+        ts=ts,
+        operation=cast(Any, operation),
+        # Same class via two search-path roots (src. vs mlx_tui.); Any bridges it.
+        process_identity=cast(Any, identity),
+        cpu_percent=cpu,
+        rss_gib=rss,
+        avail_gib=avail,
+        total_gib=total,
+        swap_gib=swap,
+    )

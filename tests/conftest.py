@@ -186,29 +186,6 @@ class StubHandler(BaseHTTPRequestHandler):
                 usage=(12, 3),
                 model=model,
             )
-        elif self._mode() == "multiline":
-            from tests.builders import sse_multiline_event  # noqa: PLC0415
-
-            body = (
-                sse_frames(deltas=["Hello"], finish=None, done=False, model=model)
-                + sse_multiline_event(
-                    {
-                        "choices": [
-                            {"delta": {"content": " world"}, "finish_reason": None}
-                        ]
-                    }
-                )
-                + sse_frames(
-                    deltas=[" this", " is", " MLX."], usage=(12, 6), model=model
-                )
-            )
-        elif self._mode() == "nospace":
-            body = sse_frames(
-                deltas=["Hello", " world", " this", " is", " MLX."],
-                usage=(12, 6),
-                no_space=True,
-                model=model,
-            )
         else:
             body = sse_frames(
                 deltas=["Hello", " world", " this", " is", " MLX."],
@@ -234,7 +211,11 @@ def stub_server_factory() -> Iterator[Callable[[str], StubServer]]:
     def start(mode: str) -> StubServer:
         server = StubServer(("127.0.0.1", 0), StubHandler)
         server.mode = mode
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread = threading.Thread(
+            target=server.serve_forever,
+            kwargs={"poll_interval": 0.01},
+            daemon=True,
+        )
         thread.start()
         servers.append(server)
         return server

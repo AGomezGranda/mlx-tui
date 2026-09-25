@@ -5,17 +5,25 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 from itertools import chain
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from mlx_tui.operations import OperationKind
+    from mlx_tui.process import ProcessIdentity
 
 _MAX_TURNS = 64
 
 
 @dataclass(frozen=True)
-class MemoryRecord:
+class ResourceSample:
     ts: float
-    model: str | None
+    operation: OperationKind
+    process_identity: ProcessIdentity | None
+    cpu_percent: float | None
     rss_gib: float | None
-    avail_gib: float
-    total_gib: float
+    avail_gib: float | None
+    total_gib: float | None
+    swap_gib: float | None
 
 
 @dataclass(frozen=True)

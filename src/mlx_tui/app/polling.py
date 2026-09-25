@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import shlex
+import threading
 import time
+from collections import deque
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
@@ -16,7 +18,7 @@ from textual.css.query import NoMatches
 from mlx_tui import process
 from mlx_tui.comparison.contracts import ComparisonValidationError, parse_loopback_url
 from mlx_tui.config import AppConfig
-from mlx_tui.history.store import MemoryRecord
+from mlx_tui.history.store import ResourceSample
 from mlx_tui.metrics_pane import MetricsPane
 from mlx_tui.models_pane import ModelsPane
 from mlx_tui.operations import OperationKind
@@ -124,6 +126,7 @@ async def _poll(app: Any) -> None:  # noqa: PLR0912
             poll_sequence=poll_sequence,
             endpoint_changed=probe.state != prev_state,
         )
+        app._last_ownership_state = ownership_state
         rss_gib: float | None = None
         if proc_ident is not None:
             try:
@@ -140,14 +143,6 @@ async def _poll(app: Any) -> None:  # noqa: PLR0912
             ownership_state=ownership_state,
         )
         app.refresh_models()
-        rec = MemoryRecord(
-            ts=time.time(),
-            model=None,
-            rss_gib=rss_gib,
-            avail_gib=snapshot.avail_gib,
-            total_gib=snapshot.total_gib,
-        )
-        app.memory_store.append(rec)
         app._refresh_metrics()
     except Exception as exc:
         # Unexpected worker fault: keep the last known state instead of
@@ -466,3 +461,200 @@ def _render_status(
         )
     except NoMatches:
         pass
+    pane = app._chat_pane_or_none()
+    if pane is not None:
+        pane.refresh_zen_info()
+
+
+RESOURCE_INTERVAL_S = 1.0
+RESOURCE_BUFFER_LEN = 121
+
+
+def _managed_sampler_identity(app: Any, managed: Any) -> ProcessIdentity | None:
+    try:
+        running = managed.child_is_running()
+    except Exception:
+        return None
+    if not running:
+        return None
+    ident = managed.identity
+    if ident is None:
+        return None
+    if getattr(app, "_last_ownership_state", None) == "ownership mismatch":
+        return None
+    return ident
+
+
+def _attached_sampler_identity(app: Any) -> ProcessIdentity | None:
+    if getattr(app, "host", None) not in LOOPBACK_HOSTS:
+        return None
+    sid = getattr(app, "server_identity", None)
+    if sid is None:
+        return None
+    pid = getattr(sid, "pid", None)
+    ctime = getattr(sid, "pid_create_time", None)
+    if not isinstance(pid, int) or not isinstance(ctime, (int, float)):
+        return None
+    return ProcessIdentity(pid=pid, create_time=float(ctime))
+
+
+def _trusted_sampler_identity(app: Any) -> ProcessIdentity | None:
+    """Latest trusted identity without scans; unknown RSS stays None."""
+    if app.operations.current is OperationKind.RESTARTING:
+        return None
+    managed = getattr(app, "managed_runtime", None)
+    if managed is not None:
+        return _managed_sampler_identity(app, managed)
+    return _attached_sampler_identity(app)
+
+
+def _capture_sampler_context(app: Any) -> tuple[OperationKind, ProcessIdentity | None]:
+    """Snapshot operation plus trusted identity; call on the app thread."""
+    return (app.operations.current, _trusted_sampler_identity(app))
+
+
+def append_resource_sample(app: Any, sample: ResourceSample) -> None:
+    """Append one sample on the app thread; never touches widgets."""
+    if getattr(app, "_closing", False):
+        return
+    store = getattr(app, "resource_store", None)
+    if store is None:
+        return
+    store.append(sample)
+
+
+def _confirm_resource_sample(app: Any, sample: ResourceSample) -> None:
+    append_resource_sample(app, sample)
+    try:
+        app.clear_error("resource-sample")
+    except Exception:
+        pass
+
+
+def _record_resource_failure(app: Any, sample: ResourceSample, exc: Exception) -> None:
+    append_resource_sample(app, sample)
+    try:
+        app.log_error_once("resource-sample", exc)
+    except Exception:
+        pass
+
+
+def sample_and_store(app: Any) -> ResourceSample:
+    """Synchronous capture/sample/append for tests and manual ticks."""
+    op, ident = _capture_sampler_context(app)
+    try:
+        sample = process.sample_resources(ident, op)
+    except Exception as exc:
+        sample = ResourceSample(
+            ts=time.monotonic(),
+            operation=op,
+            process_identity=ident,
+            cpu_percent=None,
+            rss_gib=None,
+            avail_gib=None,
+            total_gib=None,
+            swap_gib=None,
+        )
+        _record_resource_failure(app, sample, exc)
+        return sample
+    if getattr(app, "_resource_first", False):
+        sample = replace(sample, cpu_percent=None)
+        app._resource_first = False
+    _confirm_resource_sample(app, sample)
+    return sample
+
+
+def _run_resource_loop(app: Any, stop: threading.Event, interval: float) -> None:
+    """Single long-lived worker; sequential ticks cannot overlap."""
+    try:
+        psutil.cpu_percent(interval=None)
+    except Exception:
+        pass
+    while not stop.is_set():
+        if getattr(app, "_closing", False):
+            return
+        try:
+            op, ident = _capture_sampler_context(app)
+        except Exception as exc:
+            try:
+                app.call_from_thread(
+                    _record_resource_failure,
+                    app,
+                    ResourceSample(
+                        ts=time.monotonic(),
+                        operation=OperationKind.IDLE,
+                        process_identity=None,
+                        cpu_percent=None,
+                        rss_gib=None,
+                        avail_gib=None,
+                        total_gib=None,
+                        swap_gib=None,
+                    ),
+                    exc,
+                )
+            except Exception:
+                return
+            stop.wait(interval)
+            continue
+        try:
+            sample = process.sample_resources(ident, op)
+        except Exception as exc:
+            unknown = ResourceSample(
+                ts=time.monotonic(),
+                operation=op,
+                process_identity=ident,
+                cpu_percent=None,
+                rss_gib=None,
+                avail_gib=None,
+                total_gib=None,
+                swap_gib=None,
+            )
+            try:
+                app.call_from_thread(_record_resource_failure, app, unknown, exc)
+            except Exception:
+                return
+            stop.wait(interval)
+            continue
+        if getattr(app, "_resource_first", False):
+            sample = replace(sample, cpu_percent=None)
+            app._resource_first = False
+        try:
+            app.call_from_thread(_confirm_resource_sample, app, sample)
+        except Exception:
+            return
+        stop.wait(interval)
+
+
+def start_resource_sampler(app: Any, interval: float = RESOURCE_INTERVAL_S) -> None:
+    """Start the 1s sampler; idempotent and independent of health polling."""
+    existing = getattr(app, "_resource_thread", None)
+    if existing is not None and existing.is_alive():
+        return
+    if getattr(app, "resource_store", None) is None:
+        app.resource_store = deque(maxlen=RESOURCE_BUFFER_LEN)
+    stop = threading.Event()
+    app._resource_stop = stop
+    app._resource_first = True
+    thread = threading.Thread(
+        target=_run_resource_loop,
+        args=(app, stop, interval),
+        name="resource-sampler",
+        daemon=True,
+    )
+    app._resource_thread = thread
+    thread.start()
+
+
+def stop_resource_sampler(app: Any, timeout: float = 2.0) -> None:
+    """Signal the sampler and join; never updates widgets."""
+    stop = getattr(app, "_resource_stop", None)
+    thread = getattr(app, "_resource_thread", None)
+    if stop is not None:
+        stop.set()
+    if thread is not None:
+        try:
+            thread.join(timeout=timeout)
+        except Exception:
+            pass
+    app._resource_thread = None
+    app._resource_stop = None

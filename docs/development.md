@@ -12,6 +12,13 @@ uv run pytest -q
 uv run python tests/artifact_smoke.py
 ```
 
+For faster feedback, run `uv run pytest tests/unit`. It skips mounted UI
+components but still covers local filesystem and process boundaries. Run
+`uv run pytest tests/integration` for mounted UI coverage; small widget tests
+belong there too. For full-suite timings and a JUnit report, run
+`uv run pytest --durations=20 --junitxml=/tmp/mlx-tui-testing.xml`. Neither
+suite verifies compatibility with an actual MLX provider.
+
 For a real-server run, start `mlx_lm.server` in another terminal and use
 `uv run mlx-tui --attach --port 8080`. Automated behavior coverage uses a
 local HTTP stub, supplemented by installed-package smoke checks; the stub

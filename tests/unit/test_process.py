@@ -10,7 +10,13 @@ import psutil
 import pytest
 
 import mlx_tui.process as proc_mod
-from mlx_tui.process import ProcessIdentity, find_server_process, memory_snapshot
+from mlx_tui.operations import OperationKind
+from mlx_tui.process import (
+    ProcessIdentity,
+    find_server_process,
+    memory_snapshot,
+    sample_resources,
+)
 
 MATCHING_CMDLINE = ["python", "-m", "mlx_lm.server", "--model", "m"]
 OTHER_CMDLINE = ["python", "-m", "unrelated.svc"]
@@ -330,6 +336,138 @@ def test_memory_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
     snap = memory_snapshot()
     assert snap.avail_gib == _AVAIL_GIB
     assert snap.total_gib == _TOTAL_GIB
+
+
+def _install_resource_seams(  # noqa: PLR0913
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cpu: float | Exception = 12.5,
+    avail_gib: float | Exception = 8.0,
+    total_gib: float = 16.0,
+    swap_gib: float | Exception = 1.0,
+    rss_gib: float | Exception | None = 2.0,
+    create_time: float = 111.0,
+) -> None:
+    def fake_cpu(interval: object = None) -> float:
+        assert interval is None
+        if isinstance(cpu, Exception):
+            raise cpu
+        return cpu
+
+    def fake_vm() -> SimpleNamespace:
+        if isinstance(avail_gib, Exception):
+            raise avail_gib
+        return SimpleNamespace(available=avail_gib * 2**30, total=total_gib * 2**30)
+
+    def fake_swap() -> SimpleNamespace:
+        if isinstance(swap_gib, Exception):
+            raise swap_gib
+        return SimpleNamespace(used=swap_gib * 2**30)
+
+    class FakeRssProcess:
+        def create_time(self) -> float:
+            return create_time
+
+        def memory_info(self) -> SimpleNamespace:
+            if isinstance(rss_gib, Exception):
+                raise rss_gib
+            assert rss_gib is not None
+            return SimpleNamespace(rss=rss_gib * 2**30)
+
+    def fake_ctor(pid: int) -> FakeRssProcess:
+        assert pid == 100
+        return FakeRssProcess()
+
+    monkeypatch.setattr(psutil, "cpu_percent", fake_cpu)
+    monkeypatch.setattr(psutil, "virtual_memory", fake_vm)
+    monkeypatch.setattr(psutil, "swap_memory", fake_swap)
+    monkeypatch.setattr(psutil, "Process", fake_ctor)
+
+
+def test_sample_resources_values_and_units(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_resource_seams(monkeypatch)
+    ident = ProcessIdentity(pid=100, create_time=111.0)
+    sample = sample_resources(ident, OperationKind.CHATTING)
+    assert sample.operation is OperationKind.CHATTING
+    assert sample.process_identity == ident
+    assert sample.cpu_percent == 12.5
+    assert sample.avail_gib == 8.0
+    assert sample.total_gib == 16.0
+    assert sample.swap_gib == 1.0
+    assert sample.rss_gib == 2.0
+    assert isinstance(sample.ts, float)
+
+
+def test_sample_resources_missing_readings_stay_independent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_resource_seams(monkeypatch, cpu=psutil.Error())
+    ident = ProcessIdentity(pid=100, create_time=111.0)
+    sample = sample_resources(ident, OperationKind.IDLE)
+    assert sample.cpu_percent is None
+    assert sample.avail_gib == 8.0
+    assert sample.rss_gib == 2.0
+
+    _install_resource_seams(monkeypatch, avail_gib=OSError("no vm"))
+    sample2 = sample_resources(ident, OperationKind.IDLE)
+    assert sample2.avail_gib is None
+    assert sample2.total_gib is None
+    assert sample2.cpu_percent == 12.5
+    assert sample2.rss_gib == 2.0
+
+    _install_resource_seams(monkeypatch, swap_gib=OSError("no swap"))
+    sample3 = sample_resources(ident, OperationKind.IDLE)
+    assert sample3.swap_gib is None
+    assert sample3.cpu_percent == 12.5
+    assert sample3.avail_gib == 8.0
+
+
+def test_sample_resources_pid_reuse_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_resource_seams(monkeypatch, create_time=999.0)
+    ident = ProcessIdentity(pid=100, create_time=111.0)
+    sample = sample_resources(ident, OperationKind.IDLE)
+    assert sample.rss_gib is None
+    assert sample.cpu_percent == 12.5
+    assert sample.avail_gib == 8.0
+
+
+def test_sample_resources_denied_rss_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_resource_seams(monkeypatch, rss_gib=psutil.AccessDenied(pid=100))
+    ident = ProcessIdentity(pid=100, create_time=111.0)
+    sample = sample_resources(ident, OperationKind.IDLE)
+    assert sample.rss_gib is None
+    assert sample.cpu_percent == 12.5
+
+
+def test_sample_resources_without_identity_skips_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_resource_seams(monkeypatch)
+
+    def exploding_ctor(pid: int) -> object:
+        raise AssertionError("must not inspect a process without identity")
+
+    def exploding_conns(kind: str = "tcp") -> object:
+        raise AssertionError("must not scan listeners")
+
+    monkeypatch.setattr(psutil, "Process", exploding_ctor)
+    monkeypatch.setattr(psutil, "net_connections", exploding_conns)
+
+    def _no_discovery(host: str, port: int) -> None:
+        raise AssertionError("must not discover")
+
+    monkeypatch.setattr(proc_mod, "find_server_process", _no_discovery)
+    sample = sample_resources(None, OperationKind.IDLE)
+    assert sample.rss_gib is None
+    assert sample.process_identity is None
+    assert sample.cpu_percent == 12.5
+    assert sample.avail_gib == 8.0
 
 
 _LISTENER_CODE = (

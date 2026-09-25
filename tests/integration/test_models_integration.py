@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from textual.widgets import Input, Select, Static, TabbedContent
+from textual.widgets import Static, TabbedContent
 
 from mlx_tui.catalog.assessment import (
     AssessmentScenario,
@@ -119,13 +119,10 @@ async def test_older_context_assessment_cannot_replace_latest(
         return real_assess(facts, hardware, runtime, scenario)  # type: ignore[arg-type]
 
     monkeypatch.setattr("mlx_tui.models_pane.assess", delayed_assess)
-    context = pane.query_one("#models-context", Input)
-    context.value = "4096"
-    pane.reassess()
+    pane.reassess(context=4096)
     assert await harness.wait_for(lambda app: old_started.is_set())
 
-    context.value = "8192"
-    pane.reassess()
+    pane.reassess(context=8192)
     assert await harness.wait_for(
         lambda app: (
             REPO_ID in pane.assessments
@@ -166,39 +163,6 @@ async def test_empty_selection_clears_model_details(
     details = _plain(pane.query_one("#models-details", Static))
     assert "Select a model" in details
     assert REPO_ID not in details
-
-
-async def test_context_presets_apply_and_invalid_custom_input_preserves_estimate(
-    harness: AppHarness,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    pane, _row = await _prepare_model(harness, monkeypatch, tmp_path)
-    preset = pane.query_one("#models-context-preset", Select)
-    context = pane.query_one("#models-context", Input)
-    initial_config_context = harness.app.config.max_ctx
-
-    preset.value = "4K"
-    assert await harness.wait_for(lambda app: pane.applied_context == 4_096)
-    assert pane._assessment_context == 4_096
-    assert context.value == "4096"
-    assert harness.app.config.max_ctx == initial_config_context
-    assert not harness.server.requests
-
-    context.value = "-1"
-    context.focus()
-    await harness.pilot.press("enter")
-    await harness.pilot.pause()
-    assert pane.applied_context == 4_096
-    assert pane._assessment_context == 4_096
-    assert "positive integer" in _plain(pane.query_one("#models-context-error", Static))
-
-    context.value = " 12345 "
-    await harness.pilot.press("enter")
-    assert await harness.wait_for(lambda app: pane.applied_context == 12_345)
-    assert pane._assessment_context == 12_345
-    assert harness.app.config.max_ctx == initial_config_context
-    assert not harness.server.requests
 
 
 async def test_models_workspace_layout_and_resize_preserve_table(

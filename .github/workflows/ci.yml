@@ -41,8 +41,19 @@ jobs:
       - name: Type check
         run: uv run pyrefly check --min-severity warn
 
+      - name: Prepare test results
+        run: mkdir -p test-results
+
       - name: Test
-        run: uv run pytest -q
+        run: uv run pytest -q --durations=20 --junitxml=test-results/pytest.xml
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pytest-${{ matrix.os }}
+          path: test-results/pytest.xml
+          retention-days: 14
+          if-no-files-found: warn
 
       - name: Verify built artifacts
         if: runner.os == 'macOS'

@@ -120,6 +120,13 @@ class ChatTurn(VerticalGroup):
         self.notices.update(text)
         self.notices.display = True
 
+    def refresh_zen_details(self, zen: bool) -> None:
+        self.stamp.display = bool(self.stamp.content) and not zen
+        self.reasoning.display = bool(self.reasoning.content) and not zen
+        self.tools.display = bool(self.tools.content) and not zen
+        self.view_button.display = bool(self.answer_text) and not zen
+        self.notices.display = bool(self.notices.content)
+
     def end_attempt(self) -> None:
         if self.finished:
             return

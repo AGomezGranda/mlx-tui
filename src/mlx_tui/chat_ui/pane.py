@@ -6,6 +6,7 @@ import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast, override
 
+from rich.text import Text
 from textual import events, on, work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -38,6 +39,18 @@ import mlx_tui.chat_ui.context as _chat_context
 import mlx_tui.chat_ui.persistence as _chat_persistence
 import mlx_tui.chat_ui.turns as _chat_turns
 from mlx_tui.chat_ui.widgets import ChatInput
+
+
+def format_zen_stats(
+    completion_tokens: int | None, total_s: float | None, *, estimated: bool
+) -> str:
+    parts: list[str] = []
+    if completion_tokens is not None:
+        marker = "≈" if estimated else ""
+        parts.append(f"{marker}{completion_tokens} out")
+    if total_s is not None:
+        parts.append(f"{total_s:.1f}s")
+    return " · ".join(parts)
 
 
 class ChatPane(Vertical):
@@ -77,6 +90,7 @@ class ChatPane(Vertical):
     #chat-reconcile-row Button { width: auto; margin-right: 1; height: 1; min-height: 1; border: none; padding: 0 1; }
     #chat-save-row { height: 1; margin: 0 1; display: none; }
     #chat-save-row Button { width: auto; margin-right: 1; height: 1; min-height: 1; border: none; padding: 0 1; }
+    #zen-info { display: none; }
     #ctx-progress {
         height: 1;
         width: 1fr;
@@ -153,6 +167,9 @@ class ChatPane(Vertical):
         self._attachment_index = 0
         self._attachment_picker_active = False
         self._context_error: str | None = None
+        self._zen_turn_stats = ""
+        self._zen_context_text = "ctx ≈0%"
+        self._zen_context_style = ""
 
     @property
     def tui(self) -> MlxTuiApp:  # type: ignore[name-defined]
@@ -192,6 +209,7 @@ class ChatPane(Vertical):
             yield Button("Inspect", id="btn-inspect-attachment")
             yield Button("Remove", id="btn-remove-attachment")
             yield Static("files: none", id="chat-attachments")
+        yield Static("", id="zen-info", markup=False)
         with Horizontal(id="chat-composer-row"):
             yield ChatInput(placeholder="message…", id="chat-input")
             yield Button("Send", id="btn-send", variant="primary")
@@ -206,6 +224,129 @@ class ChatPane(Vertical):
         self._refresh_attachment_ui()
         self._update_save_status()
         self._update_action_visibility()
+        self._refresh_composer_hint()
+
+    def refresh_zen_info(self) -> None:
+        try:
+            info = self.query_one("#zen-info", Static)
+            recovery = self.query_one("#chat-session-row", Horizontal)
+        except NoMatches:
+            return
+        for turn in self.query(ChatTurn).results(ChatTurn):
+            turn.refresh_zen_details(self.tui.zen_mode)
+        recovery.display = not (self.tui.zen_mode and not self._read_only)
+        for selector in (
+            "#btn-new-temp",
+            "#btn-clear-chat",
+            "#btn-delete-session",
+            "#btn-retry-request",
+            "#chat-save-status",
+        ):
+            try:
+                self.query_one(selector).display = not (
+                    self.tui.zen_mode and self._read_only
+                )
+            except NoMatches:
+                pass
+        info.remove_class("zen-info-warning", "zen-info-error")
+        info.remove_class("ctx-bar-amber", "ctx-bar-red")
+        message, style = self._zen_blocker()
+        if message is not None:
+            if self._draft_attachments:
+                count = len(self._draft_attachments)
+                files = f"{count} file" if count == 1 else f"{count} files"
+                message += f" · {files} attached"
+            info.add_class(style)
+            info.update(Text(message))
+            info.tooltip = message
+            return
+        self._render_zen_metadata(info)
+
+    def _zen_blocker(self) -> tuple[str | None, str]:
+        if self._read_only:
+            return (
+                "Session is read-only while open elsewhere. Use Sessions to choose "
+                "another session, or New to start an editable one."
+            ), "zen-info-warning"
+        if self._save_failed:
+            return (
+                "Save failed"
+                + (f": {self._save_error}" if self._save_error else "")
+                + ". Retry save or discard unsaved work below.",
+                "zen-info-error",
+            )
+        if self._pending_reconcile is not None:
+            return (
+                "Saved request settings differ. Choose saved or current settings below.",
+                "zen-info-warning",
+            )
+        if self._context_error:
+            return f"Context unavailable: {self._context_error}", "zen-info-error"
+        if self.tui._unseen_notice:
+            style = (
+                "zen-info-error"
+                if self.tui._unseen_notice.startswith("Last error:")
+                else "zen-info-warning"
+            )
+            return self.tui._unseen_notice, style
+        return None, ""
+
+    def _render_zen_metadata(self, info: Static) -> None:
+        identity = self.tui.server_identity
+        selected_model = identity.selected_model
+        model = selected_model.rsplit("/", 1)[-1] if selected_model else "Unavailable"
+        state = "Verified" if identity.generation_state == "succeeded" else "Unverified"
+        if self._turn_active:
+            state = (
+                "Responding…"
+                if self._progress_answer
+                or (self._active_turn is not None and self._active_turn.answer_text)
+                else "Thinking…"
+            )
+        parts = [state]
+        if self._zen_turn_stats:
+            parts.append(self._zen_turn_stats)
+        parts.append(self._zen_context_text)
+        if self._draft_attachments:
+            count = len(self._draft_attachments)
+            parts.append(f"{count} file" if count == 1 else f"{count} files")
+        suffix = " · ".join(parts)
+        width = info.size.width or self.size.width or self.tui.size.width
+        if self._zen_turn_stats and Text(suffix).cell_len > width:
+            parts.remove(self._zen_turn_stats)
+            suffix = " · ".join(parts)
+        content = Text(no_wrap=True, overflow="ellipsis")
+        model_width = width - Text(suffix).cell_len - 3
+        if model_width > 0:
+            model_text = Text(model)
+            model_text.truncate(model_width, overflow="ellipsis")
+            content.append(model_text)
+            content.append(" · ")
+        content.append(suffix)
+        info.update(content)
+        info.tooltip = (
+            f"Selected request model: {selected_model or 'Unavailable'}; {state.lower()}. "
+            "Context is a character-based estimate including reserved maximum output "
+            "tokens. Endpoint reachability and catalogue membership do not prove residency. "
+            "Press F3 for full endpoint details."
+        )
+        if self._zen_context_style == "yellow":
+            info.add_class("ctx-bar-amber")
+        elif self._zen_context_style == "red":
+            info.add_class("ctx-bar-red")
+
+    def _refresh_composer_hint(self) -> None:
+        try:
+            composer = self.query_one("#chat-input", ChatInput)
+        except NoMatches:
+            return
+        composer.border_subtitle = (
+            "Esc stop · Ctrl+Z exit"
+            if self.tui.zen_mode and self._turn_active
+            else "Ctrl+Enter send · Ctrl+Z exit"
+            if self.tui.zen_mode
+            else None
+        )
 
     def _now_iso(self) -> str:
         return datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -219,6 +360,8 @@ class ChatPane(Vertical):
 
     def on_resize(self, event: events.Resize) -> None:
         self._follow_from = None
+        if self.is_mounted:
+            self.call_after_refresh(self.refresh_zen_info)
 
     def _queue_follow(self, *, force: bool = False) -> None:
         viewport = self.query_one("#chat-transcript", VerticalScroll)
@@ -247,11 +390,13 @@ class ChatPane(Vertical):
         if self._active_turn is not None:
             self._queue_follow()
             self._active_turn.update_response(text)
+            self.refresh_zen_info()
 
     def _update_activity(self, text: str) -> None:
         if self._active_turn is not None:
             self._queue_follow()
             self._active_turn.update_activity(text)
+            self.refresh_zen_info()
 
     def _write_system_line(self, message: str, style: str) -> None:
         if self._active_turn is not None:
@@ -283,6 +428,16 @@ class ChatPane(Vertical):
                 widget = render_session_turn(turn)
                 if viewport is not None:
                     viewport.mount(widget)
+            latest = session.attempts[-1] if session.attempts else None
+            self._zen_turn_stats = (
+                format_zen_stats(
+                    latest.completion_tokens,
+                    latest.total_s,
+                    estimated=latest.completion_tokens is not None,
+                )
+                if latest is not None
+                else ""
+            )
             try:
                 composer = self.query_one("#chat-input", ChatInput)
                 composer.load_text(session.draft)
