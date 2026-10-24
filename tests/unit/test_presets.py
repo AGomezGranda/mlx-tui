@@ -60,21 +60,21 @@ def test_temperature_int_coerced_to_float(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("value", ["nan", "inf", "+inf", "-inf"])
 @pytest.mark.parametrize("key", ["temperature", "top_p"])
-def test_nonfinite_float_entry_filters_preset(
+def test_nonfinite_float_entry_reports_invalid_preset(
     tmp_path: Path, key: str, value: str
 ) -> None:
     p = tmp_path / "presets.toml"
     p.write_text(f'[[preset]]\nname = "bad"\n{key} = {value}\n')
 
-    assert parse_presets(p) == []
+    with pytest.raises(PresetParseError, match=key):
+        parse_presets(p)
 
 
 def test_invalid_bool_for_max_tokens_filtered(tmp_path: Path) -> None:
     p = tmp_path / "presets.toml"
     p.write_text('[[preset]]\nname = "bad"\nmax_tokens = true\n')
-    presets = parse_presets(p)
-    # invalid bool should cause preset to be filtered (None)
-    assert presets == []
+    with pytest.raises(PresetParseError, match="max_tokens"):
+        parse_presets(p)
     # load still returns []
     assert load_presets(p) == []
 

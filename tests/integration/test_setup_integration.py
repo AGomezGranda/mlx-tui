@@ -2,46 +2,39 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from huggingface_hub import scan_cache_dir
 from textual.widgets import Button, Static, TabbedContent
 
+from mlx_tui.config_io import read_config
+from mlx_tui.discover_pane import ResultsTable
 from mlx_tui.models_pane import ModelsPane
 from mlx_tui.search import RepoSnapshot
-from mlx_tui.search_screen import ResultsTable, SearchScreen
+from mlx_tui.search_screen import SearchScreen
 from mlx_tui.setup_screen import SetupScreen
 from tests.conftest import AppHarness
 
 
-async def test_first_run_attach_has_working_start_action(
-    stub_harness: AppHarness,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+async def test_runtime_setup_reached_from_settings_has_start_action(
+    stub_harness: AppHarness, tmp_path: Path
 ) -> None:
     config_file = tmp_path / "config.toml"
-    monkeypatch.setattr("mlx_tui.setup_screen.config_path", lambda: config_file)
-    screen = SetupScreen()
-    stub_harness.app.push_screen(screen)
+    config_file.write_text("")
+    stub_harness.app.config_document = read_config(config_file)
+    await stub_harness.pilot.press("ctrl+g")
+    stub_harness.app.screen.query_one("#settings-runtime", Button).press()
     await stub_harness.pilot.pause()
-    assert screen.query_one("#setup-attach", Button).has_focus
-
-    await stub_harness.pilot.press("enter")
-    assert stub_harness.app.config.runtime_mode == "attach"
-    command = f"mlx_lm.server --port {stub_harness.app.port}"
-    assert stub_harness.app.config.start_cmd == command
-    assert f'start_cmd = "{command}"' in config_file.read_text()
-
-    called: list[str] = []
-
-    async def start() -> None:
-        called.append(stub_harness.app.config.runtime_mode)
-
-    monkeypatch.setattr(stub_harness.app, "action_cold_start", start)
-    screen.query_one("#setup-start", Button).focus()
-    await stub_harness.pilot.press("enter")
-    assert await stub_harness.wait_for(lambda _: called == ["attach"])
+    screen = stub_harness.app.screen
+    assert isinstance(screen, SetupScreen)
+    assert screen.query_one("#setup-settings", Button).has_focus
+    assert "Attach" in str(screen.query_one("#setup-mode", Static).render())
+    assert not screen.query(
+        "#setup-context, #setup-memory, #setup-managed, #setup-attach"
+    )
+    assert screen.query_one("#setup-start", Button)
 
 
 async def test_fresh_install_without_hub_cache_shows_download_needed(
@@ -69,8 +62,7 @@ async def test_keyboard_setup_selects_managed_downloads_and_reaches_compare(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    config_file = tmp_path / "config.toml"
-    monkeypatch.setattr("mlx_tui.setup_screen.config_path", lambda: config_file)
+    stub_harness.app.config = replace(stub_harness.app.config, runtime_mode="managed")
     install_root = tmp_path / "runtime"
 
     def fake_install(
@@ -85,16 +77,7 @@ async def test_keyboard_setup_selects_managed_downloads_and_reaches_compare(
     stub_harness.app.push_screen(screen)
     await stub_harness.pilot.pause()
 
-    managed = screen.query_one("#setup-managed", Button)
-    managed.focus()
-    await stub_harness.pilot.press("enter")
-    assert stub_harness.app.config.runtime_mode == "managed"
-    assert config_file.read_text().startswith('runtime_mode = "managed"')
-
-    context = screen.query_one("#setup-context", Button)
-    context.focus()
-    await stub_harness.pilot.press("enter")
-    assert stub_harness.app.setup_preferences["context_budget"] == "meets intended work"
+    assert "Managed" in str(screen.query_one("#setup-mode", Static).render())
 
     install = screen.query_one("#setup-install", Button)
     install.focus()
@@ -159,9 +142,9 @@ async def test_modal_discover_preserves_pinned_revision_through_download(
         observed["metadata_request"] = (requested_repo, filename, revision)
         return str(config_file)
 
-    monkeypatch.setattr("mlx_tui.search_screen.repo_snapshot", snapshot)
-    monkeypatch.setattr("mlx_tui.search_screen.download_snapshot", download)
-    monkeypatch.setattr("mlx_tui.search_screen.hf_hub_download", download_metadata)
+    monkeypatch.setattr("mlx_tui.discover_pane.repo_snapshot", snapshot)
+    monkeypatch.setattr("mlx_tui.discover_pane.download_snapshot", download)
+    monkeypatch.setattr("mlx_tui.discover_pane.hf_hub_download", download_metadata)
 
     def noop_rescan(_self: ModelsPane) -> None:
         return None
@@ -195,9 +178,7 @@ async def test_install_cancel_waits_for_worker_cleanup(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(
-        "mlx_tui.setup_screen.config_path", lambda: tmp_path / "config.toml"
-    )
+    stub_harness.app.config = replace(stub_harness.app.config, runtime_mode="managed")
     completed = threading.Event()
 
     def fake_install(
@@ -212,7 +193,6 @@ async def test_install_cancel_waits_for_worker_cleanup(
     screen = SetupScreen()
     stub_harness.app.push_screen(screen)
     await stub_harness.pilot.pause()
-    screen._select_mode("managed", "managed")
     screen._install()
     assert await stub_harness.wait_for(lambda _: screen._installing)
 

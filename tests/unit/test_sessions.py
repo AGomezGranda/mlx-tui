@@ -194,6 +194,17 @@ def test_attachment_snapshots_round_trip_on_draft_and_attempt(tmp_path: Path) ->
     assert loaded.attempts[0].attachments == (snapshot,)
 
 
+def test_interrupted_recovery_preserves_draft_attachments(tmp_path: Path) -> None:
+    source = tmp_path / "draft.txt"
+    source.write_text("retained content")
+    snapshot = read_attachment(source)
+    session = _session(attachments=(snapshot,), attempts=(_turn(outcome="running"),))
+    path = save_session(session)
+    reopened = load_session(path)
+    assert reopened.attempts[0].outcome == "interrupted"
+    assert reopened.attachments == (snapshot,)
+
+
 def test_attachment_aggregate_bound_counts_all_draft_files(tmp_path: Path) -> None:
     paths = [tmp_path / f"part-{index}.txt" for index in range(5)]
     for path in paths[:4]:

@@ -16,7 +16,8 @@ from pathlib import Path
 
 import psutil
 
-from mlx_tui.config import ConfigParseError, config_path, parse_config
+from mlx_tui.config import ConfigParseError, config_path
+from mlx_tui.config_io import read_config
 from mlx_tui.managed.paths import (
     BUILD_CONSTRAINTS_RESOURCE,
     COMPLETION_MARKER,
@@ -57,9 +58,7 @@ def _safe_hash(value: object, pattern: re.Pattern[str]) -> str | None:
 def _package_info(name: str) -> dict[str, object]:
     try:
         value = package_version(name)
-    except PackageNotFoundError:
-        return {"status": "unavailable", "version": None}
-    except (TypeError, ValueError):
+    except (PackageNotFoundError, TypeError, ValueError):
         return {"status": "unavailable", "version": None}
     safe = _safe_version(value)
     if safe is None:
@@ -101,13 +100,15 @@ def _config_info() -> dict[str, object]:
     if not path.exists():
         return {"present": False, "status": "missing", "runtime_mode": None}
     try:
-        config = parse_config(path)
+        document = read_config(path)
     except ConfigParseError:
+        return {"present": True, "status": "malformed", "runtime_mode": None}
+    if any(issue.severity == "error" for issue in document.issues):
         return {"present": True, "status": "malformed", "runtime_mode": None}
     return {
         "present": True,
         "status": "valid",
-        "runtime_mode": config.runtime_mode,
+        "runtime_mode": document.config.runtime_mode,
     }
 
 

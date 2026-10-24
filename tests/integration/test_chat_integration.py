@@ -10,6 +10,8 @@ import pytest
 from textual import events
 from textual.widgets import TextArea
 
+import mlx_tui.app.polling as _app_polling
+import mlx_tui.chat_ui.turns as _chat_turns
 from mlx_tui import text_screen
 from mlx_tui.app import MlxTuiApp
 from mlx_tui.chat_turn import ChatTurn
@@ -249,7 +251,7 @@ async def test_server_error_status_shows_red_line_not_fake_stamp(
     harness: AppHarness,
 ) -> None:
     harness.server.mode = "error500"
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     inp = harness.app.query_one("#chat-input", ChatInput)
     inp.text = "hi"
     inp.focus()
@@ -285,7 +287,7 @@ async def test_server_error_status_shows_red_line_not_fake_stamp(
 
 async def test_truncated_stream_red_line_and_no_stale_pane(harness: AppHarness) -> None:
     harness.server.mode = "truncated"
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     inp = harness.app.query_one("#chat-input", ChatInput)
     inp.text = "hi"
     inp.focus()
@@ -321,7 +323,8 @@ async def test_chat_renders_markdown(harness: AppHarness) -> None:
     turn = ChatTurn("[bold]literal user[/bold]")
     await pane.query_one(VerticalScroll).mount(turn)
     pane._active_turn = turn
-    pane._complete_turn_ui(
+    _chat_turns._complete_turn_ui(
+        pane,
         "# hi\n\n**bold**\n\n```python\nprint('hello')\n```",
         "12 in · 6 out · first 0.10s · answer 0.20s · total 1.00s · "
         "10.0 client request tok/s",
@@ -396,7 +399,7 @@ async def test_cancelled_prompt_excluded_retains_prior(harness: AppHarness) -> N
     assert await harness.wait_for(lambda a: len(harness.chat_pane().messages) == 2)
 
     harness.server.mode = "slow"
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     harness.server.requests.clear()
     inp.text = "to cancel"
     inp.focus()
@@ -514,7 +517,7 @@ async def test_reasoning_renders_separately_before_answer(
     )
     async with app.run_test() as pilot:
         harness = AppHarness(app=app, pilot=pilot, server=server)
-        await harness.app._poll()
+        await _app_polling._poll(harness.app)
         inp = harness.app.query_one("#chat-input", ChatInput)
         inp.text = "hi"
         inp.focus()
@@ -547,7 +550,7 @@ async def test_tool_only_displays_unexecuted_without_commit(
     )
     async with app.run_test() as pilot:
         harness = AppHarness(app=app, pilot=pilot, server=server)
-        await harness.app._poll()
+        await _app_polling._poll(harness.app)
         inp = harness.app.query_one("#chat-input", ChatInput)
         inp.text = "hi"
         inp.focus()
@@ -611,7 +614,7 @@ async def test_stream_scroll_intent_and_geometry(  # noqa: PLR0915
         pane._update_stream(text + "\n\nwhile switching")
         await harness.pilot.pause()
     assert viewport.scroll_y == 3
-    pane._complete_turn_ui(text + "\n\nfinished", "measurement", [])
+    _chat_turns._complete_turn_ui(pane, text + "\n\nfinished", "measurement", [])
     await harness.pilot.pause()
     assert viewport.scroll_y == 3
     assert turn.body is body

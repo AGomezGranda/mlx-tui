@@ -10,6 +10,7 @@ from typing import Any
 from textual.css.query import NoMatches
 from textual.widgets import Input, ProgressBar, Static
 
+import mlx_tui.chat_ui.persistence as _chat_persistence
 from mlx_tui.attachments import (
     AttachmentError,
     AttachmentSnapshot,
@@ -71,7 +72,7 @@ def _prepare_window(
     window = prepare_context(
         messages,
         pane.tui.config.system,
-        pane._get_max_ctx(),
+        _get_max_ctx(pane),
         max_tokens,
     )
     return rendered, window
@@ -82,14 +83,14 @@ def _refresh_attachment_ui(pane: Any) -> None:
         from rich.text import Text  # noqa: PLC0415
 
         if not pane._draft_attachments:
-            summary = f"files: none · destination {pane._request_destination()}"
+            summary = f"files: none · destination {_request_destination(pane)}"
         else:
             files = " · ".join(
                 f"{index}. {snapshot.selected_path} ({snapshot.byte_length} B, "
                 f"~{estimate_tokens(snapshot.content)} est tokens)"
                 for index, snapshot in enumerate(pane._draft_attachments, 1)
             )
-            summary = f"files: {files} · destination {pane._request_destination()}"
+            summary = f"files: {files} · destination {_request_destination(pane)}"
         if pane._context_error:
             summary += f" · {pane._context_error}"
         pane.query_one("#chat-attachments", Static).update(Text(summary))
@@ -99,10 +100,10 @@ def _refresh_attachment_ui(pane: Any) -> None:
 
 
 def _current_window(pane: Any) -> tuple[str, ContextWindow] | None:
-    draft = pane._current_draft()
+    draft = _current_draft(pane)
     if not pane.messages and not draft.strip() and not pane._draft_attachments:
         return None
-    return pane._prepare_window(draft, pane._draft_attachments)
+    return _prepare_window(pane, draft, pane._draft_attachments)
 
 
 def _included_turn_ids(pane: Any, window: ContextWindow) -> tuple[str, ...]:
@@ -116,10 +117,10 @@ def _included_turn_ids(pane: Any, window: ContextWindow) -> tuple[str, ...]:
 
 def _context_preview_pressed(pane: Any) -> None:
     try:
-        prepared = pane._current_window()
+        prepared = _current_window(pane)
     except ContextLimitError as exc:
         pane._context_error = exc.reason
-        pane._refresh_attachment_ui()
+        _refresh_attachment_ui(pane)
         pane.tui.log_app(exc.reason, "yellow")
         return
     if prepared is None:
@@ -127,10 +128,10 @@ def _context_preview_pressed(pane: Any) -> None:
         return
     _, window = prepared
     lines = [
-        f"Destination: {pane._request_destination()}",
+        f"Destination: {_request_destination(pane)}",
         f"Estimated input: {window.input_tokens} tokens",
         f"Reserved output: {window.reserved_tokens - window.input_tokens} tokens",
-        f"Configured limit: {pane._get_max_ctx()} tokens",
+        f"Configured limit: {_get_max_ctx(pane)} tokens",
         f"Excluded messages: {window.excluded_turns}",
     ]
     for message in window.messages:
@@ -143,10 +144,6 @@ def _context_preview_pressed(pane: Any) -> None:
             title="Request context — exact retained messages",
         )
     )
-
-
-def _attachment_failed(pane: Any, message: str) -> None:
-    pane.tui.log_app(f"attachment rejected: {message}", "yellow")
 
 
 def _attachment_added(pane: Any, snapshot: AttachmentSnapshot) -> None:
@@ -167,8 +164,8 @@ def _attachment_added(pane: Any, snapshot: AttachmentSnapshot) -> None:
     pane._context_error = None
     if not pane._is_temporary and not pane._read_only:
         pane._save_revision += 1
-        pane._schedule_draft_save()
-    pane._refresh_attachment_ui()
+        _chat_persistence._schedule_draft_save(pane)
+    _refresh_attachment_ui(pane)
     pane.refresh_context_bar()
 
 
@@ -177,10 +174,10 @@ def _attachment_picker_finished(
 ) -> None:
     pane._attachment_picker_active = False
     if error is not None:
-        pane._attachment_failed(error)
+        pane.tui.log_app(f"attachment rejected: {error}", "yellow")
     elif snapshot is not None:
-        pane._attachment_added(snapshot)
-    pane._update_action_visibility()
+        _attachment_added(pane, snapshot)
+    _chat_persistence._update_action_visibility(pane)
 
 
 def _choose_attachment_worker(pane: Any) -> None:
@@ -191,7 +188,7 @@ def _choose_attachment_worker(pane: Any) -> None:
     except AttachmentError as exc:
         snapshot = None
         error = str(exc)
-    pane.app.call_from_thread(pane._attachment_picker_finished, snapshot, error)
+    pane.app.call_from_thread(_attachment_picker_finished, pane, snapshot, error)
 
 
 def _add_attachment_pressed(pane: Any) -> None:
@@ -205,7 +202,7 @@ def _add_attachment_pressed(pane: Any) -> None:
         )
         return
     pane._attachment_picker_active = True
-    pane._update_action_visibility()
+    _chat_persistence._update_action_visibility(pane)
     pane._choose_attachment_worker()
 
 
@@ -226,7 +223,7 @@ def _selected_attachment(pane: Any) -> tuple[int, AttachmentSnapshot] | None:
 
 
 def _inspect_attachment_pressed(pane: Any) -> None:
-    selected = pane._selected_attachment()
+    selected = _selected_attachment(pane)
     if selected is None:
         return
     _, snapshot = selected
@@ -241,7 +238,7 @@ def _inspect_attachment_pressed(pane: Any) -> None:
 
 
 def _remove_attachment_pressed(pane: Any) -> None:
-    selected = pane._selected_attachment()
+    selected = _selected_attachment(pane)
     if selected is None:
         return
     index, _ = selected
@@ -265,21 +262,21 @@ def _remove_attachment_pressed(pane: Any) -> None:
         )
     if not pane._is_temporary and not pane._read_only:
         pane._save_revision += 1
-        pane._schedule_draft_save()
+        _chat_persistence._schedule_draft_save(pane)
     pane._context_error = None
-    pane._refresh_attachment_ui()
+    _refresh_attachment_ui(pane)
     pane.refresh_context_bar()
 
 
 def refresh_context_bar(pane: Any) -> None:
     try:
-        prepared = pane._current_window()
+        prepared = _current_window(pane)
     except ContextLimitError as exc:
         pane._context_error = exc.reason
-        pane.update_ctx_bar(pane._get_max_ctx())
+        pane.update_ctx_bar(_get_max_ctx(pane))
     except Exception:
         pane._context_error = "context preview unavailable"
-        pane.update_ctx_bar(pane._get_max_ctx())
+        pane.update_ctx_bar(_get_max_ctx(pane))
     else:
         pane._context_error = None
         if prepared is None:
@@ -287,11 +284,11 @@ def refresh_context_bar(pane: Any) -> None:
         else:
             _, window = prepared
             pane.update_ctx_bar(window.reserved_tokens, window.excluded_turns)
-    pane._refresh_attachment_ui()
+    _refresh_attachment_ui(pane)
 
 
 def update_ctx_bar(pane: Any, ctx_len: int, excluded: int = 0) -> None:
-    max_ctx = pane._get_max_ctx()
+    max_ctx = _get_max_ctx(pane)
     style = ctx_bar_style(ctx_len, max_ctx)
     try:
         bar = pane.query_one("#ctx-progress", ProgressBar)

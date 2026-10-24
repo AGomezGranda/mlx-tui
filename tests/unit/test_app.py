@@ -31,14 +31,14 @@ async def test_shutdown_continues_after_chat_cleanup_errors(
     def no_match(*_args: object, **_kwargs: object) -> object:
         raise NoMatches()
 
-    def chat() -> FailingChat:
+    def chat(_app: MlxTuiApp) -> FailingChat:
         return FailingChat()
 
     def log_app(*_args: object, **_kwargs: object) -> None:
         return
 
     monkeypatch.setattr(app, "query_one", no_match)
-    monkeypatch.setattr(app, "_chat_pane_or_none", chat)
+    monkeypatch.setattr("mlx_tui.app.ops._chat_pane_or_none", chat)
     monkeypatch.setattr(app, "log_app", log_app)
     app.managed_runtime = SimpleNamespace(close=lambda: events.append("managed"))  # type: ignore[assignment]
     app._http = Http()  # type: ignore[assignment]

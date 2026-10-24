@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any, cast, override
 
-from rich.text import Text
 from textual import events, on, work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -25,8 +24,6 @@ from mlx_tui.comparison.contracts import (
     _PROFILE_COUNT,
     ComparisonInput,
     ComparisonResult,
-    DecisionKind,
-    JSONValue,
 )
 from mlx_tui.config import AppConfig
 
@@ -228,8 +225,8 @@ class ComparePane(VerticalScroll):
         self.refresh_profile_state()
         result = self.tui.last_comparison
         if result is not None:
-            self._render_result(result)
-        self._update_controls()
+            _compare_render._render_result(self, result)
+        _compare_render._update_controls(self)
 
     @property
     def has_live_comparison(self) -> bool:
@@ -243,9 +240,11 @@ class ComparePane(VerticalScroll):
         if not self._comparison_active or self._cancel_requested:
             return
         self._cancel_requested = True
-        self._set_text("#comparison-progress", "cancellation requested", "yellow")
+        _compare_render._set_text(
+            self, "#comparison-progress", "cancellation requested", "yellow"
+        )
         self.tui.refresh_activity()
-        self._update_controls()
+        _compare_render._update_controls(self)
         if not self._run_started:
             return
         if self._comparison_task is not None:
@@ -263,45 +262,18 @@ class ComparePane(VerticalScroll):
     def set_comparison_busy(self) -> None:
         # The coordinator owns busy state; readiness, result status, and
         # saved-choice availability decide which controls stay enabled.
-        self._update_controls()
+        _compare_render._update_controls(self)
 
     @on(Button.Pressed, "#comparison-cancel")
     def _cancel(self) -> None:
         self.abort()
 
-    def _set_text(self, selector: str, message: str, style: str | None = None) -> None:
-        return _compare_render._set_text(self, selector, message, style)
-
-    def _set_rich_text(self, selector: str, text: Text) -> None:
-        return _compare_render._set_rich_text(self, selector, text)
-
-    def _is_busy(self) -> bool:
-        return _compare_render._is_busy(self)
-
     def refresh_profile_state(self) -> None:
         return _compare_render.refresh_profile_state(self)
-
-    def _render_task_details(self) -> None:
-        return _compare_render._render_task_details(self)
-
-    def _operator_input_value(self, selector: str) -> str:
-        return _compare_render._operator_input_value(self, selector)
-
-    def _render_evidence_details(self) -> None:
-        return _compare_render._render_evidence_details(self)
-
-    def _render_saved(self) -> None:
-        return _compare_render._render_saved(self)
 
     @staticmethod
     def _result_text(result: ComparisonResult) -> str:
         return _compare_render._result_text(result)
-
-    def _update_keep_labels(self) -> None:
-        return _compare_render._update_keep_labels(self)
-
-    def _update_controls(self) -> None:  # noqa: PLR0912, PLR0915
-        return _compare_render._update_controls(self)
 
     @on(Select.Changed, "#comparison-profile-a, #comparison-profile-b")
     def _candidate_changed(self, event: Select.Changed) -> None:
@@ -315,12 +287,6 @@ class ComparePane(VerticalScroll):
     def _setup_input_changed(self) -> None:
         return _compare_workflow._setup_input_changed(self)
 
-    def _operator_value(self, selector: str) -> dict[str, JSONValue]:
-        return _compare_workflow._operator_value(self, selector)
-
-    def _build_comparison_input(self) -> ComparisonInput:
-        return _compare_workflow._build_comparison_input(self)
-
     @on(Button.Pressed, "#comparison-preflight")
     def _preflight(self) -> None:
         return _compare_workflow._preflight(self)
@@ -328,15 +294,6 @@ class ComparePane(VerticalScroll):
     @on(Button.Pressed, "#comparison-run")
     def _start_comparison(self) -> None:
         return _compare_workflow._start_comparison(self)
-
-    def _clear_result_display(self) -> None:
-        return _compare_render._clear_result_display(self)
-
-    def _render_result(self, result: ComparisonResult) -> None:
-        return _compare_render._render_result(self, result)
-
-    def _on_progress(self, result: ComparisonResult) -> None:
-        return _compare_workflow._on_progress(self, result)
 
     @work(exclusive=True, group="comparison")
     async def _run_comparison(
@@ -356,12 +313,6 @@ class ComparePane(VerticalScroll):
     @on(Button.Pressed, "#comparison-restart")
     async def _restart(self) -> None:
         return await _compare_workflow._restart(self)
-
-    def _decision_reason(self) -> str:
-        return _compare_decisions._decision_reason(self)
-
-    def _commit_decision(self, decision: DecisionKind, slot: int | None = None) -> None:
-        return _compare_decisions._commit_decision(self, decision, slot)
 
     @on(Button.Pressed, "#comparison-keep-a")
     def _keep_a(self) -> None:

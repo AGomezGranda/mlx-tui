@@ -7,6 +7,7 @@ from typing import Any
 
 from textual.css.query import NoMatches
 
+import mlx_tui.app.ops as _app_ops
 from mlx_tui.comparison.contracts import _PROFILE_COUNT
 from mlx_tui.comparison.runner import verify_profile_snapshot
 from mlx_tui.comparison.store import (
@@ -111,7 +112,7 @@ def apply_coding_profile(
             max_ctx=profile.max_ctx,
         )
         app.select_model(str(snapshot))
-        pane = app._chat_pane_or_none()
+        pane = _app_ops._chat_pane_or_none(app)
         if pane is not None:
             pane.apply_config_params(app.config)
             pane.refresh_context_bar()
@@ -121,7 +122,7 @@ def apply_coding_profile(
         app._applying_profile = False
     app.refresh_models()
     app.refresh_profile_views()
-    pane = app._chat_pane_or_none()
+    pane = _app_ops._chat_pane_or_none(app)
     if pane is not None:
         pane.mark_next_request_dirty()
     app.log_app(

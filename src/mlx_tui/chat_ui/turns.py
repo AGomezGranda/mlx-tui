@@ -6,6 +6,7 @@ import asyncio
 import time
 import uuid
 from dataclasses import replace
+from functools import partial
 from typing import Any
 
 import httpx
@@ -13,6 +14,8 @@ from textual.containers import VerticalScroll
 from textual.css.query import NoMatches
 from textual.widgets import Button, Input, TabbedContent, TextArea
 
+import mlx_tui.chat_ui.context as _chat_context
+import mlx_tui.chat_ui.persistence as _chat_persistence
 from mlx_tui.chat import (
     TurnProgress,
     TurnResult,
@@ -34,6 +37,8 @@ from mlx_tui.sessions.models import SessionTurn
 
 
 def _send_blocked_reason(pane: Any) -> str | None:
+    if not pane.tui.runtime_services_started:
+        return "Save Settings or continue with defaults first"
     if pane._read_only:
         return "session is locked read-only — open an editable copy"
     if pane._save_failed:
@@ -61,10 +66,10 @@ def _on_draft_changed(pane: Any, event: TextArea.Changed) -> None:
                 draft=draft_value,
                 attachments=pane._draft_attachments,
             )
-        pane._update_save_status()
+        _chat_persistence._update_save_status(pane)
         pane.refresh_context_bar()
         return
-    pane._ensure_session()
+    _chat_persistence._ensure_session(pane)
     assert pane._session is not None
     pane._session = replace(
         pane._session,
@@ -73,8 +78,8 @@ def _on_draft_changed(pane: Any, event: TextArea.Changed) -> None:
         updated_at=pane._now_iso(),
     )
     pane._save_revision += 1
-    pane._update_save_status()
-    pane._schedule_draft_save()
+    _chat_persistence._update_save_status(pane)
+    _chat_persistence._schedule_draft_save(pane)
     pane.refresh_context_bar()
 
 
@@ -85,7 +90,7 @@ def _on_param_changed(pane: Any, _event: Input.Changed) -> None:
 
 
 def _on_input_submitted(pane: Any, event: ChatInput.Submitted) -> None:
-    pane._do_submit(event.text, event.chat_input)
+    _do_submit(pane, event.text, event.chat_input)
 
 
 def _send_pressed(pane: Any) -> None:
@@ -93,7 +98,7 @@ def _send_pressed(pane: Any) -> None:
         composer = pane.query_one("#chat-input", ChatInput)
     except NoMatches:
         return
-    pane._do_submit(composer.text, composer)
+    _do_submit(pane, composer.text, composer)
 
 
 def _do_submit(pane: Any, raw: str, editor: ChatInput) -> None:  # noqa: PLR0911, PLR0912, PLR0915
@@ -101,7 +106,7 @@ def _do_submit(pane: Any, raw: str, editor: ChatInput) -> None:  # noqa: PLR0911
     # indentation is preserved.
     if not raw.strip():
         return
-    blocked = pane._send_blocked_reason()
+    blocked = _send_blocked_reason(pane)
     if blocked is not None:
         pane.tui.log_app(blocked, "yellow")
         return
@@ -120,10 +125,10 @@ def _do_submit(pane: Any, raw: str, editor: ChatInput) -> None:  # noqa: PLR0911
         )
         return
     try:
-        rendered, window = pane._prepare_window(raw, draft_attachments)
+        rendered, window = _chat_context._prepare_window(pane, raw, draft_attachments)
     except ContextLimitError as exc:
         pane._context_error = exc.reason
-        pane._refresh_attachment_ui()
+        _chat_context._refresh_attachment_ui(pane)
         try:
             rejected = ChatTurn(raw)
             pane.query_one("#chat-transcript", VerticalScroll).mount(rejected)
@@ -165,7 +170,7 @@ def _do_submit(pane: Any, raw: str, editor: ChatInput) -> None:  # noqa: PLR0911
         sent_content=rendered,
         settings=session_settings,
         attachments=draft_attachments,
-        included_turn_ids=pane._included_turn_ids(window),
+        included_turn_ids=_chat_context._included_turn_ids(pane, window),
     )
     pane._active_session_turn_id = running_turn.turn_id
     pane._progress_answer = ""
@@ -190,10 +195,10 @@ def _do_submit(pane: Any, raw: str, editor: ChatInput) -> None:  # noqa: PLR0911
             updated_at=pane._now_iso(),
         )
         pane._save_revision += 1
-        pane._update_save_status()
+        _chat_persistence._update_save_status(pane)
     pane._draft_attachments = ()
     pane._attachment_index = 0
-    pane._refresh_attachment_ui()
+    _chat_context._refresh_attachment_ui(pane)
     try:
         try:
             composer_widget = pane.query_one("#chat-input", ChatInput)
@@ -264,7 +269,7 @@ def _do_submit(pane: Any, raw: str, editor: ChatInput) -> None:  # noqa: PLR0911
         finally:
             # Startup failure never sends; drop the optimistic attempt but
             # keep the exact draft via _pending_draft for end_turn restore.
-            pane._drop_running_attempt()
+            _drop_running_attempt(pane)
             pane.end_turn()
         return
     pane._turn_worker = worker
@@ -299,36 +304,35 @@ async def _run_turn(  # noqa: PLR0913, PLR0915, PLR0912, PLR0917
     ctx_len_estimate = 0
     reserved_ctx_len = 0
     excluded_turns = 0
+    generation_finished = False
     pane._turn_started = True
-    # Pre-send checkpoint: persist the draft and running attempt before HTTP.
-    # If saving fails, retain the composer and send no request.
-    if (
-        pane._session is not None
-        and not pane._is_temporary
-        and not pane._read_only
-        and pane._active_session_turn_id is not None
-    ):
-        saved = await pane._save_session_now()
-        if not saved:
-            pane._drop_running_attempt()
-            pane._write_system_line(
-                "save failed — retry save or discard unsaved work", "red"
-            )
-            # The early return bypasses the try/finally below, so release
-            # the lease and restore the composer here.
-            pane.end_turn()
-            return
     try:
+        # Pre-send checkpoint: persist the draft and running attempt before HTTP.
+        # If saving fails, retain the composer and send no request.
+        if (
+            pane._session is not None
+            and not pane._is_temporary
+            and not pane._read_only
+            and pane._active_session_turn_id is not None
+        ):
+            saved = await _chat_persistence._save_session_now(pane)
+            if not saved:
+                _drop_running_attempt(pane)
+                pane._write_system_line(
+                    "save failed — retry save or discard unsaved work", "red"
+                )
+                return
         if pane._cancel_requested or (
             pane._turn_worker is not None and pane._turn_worker.cancelled_event.is_set()
         ):
-            pane._record_cancelled(model_at_send, 0, 0)
-            pane._finalize_session_attempt(
+            _record_cancelled(pane, model_at_send, 0, 0)
+            _finalize_session_attempt(
+                pane,
                 outcome="cancelled",
                 error_category="cancelled",
                 error_detail="client request cancelled, engine state unknown",
             )
-            await pane._checkpoint_terminal()
+            await _checkpoint_terminal(pane)
             return
         cfg = pane.tui.config
         if cfg.temperature != temp or cfg.top_p != top_p or cfg.max_tokens != max_tok:
@@ -342,11 +346,12 @@ async def _run_turn(  # noqa: PLR0913, PLR0915, PLR0912, PLR0917
         reserved_ctx_len = window.reserved_tokens
         excluded_turns = window.excluded_turns
         pane.update_ctx_bar(window.reserved_tokens, window.excluded_turns)
-        pane._update_running_estimates(
+        _update_running_estimates(
+            pane,
             ctx_len_estimate,
             reserved_ctx_len,
             excluded_turns,
-            pane._included_turn_ids(window),
+            _chat_context._included_turn_ids(pane, window),
         )
         payload: dict[str, object] = {
             "messages": list(window.messages),
@@ -361,32 +366,24 @@ async def _run_turn(  # noqa: PLR0913, PLR0915, PLR0912, PLR0917
         if enable_thinking is not None:
             payload["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
         payload["model"] = model_at_send
-        try:
-            result = await stream_turn(
-                url,
-                payload,
-                prompt_estimate=window.input_tokens,
-                on_flush=pane._update_stream,
-                on_activity=pane._update_activity,
-                on_progress=pane._on_turn_progress,
-            )
-        except asyncio.CancelledError:
-            pane._record_cancelled(model_at_send, ctx_len_estimate, reserved_ctx_len)
-            pane._finalize_session_attempt(
-                outcome="cancelled",
-                error_category="cancelled",
-                error_detail="client request cancelled, engine state unknown",
-            )
-            await pane._checkpoint_terminal()
-            raise
+        result = await stream_turn(
+            url,
+            payload,
+            prompt_estimate=window.input_tokens,
+            on_flush=pane._update_stream,
+            on_activity=pane._update_activity,
+            on_progress=partial(_on_turn_progress, pane),
+        )
+        generation_finished = True
         if pane._cancel_requested:
-            pane._record_cancelled(model_at_send, ctx_len_estimate, reserved_ctx_len)
-            pane._finalize_session_attempt(
+            _record_cancelled(pane, model_at_send, ctx_len_estimate, reserved_ctx_len)
+            _finalize_session_attempt(
+                pane,
                 outcome="cancelled",
                 error_category="cancelled",
                 error_detail="client request cancelled, engine state unknown",
             )
-            await pane._checkpoint_terminal()
+            await _checkpoint_terminal(pane)
             return
         if result.response_model != model_at_send:
             pane.tui.record_generation_success(model_at_send, result.response_model)
@@ -394,7 +391,8 @@ async def _run_turn(  # noqa: PLR0913, PLR0915, PLR0912, PLR0917
                 "response identity missing or mismatched — request not verified",
                 "red",
             )
-            pane._finalize_session_attempt(
+            _finalize_session_attempt(
+                pane,
                 outcome="failed",
                 response_model=result.response_model,
                 finish_reason=result.finish_reason,
@@ -403,7 +401,7 @@ async def _run_turn(  # noqa: PLR0913, PLR0915, PLR0912, PLR0917
                 error_category="identity",
                 error_detail="response identity missing or mismatched",
             )
-            await pane._checkpoint_terminal()
+            await _checkpoint_terminal(pane)
             return
         pane.tui.record_generation_success(model_at_send, result.response_model)
         outcome = pane._classify_outcome(result)
@@ -422,7 +420,8 @@ async def _run_turn(  # noqa: PLR0913, PLR0915, PLR0912, PLR0917
         notices = pane._outcome_notices(result, max_tok, excluded_turns)
         # Final success still comes only from TurnResult and the pane's
         # identity check, never from a progress notification.
-        pane._finalize_session_attempt(
+        _finalize_session_attempt(
+            pane,
             outcome=outcome,
             answer=result.full_text,
             reasoning=result.reasoning_text,
@@ -438,7 +437,8 @@ async def _run_turn(  # noqa: PLR0913, PLR0915, PLR0912, PLR0917
             answer_started_s=result.answer_started_s,
             total_s=result.total_s,
         )
-        pane._record_outcome(
+        _record_outcome(
+            pane,
             model_at_send,
             result,
             outcome,
@@ -447,7 +447,8 @@ async def _run_turn(  # noqa: PLR0913, PLR0915, PLR0912, PLR0917
             excluded_turns,
         )
         if outcome == "success":
-            pane._commit_success(
+            _commit_success(
+                pane,
                 pending_user,
                 result.full_text,
                 stamp,
@@ -460,7 +461,8 @@ async def _run_turn(  # noqa: PLR0913, PLR0915, PLR0912, PLR0917
             # but neither side enters future history, so a retry resends
             # the same context. The pending draft is intentionally left set so
             # end_turn() restores it to the composer.
-            pane._complete_turn_ui(
+            _complete_turn_ui(
+                pane,
                 result.full_text,
                 stamp,
                 notices,
@@ -469,41 +471,56 @@ async def _run_turn(  # noqa: PLR0913, PLR0915, PLR0912, PLR0917
             )
         # A completed generation whose save fails remains visible in memory
         # and retains its outcome; further send/clear/switch stays blocked.
-        await pane._checkpoint_terminal()
+        await _checkpoint_terminal(pane)
+    except asyncio.CancelledError:
+        if not generation_finished:
+            _record_cancelled(pane, model_at_send, ctx_len_estimate, reserved_ctx_len)
+            _finalize_session_attempt(
+                pane,
+                outcome="cancelled",
+                error_category="cancelled",
+                error_detail="client request cancelled, engine state unknown",
+            )
+            await _checkpoint_terminal(pane)
+        raise
     except ContextLimitError as exc:
         pane._write_system_line(exc.reason, "yellow")
-        pane._finalize_session_attempt(
+        _finalize_session_attempt(
+            pane,
             outcome="failed",
             error_category="context",
             error_detail=exc.reason[:500],
         )
-        await pane._checkpoint_terminal()
+        await _checkpoint_terminal(pane)
     except (httpx.StreamClosed, httpx.ReadError, httpx.RemoteProtocolError):
         pane.tui.record_generation_failure(cancelled=pane._cancel_requested)
         if pane._cancel_requested:
-            pane._record_cancelled(model_at_send, ctx_len_estimate, reserved_ctx_len)
-            pane._finalize_session_attempt(
+            _record_cancelled(pane, model_at_send, ctx_len_estimate, reserved_ctx_len)
+            _finalize_session_attempt(
+                pane,
                 outcome="cancelled",
                 error_category="cancelled",
                 error_detail="client request cancelled, engine state unknown",
             )
         else:
             pane._write_system_line(f"server unreachable :{port}", "red")
-            pane._finalize_session_attempt(
+            _finalize_session_attempt(
+                pane,
                 outcome="failed",
                 error_category="stream",
                 error_detail=f"server unreachable :{port}"[:500],
             )
-        await pane._checkpoint_terminal()
+        await _checkpoint_terminal(pane)
     except (httpx.ConnectError, httpx.TimeoutException):
         pane.tui.record_generation_failure()
         pane._write_system_line(f"server unreachable :{port}", "red")
-        pane._finalize_session_attempt(
+        _finalize_session_attempt(
+            pane,
             outcome="failed",
             error_category="transport",
             error_detail=f"server unreachable :{port}"[:500],
         )
-        await pane._checkpoint_terminal()
+        await _checkpoint_terminal(pane)
     except httpx.HTTPStatusError as exc:
         pane.tui.record_generation_failure()
         detail = error_detail(exc.response)
@@ -518,12 +535,13 @@ async def _run_turn(  # noqa: PLR0913, PLR0915, PLR0912, PLR0917
             message,
             "red",
         )
-        pane._finalize_session_attempt(
+        _finalize_session_attempt(
+            pane,
             outcome="failed",
             error_category=category,
             error_detail=(f"HTTP {exc.response.status_code}{detail}")[:500],
         )
-        await pane._checkpoint_terminal()
+        await _checkpoint_terminal(pane)
     except Exception as exc:
         pane.tui.record_generation_failure()
         try:
@@ -533,12 +551,13 @@ async def _run_turn(  # noqa: PLR0913, PLR0915, PLR0912, PLR0917
         except NoMatches:
             pass
         pane._write_system_line(f"chat failed: {exc.__class__.__name__}", "red")
-        pane._finalize_session_attempt(
+        _finalize_session_attempt(
+            pane,
             outcome="failed",
             error_category="transport",
             error_detail=f"{exc.__class__.__name__}: {exc}"[:500],
         )
-        await pane._checkpoint_terminal()
+        await _checkpoint_terminal(pane)
     finally:
         pane.end_turn()
 
@@ -623,6 +642,8 @@ def _record_outcome(  # noqa: PLR0913, PLR0917
     reserved_ctx_len: int,
     excluded_turns: int,
 ) -> None:
+    import mlx_tui.app.polling as _app_polling  # noqa: PLC0415
+
     acct = result.accounting
     success = outcome == "success"
     record = TurnRecord(
@@ -645,7 +666,7 @@ def _record_outcome(  # noqa: PLR0913, PLR0917
         excluded_turns=excluded_turns,
     )
     pane.tui.history.add(record)
-    pane.tui._refresh_metrics()
+    _app_polling._refresh_metrics(pane.tui)
     pane.update_ctx_bar(reserved_ctx_len, excluded_turns)
 
 
@@ -713,7 +734,8 @@ def _on_turn_progress(pane: Any, progress: TurnProgress) -> None:
     now = time.monotonic()
     if now - pane._last_checkpoint >= 1.0:
         pane._last_checkpoint = now
-        pane._save_session_async()
+        _finalize_session_attempt(pane, outcome="running")
+        _chat_persistence._save_session_async(pane)
 
 
 def _merged_progress_tools(pane: Any) -> tuple[dict[str, Any], ...]:
@@ -754,7 +776,7 @@ def _finalize_session_attempt(  # noqa: PLR0913, PLR0917
     final_tools = (
         tuple(dict(call) for call in tool_calls)
         if tool_calls is not None
-        else tuple(dict(call) for call in pane._merged_progress_tools())
+        else tuple(dict(call) for call in _merged_progress_tools(pane))
     )
     final_response = (
         response_model if response_model is not None else pane._progress_response_model
@@ -822,8 +844,10 @@ async def _checkpoint_terminal(pane: Any) -> None:
         pane._active_session_turn_id = None
         return
     # Immediate checkpoint at terminal outcome.
-    ok = await pane._save_session_now()
-    pane._active_session_turn_id = None
+    try:
+        ok = await _chat_persistence._save_session_now(pane)
+    finally:
+        pane._active_session_turn_id = None
     if not ok:
         try:
             pane.tui.log_app("save failed — retry save or discard unsaved work", "red")
@@ -872,7 +896,7 @@ def _commit_success(  # noqa: PLR0913, PLR0917
     if full_text:
         pane.messages.append({"role": "assistant", "content": full_text})
     pane._pending_draft = None
-    pane._complete_turn_ui(full_text, stamp, notices, reasoning, tool_calls)
+    _complete_turn_ui(pane, full_text, stamp, notices, reasoning, tool_calls)
 
 
 def _complete_turn_ui(  # noqa: PLR0913, PLR0917
@@ -896,6 +920,8 @@ def _record_cancelled(
     ctx_len_estimate: int,
     reserved_ctx_len: int,
 ) -> None:
+    import mlx_tui.app.polling as _app_polling  # noqa: PLC0415
+
     pane.tui.record_generation_failure(cancelled=True)
     record = TurnRecord(
         ts=time.time(),
@@ -911,7 +937,7 @@ def _record_cancelled(
         cancelled=True,
     )
     pane.tui.history.add(record)
-    pane.tui._refresh_metrics()
+    _app_polling._refresh_metrics(pane.tui)
     pane.update_ctx_bar(reserved_ctx_len)
     pane._write_system_line(
         "cancelled — client request cancelled, engine state unknown", "dim"
@@ -946,7 +972,7 @@ def end_turn(pane: Any) -> None:
                     pane._restoring = False
             pane._pending_draft = None
             try:
-                pane._update_action_visibility()
+                _chat_persistence._update_action_visibility(pane)
                 # Preserve the session block without stealing lease state.
                 if pane._turn_active or pane.tui.operations.is_busy:
                     inp.disabled = True

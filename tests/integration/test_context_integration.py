@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 from textual.widgets import Input, TabbedContent, TextArea
 
+import mlx_tui.chat_ui.context as _chat_context
 import mlx_tui.chat_ui.widgets as chat_widgets
 from mlx_tui.app import MlxTuiApp
 from mlx_tui.attachments import read_attachment, render_user_content
@@ -267,7 +268,7 @@ async def test_attachment_preview_matches_post_and_survives_source_change(
     source = tmp_path / "snippet.py"
     source.write_text("old = 'snapshot'\n", encoding="utf-8")
     pane = harness.chat_pane()
-    pane._attachment_added(read_attachment(source))
+    _chat_context._attachment_added(pane, read_attachment(source))
     snapshot = pane._draft_attachments[0]
     source.write_text("new = 'live source'\n", encoding="utf-8")
 
@@ -338,7 +339,7 @@ async def test_attachment_send_is_rejected_for_non_loopback_destination(
     source = tmp_path / "snippet.txt"
     source.write_text("private", encoding="utf-8")
     pane = harness.chat_pane()
-    pane._attachment_added(read_attachment(source))
+    _chat_context._attachment_added(pane, read_attachment(source))
     harness.app.host = "example.com"
     harness.app.query_one("#chat-input", ChatInput).text = "send this"
     before = len(

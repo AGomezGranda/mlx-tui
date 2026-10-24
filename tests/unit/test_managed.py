@@ -126,8 +126,9 @@ def test_inspect_runtime_rejects_version_mismatch(
         managed_inspect.inspect_runtime(root)
 
 
+@pytest.mark.parametrize("vcs_info", [{"commit_id": "wrong"}, None, [], "invalid", 1])
 def test_inspect_runtime_rejects_direct_url_commit_mismatch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, vcs_info: object
 ) -> None:
     root = tmp_path / "runtime"
     (root / "bin").mkdir(parents=True)
@@ -136,7 +137,7 @@ def test_inspect_runtime_rejects_direct_url_commit_mismatch(
     monkeypatch.setattr(managed_inspect, "_uv_executable", _fake_uv)
     monkeypatch.setattr(managed_inspect, "_validate_profiles", _noop_validate)
     payload = _inspection_payload()
-    payload["direct_urls"] = {"mlx-lm": {"vcs_info": {"commit_id": "wrong"}}}
+    payload["direct_urls"] = {"mlx-lm": {"vcs_info": vcs_info}}
 
     def command_output(argv: list[str], env: dict[str, str]) -> str:
         return json.dumps(payload) if argv[0] == str(python) else "freeze\n"

@@ -8,6 +8,7 @@ import httpx
 import pytest
 from textual.widgets import Collapsible, Input, Static
 
+import mlx_tui.app.polling as _app_polling
 from mlx_tui.app import MlxTuiApp
 from mlx_tui.chat_ui.widgets import ChatInput
 from mlx_tui.config import AppConfig
@@ -24,7 +25,7 @@ _REPLY = "Hello world this is MLX."
 
 
 async def test_status_green_and_chat_stamp_over_stub_http(harness: AppHarness) -> None:
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert harness.app.status_state == "green"
     harness.app.select_model(harness.server.model_id)
     inp = harness.app.query_one("#chat-input", ChatInput)
@@ -53,20 +54,20 @@ async def test_status_green_and_chat_stamp_over_stub_http(harness: AppHarness) -
 
 async def test_non_mlx_http_shows_amber(harness: AppHarness) -> None:
     harness.server.mode = "html"
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert harness.app.status_state == "amber"
 
 
 async def test_health_and_catalogue_are_independent(harness: AppHarness) -> None:
     harness.server.mode = "catalog_html"
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert harness.app.status_state == "green"
-    probe = await harness.app._fetch_probe()
+    probe = await _app_polling._fetch_probe(harness.app)
     assert probe.catalogue_state == "amber"
     assert probe.available_models == ()
 
     harness.server.mode = "health_down"
-    probe = await harness.app._fetch_probe()
+    probe = await _app_polling._fetch_probe(harness.app)
     assert probe.state == "amber"
     assert probe.catalogue_state == "green"
 
@@ -82,8 +83,8 @@ async def test_stale_poll_cannot_overwrite_request_evidence(
         await release.wait()
         return ServerProbe("green", None, ("catalogue-only",), "green")
 
-    monkeypatch.setattr(MlxTuiApp, "_fetch_probe", delayed_probe)
-    task = asyncio.create_task(harness.app._poll())
+    monkeypatch.setattr("mlx_tui.app.polling._fetch_probe", delayed_probe)
+    task = asyncio.create_task(_app_polling._poll(harness.app))
     await entered.wait()
     harness.app.select_model("explicit/model")
     harness.app.record_generation_success("explicit/model", "explicit/model")
@@ -99,7 +100,7 @@ async def test_memory_bar_renders(harness: AppHarness) -> None:
     from textual.widgets import ProgressBar  # noqa: PLC0415
 
     await harness.pilot.pause()
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     await harness.pilot.pause()
     bar = harness.app.query_one("#memory-bar", ProgressBar)
     label = harness.app.query_one("#memory-label", Static)
@@ -156,7 +157,7 @@ async def test_polling_keeps_explicit_selection_not_catalogue_or_cmdline(
     monkeypatch.setattr(psutil, "Process", _FakeProc)
     monkeypatch.setattr(psutil, "net_connections", _fake_conns)
 
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert harness.app.status_state == "green"
     assert harness.app.server_identity.last_response_model is None
     assert harness.app.effective_model() == "explicit/request-target"
@@ -195,11 +196,11 @@ async def test_external_catalogue_change_does_not_replace_selection(
     proc_mod._net_denied = False  # type: ignore[attr-defined]
     harness.server.model_id = "mlx-community/v1"
     harness.app.select_model("explicit/request-target")
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert harness.app.effective_model() == "explicit/request-target"
     first = harness.app.server_identity
     harness.server.model_id = "mlx-community/v2"
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert harness.app.effective_model() == "explicit/request-target"
     assert harness.app.server_identity.last_response_model is None
     assert harness.app.server_identity.selected_model == first.selected_model
@@ -231,7 +232,7 @@ async def test_poll_connection_failure_stays_red_with_bounded_diagnostics(
     harness.server.shutdown()
     harness.server.server_close()
     for _ in range(3):
-        await harness.app._poll()
+        await _app_polling._poll(harness.app)
     assert harness.app.status_state == "red"
     assert harness.app.effective_model() == "explicit/request-target"
     assert harness.app.server_identity.last_response_model is None
@@ -252,15 +253,15 @@ async def test_restart_probe_disconnects_do_not_log_poll_failures(
     monkeypatch.setattr(harness.app._http, "get", disconnect)
     assert harness.app.operations.try_acquire(OperationKind.RESTARTING)
     try:
-        probe = await harness.app._fetch_probe()
-        await harness.app._poll()
+        probe = await _app_polling._fetch_probe(harness.app)
+        await _app_polling._poll(harness.app)
     finally:
         harness.app.operations.release(OperationKind.RESTARTING)
     assert probe.state == "red"
     assert probe.catalogue_state == "red"
     assert _poll_failed_lines(harness) == []
 
-    await harness.app._fetch_probe()
+    await _app_polling._fetch_probe(harness.app)
     assert len(_poll_failed_lines(harness)) == 2
     assert all("RemoteProtocolError" in line for line in _poll_failed_lines(harness))
 
@@ -268,7 +269,7 @@ async def test_restart_probe_disconnects_do_not_log_poll_failures(
 async def test_poll_started_before_restart_does_not_apply_stale_probe(
     harness: AppHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     initial_state = harness.app.status_state
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -278,8 +279,8 @@ async def test_poll_started_before_restart_does_not_apply_stale_probe(
         await release.wait()
         return ServerProbe("red", None, (), "red")
 
-    monkeypatch.setattr(MlxTuiApp, "_fetch_probe", delayed_probe)
-    task = asyncio.create_task(harness.app._poll())
+    monkeypatch.setattr("mlx_tui.app.polling._fetch_probe", delayed_probe)
+    task = asyncio.create_task(_app_polling._poll(harness.app))
     await entered.wait()
     assert harness.app.operations.try_acquire(OperationKind.RESTARTING)
     release.set()
@@ -294,11 +295,11 @@ async def test_poll_started_before_restart_does_not_apply_stale_probe(
 async def test_poll_unexpected_fault_keeps_state_and_logs_once(
     harness: AppHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert harness.app.status_state == "green"
     harness.app.select_model("explicit/request-target")
     assert harness.app.server_identity.last_response_model is None
-    orig_probe = MlxTuiApp._fetch_probe
+    orig_probe = _app_polling._fetch_probe
 
     async def boom_probe(self: MlxTuiApp):  # type: ignore[no-untyped-def]
         raise RuntimeError("boom")
@@ -306,8 +307,8 @@ async def test_poll_unexpected_fault_keeps_state_and_logs_once(
     async def other_probe(self: MlxTuiApp):  # type: ignore[no-untyped-def]
         raise ValueError("other")
 
-    monkeypatch.setattr(MlxTuiApp, "_fetch_probe", boom_probe)
-    await harness.app._poll()
+    monkeypatch.setattr("mlx_tui.app.polling._fetch_probe", boom_probe)
+    await _app_polling._poll(harness.app)
     assert harness.app.status_state == "green"
     assert harness.app.effective_model() == "explicit/request-target"
     assert harness.app._poll_in_flight is False
@@ -315,19 +316,19 @@ async def test_poll_unexpected_fault_keeps_state_and_logs_once(
     assert "RuntimeError: boom" in _poll_failed_lines(harness)[0]
 
     # Identical repeats stay silent; a changed error logs immediately.
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert len(_poll_failed_lines(harness)) == 1
-    monkeypatch.setattr(MlxTuiApp, "_fetch_probe", other_probe)
-    await harness.app._poll()
+    monkeypatch.setattr("mlx_tui.app.polling._fetch_probe", other_probe)
+    await _app_polling._poll(harness.app)
     assert len(_poll_failed_lines(harness)) == 2
     assert harness.app.status_state == "green"
 
     # Recovery clears the source so a recurrence becomes visible again.
-    monkeypatch.setattr(MlxTuiApp, "_fetch_probe", orig_probe)
-    await harness.app._poll()
+    monkeypatch.setattr("mlx_tui.app.polling._fetch_probe", orig_probe)
+    await _app_polling._poll(harness.app)
     assert harness.app.status_state == "green"
-    monkeypatch.setattr(MlxTuiApp, "_fetch_probe", boom_probe)
-    await harness.app._poll()
+    monkeypatch.setattr("mlx_tui.app.polling._fetch_probe", boom_probe)
+    await _app_polling._poll(harness.app)
     assert len(_poll_failed_lines(harness)) == 3
 
     assert harness.app.operations.current is OperationKind.IDLE
@@ -338,17 +339,17 @@ async def test_poll_malformed_json_is_amber_with_bounded_diagnostics(
     harness: AppHarness,
 ) -> None:
     harness.server.mode = "html"
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert harness.app.status_state == "amber"
     assert harness.app.effective_model() == harness.server.model_id
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert len(_poll_failed_lines(harness)) == 2, harness.app_log_lines()
 
     harness.server.mode = "ok"
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert harness.app.status_state == "green"
     harness.server.mode = "html"
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert harness.app.status_state == "amber"
     assert len(_poll_failed_lines(harness)) == 4
 
@@ -413,7 +414,7 @@ async def test_chat_layout_bounds_and_resize(
                 assert regions[-2].contains_region(log_region)
             model_id = "organization/" + "very-long-model-name" * 20
             harness.app.select_model(model_id)
-            harness.app._render_status(rss_gib=2.0)
+            _app_polling._render_status(harness.app, rss_gib=2.0)
             await harness.pilot.pause()
             model = harness.app.query_one("#status-model")
             port = harness.app.query_one("#status-port")
@@ -560,7 +561,7 @@ async def test_native_footer_keys_and_single_send(harness: AppHarness) -> None:
         for binding in harness.app.screen.active_bindings.values()
         if binding.binding.show
     }
-    assert {"Load", "Delete", "Search", "Activity", "Config", "Quit"} <= labels
+    assert {"Load", "Delete", "Search", "Activity", "Settings", "Quit"} <= labels
     assert "Cancel" not in labels
     harness.app.query_one(TabbedContent).active = "chat"
     inp = harness.app.query_one("#chat-input", ChatInput)
@@ -806,10 +807,10 @@ async def test_endpoint_preview_absent_present_freshness_mismatch(
 ) -> None:
     from dataclasses import replace  # noqa: PLC0415
 
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert harness.app.status_state == "green"
     # Health-only success reads Reachable via the status bar mapping.
-    harness.app._render_status(rss_gib=None)
+    _app_polling._render_status(harness.app, rss_gib=None)
     await harness.pilot.pause()
     dot = str(harness.app.query_one("#status-dot", Static).render())
     assert "Reachable" in dot
@@ -873,7 +874,7 @@ async def test_endpoint_preview_non_loopback_omits_recipes(
     assert "curl:" not in text
     assert "opencode config:" not in text
     # Attach connection support itself is unchanged: polling still runs.
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert harness.app.effective_model() == "explicit/request-target"
 
 
@@ -924,11 +925,11 @@ async def test_endpoint_unhealthy_and_catalogue_no_residency(
     harness: AppHarness,
 ) -> None:
     harness.app.select_model("explicit/request-target")
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert "Reachable" in harness.app.endpoint_preview_text()
 
     harness.server.mode = "health_down"
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     text = harness.app.endpoint_preview_text()
     assert "residency: unknown" in text
     assert "Ready" not in text
@@ -937,7 +938,7 @@ async def test_endpoint_unhealthy_and_catalogue_no_residency(
 
     harness.server.mode = "ok"
     harness.server.model_id = "mlx-community/changed"
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     text = harness.app.endpoint_preview_text()
     assert "residency: unknown" in text
     assert "catalogue" in text

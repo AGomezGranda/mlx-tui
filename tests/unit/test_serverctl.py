@@ -484,7 +484,14 @@ def test_warm_load_sends_probe_payload(monkeypatch: pytest.MonkeyPatch) -> None:
         return httpx.Response(
             200,
             headers={"Content-Type": "application/json"},
-            json={"choices": [{"message": {"role": "assistant", "content": "hi"}}]},
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "hi"},
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
         )
 
     install_transport(monkeypatch, handler)
@@ -507,7 +514,12 @@ def test_warm_load_returns_response_model(monkeypatch: pytest.MonkeyPatch) -> No
             200,
             json={
                 "model": "repo/a",
-                "choices": [{"message": {"role": "assistant", "content": "hi"}}],
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "hi"},
+                        "finish_reason": "stop",
+                    }
+                ],
             },
         ),
     )
@@ -526,7 +538,12 @@ def test_warm_load_non_string_model_yields_none(
             200,
             json={
                 "model": 123,
-                "choices": [{"message": {"role": "assistant", "content": "hi"}}],
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "hi"},
+                        "finish_reason": "stop",
+                    }
+                ],
             },
         ),
     )
@@ -593,7 +610,19 @@ def test_wait_healthy_green_first_poll_with_matching_model(
             return httpx.Response(200, json={"status": "ok"})
         if request.method == "GET":
             return httpx.Response(200, json={"data": [{"id": "m"}]})
-        return httpx.Response(200, json={"model": "m", "choices": [{}]})
+        assert request.extensions["timeout"]["read"] == 5.0
+        return httpx.Response(
+            200,
+            json={
+                "model": "m",
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "hi"},
+                        "finish_reason": "length",
+                    }
+                ],
+            },
+        )
 
     install_transport(
         monkeypatch,
@@ -603,7 +632,7 @@ def test_wait_healthy_green_first_poll_with_matching_model(
     probe = serverctl.wait_healthy(
         MODELS_URL,
         target_model="m",
-        timeout_s=5,
+        timeout_s=120,
     )
 
     assert probe is not None
@@ -628,7 +657,18 @@ def test_wait_healthy_wrong_model_then_right(
             return httpx.Response(200, json={"data": [{"id": "other"}]})
         generation_calls += 1
         model = "other" if generation_calls == 1 else "m"
-        return httpx.Response(200, json={"model": model, "choices": [{}]})
+        return httpx.Response(
+            200,
+            json={
+                "model": model,
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "hi"},
+                        "finish_reason": "length",
+                    }
+                ],
+            },
+        )
 
     install_transport(monkeypatch, handler)
 
@@ -658,7 +698,18 @@ def test_wait_healthy_catalog_verifies_target_with_completion(
             return httpx.Response(200, json={"data": [{"id": "a"}, {"id": "b"}]})
         assert str(request.url) == "http://stub/v1/chat/completions"
         assert json.loads(request.read())["model"] == "b"
-        return httpx.Response(200, json={"model": "b", "choices": [{"message": {}}]})
+        return httpx.Response(
+            200,
+            json={
+                "model": "b",
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "hi"},
+                        "finish_reason": "length",
+                    }
+                ],
+            },
+        )
 
     install_transport(monkeypatch, handler)
     probe = serverctl.wait_healthy(MODELS_URL, target_model="b", timeout_s=5)
@@ -729,7 +780,18 @@ def test_wait_healthy_wrong_endpoint_model_times_out(
             request_counts["catalogue"] += 1
             return httpx.Response(200, json={"data": [{"id": "other"}]})
         request_counts["generation"] += 1
-        return httpx.Response(200, json={"model": "other", "choices": [{}]})
+        return httpx.Response(
+            200,
+            json={
+                "model": "other",
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "hi"},
+                        "finish_reason": "length",
+                    }
+                ],
+            },
+        )
 
     install_transport(monkeypatch, handler)
 
@@ -757,7 +819,17 @@ def test_wait_healthy_missing_response_identity_times_out(
             request_counts["catalogue"] += 1
             return httpx.Response(200, json={"data": [{"id": ""}]})
         request_counts["generation"] += 1
-        return httpx.Response(200, json={"choices": [{}]})
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "hi"},
+                        "finish_reason": "length",
+                    }
+                ]
+            },
+        )
 
     install_transport(monkeypatch, handler)
 
@@ -792,3 +864,51 @@ def test_wait_healthy_probe_timeout_returns_none(
     assert probe is None
     assert serverctl_clock.elapsed == 1.0
     assert request_counts == {"health": 2, "catalogue": 2}
+
+
+@pytest.mark.parametrize(
+    "choices",
+    [
+        True,
+        "invalid",
+        [{}],
+        [None],
+        [{"message": {}}],
+        [{"message": {"role": "user", "content": "hi"}, "finish_reason": "stop"}],
+        [{"message": {"role": "assistant", "content": 1}, "finish_reason": "stop"}],
+        [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": []}],
+    ],
+)
+def test_malformed_generation_cannot_verify_target(
+    monkeypatch: pytest.MonkeyPatch, serverctl_clock: FakeClock, choices: object
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": [{"id": "m"}]})
+        return httpx.Response(200, json={"model": "m", "choices": choices})
+
+    install_transport(monkeypatch, handler)
+    assert serverctl.wait_healthy(MODELS_URL, target_model="m", timeout_s=1) is None
+
+
+def test_warm_load_honors_read_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.extensions["timeout"]["read"] == 120.0
+        assert request.extensions["timeout"]["connect"] == 5.0
+        return httpx.Response(
+            200,
+            json={
+                "model": "m",
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": ""},
+                        "finish_reason": "length",
+                    }
+                ],
+            },
+        )
+
+    install_transport(monkeypatch, handler)
+    assert serverctl.warm_load("http://stub/x", "m", timeout_s=120) == "m"

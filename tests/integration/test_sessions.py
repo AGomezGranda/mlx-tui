@@ -7,19 +7,28 @@ import json
 import os
 import stat
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 from textual.widgets import Input
 
+import mlx_tui.chat_ui.persistence as _chat_persistence
 import mlx_tui.sessions.store as sessions_store
 from mlx_tui.app import MlxTuiApp
+from mlx_tui.attachments import read_attachment
 from mlx_tui.chat_turn import render_session_turn
 from mlx_tui.chat_ui.widgets import ChatInput
 from mlx_tui.config import AppConfig
+from mlx_tui.config_io import read_config
 from mlx_tui.sessions.codec import encode_session
 from mlx_tui.sessions.errors import SessionPersistenceError
-from mlx_tui.sessions.models import ChatSession, RequestSettings, SessionTurn
+from mlx_tui.sessions.models import (
+    ChatSession,
+    RequestSettings,
+    SessionTurn,
+    new_session,
+)
 from mlx_tui.sessions.queries import request_messages
 from mlx_tui.sessions.store import (
     delete_session,
@@ -205,29 +214,41 @@ async def test_change_settings_saved_then_restart_without_sending(
     app1 = MlxTuiApp(
         host="127.0.0.1",
         port=server.server_address[1],
-        config=AppConfig(model=server.model_id),
+        config=AppConfig(model=server.model_id, system="session system"),
     )
     async with app1.run_test() as pilot1:
         h1 = AppHarness(app=app1, pilot=pilot1, server=server)
         pane1 = h1.chat_pane()
         h1.app.query_one("#chat-input", ChatInput).text = "settings draft"
         h1.app.query_one("#param-temp", Input).value = "0.3"
+        await pilot1.pause()
         await _wait_saved(pane1)
         session_id = _session_id(pane1)
         await pane1.flush_for_shutdown()
+    stored = load_session(session_dir() / f"{session_id}.json")
+    assert stored.settings.temperature == 0.3
+    assert stored.settings.system == "session system"
+    path = tmp_path / "config.toml"
+    path.write_text('temperature = 0.9\nsystem = "disk defaults"\n')
+    document = read_config(path)
     app2 = MlxTuiApp(
         host="127.0.0.1",
         port=server.server_address[1],
         config=AppConfig(model=server.model_id),
+        config_document=document,
     )
     async with app2.run_test() as pilot2:
         h2 = AppHarness(app=app2, pilot=pilot2, server=server)
         pane2 = h2.chat_pane()
         assert await pane2.open_session(session_id)
-        # Saved temp differs from the fresh default only if defaults differ;
-        # either way the checkpoint path ran without sending.
+        assert pane2._pending_reconcile == stored.settings
+        await _chat_persistence._apply_saved_settings(pane2, stored.settings)
+        assert pane2.capture_request_settings().temperature == 0.3
+        assert app2.config.system == "session system"
+        assert app2.config_document is document
+        assert path.read_bytes() == document.source
         n_posts = len([r for r in server.requests if "messages" in r])
-        assert n_posts == 0 or True
+        assert n_posts == 0
         assert pane2.messages == []
 
 
@@ -301,7 +322,7 @@ async def test_save_failure_after_completion_blocks_until_retry(
     # Retry save performs no HTTP request.
     monkeypatch.setattr(sessions_store, "save_session", real_save)
     n_before = len([r for r in harness.server.requests if "messages" in r])
-    assert await pane._retry_save()
+    assert await _chat_persistence._retry_save(pane)
     n_after = len([r for r in harness.server.requests if "messages" in r])
     assert n_after == n_before
     assert not pane.save_failed
@@ -317,7 +338,7 @@ async def test_retry_save_and_explicit_discard_quit_paths(
 
     monkeypatch.setattr(sessions_store, "save_session", _boom)
     pane._save_failed = True
-    pane._update_action_visibility()
+    _chat_persistence._update_action_visibility(pane)
     # Every blocked-action branch after save failure.
     inp = harness.app.query_one("#chat-input", ChatInput)
     inp.text = "x"
@@ -360,7 +381,7 @@ async def test_settings_mismatch_blocks_send_until_choice(
         max_ctx=saved.max_ctx,
     )
     pane._pending_reconcile = different
-    pane._update_action_visibility()
+    _chat_persistence._update_action_visibility(pane)
     inp = harness.app.query_one("#chat-input", ChatInput)
     inp.text = "should block"
     inp.focus()
@@ -507,7 +528,7 @@ async def test_pane_revision_barrier_and_dir_sync_failure(
     monkeypatch.setattr(os, "fsync", _fail_on_dir)
     inp.text = "unconfirmed draft"
     pane._save_revision += 1
-    ok = await pane._save_session_now()
+    ok = await _chat_persistence._save_session_now(pane)
     assert ok is False
     assert pane.save_failed
     session_id = _session_id(pane)
@@ -531,3 +552,112 @@ async def test_render_saved_attempt_adds_no_metrics_or_network(
     assert widget is not None
     assert len(harness.app.history.all_records()) == n_history
     assert len([r for r in harness.server.requests if "messages" in r]) == n_posts
+
+
+@pytest.mark.parametrize("composer_has_content", [False, True])
+async def test_clear_replaces_persisted_transcript(
+    harness: AppHarness, tmp_path: Path, composer_has_content: bool
+) -> None:
+    pane = harness.chat_pane()
+    await _send_and_wait(harness, "old conversation")
+    await _wait_saved(pane)
+    session_id = _session_id(pane)
+    if composer_has_content:
+        source = tmp_path / "draft.txt"
+        source.write_text("attachment to clear")
+        pane._draft_attachments = (read_attachment(source),)
+        harness.app.query_one("#chat-input", ChatInput).text = "draft to clear"
+        await harness.pilot.pause()
+    await _chat_persistence._clear_session(pane)
+    assert not pane.save_failed
+    reopened = load_session(session_dir() / f"{session_id}.json", pane._session_lock)
+    assert reopened.attempts == ()
+    assert reopened.draft == ""
+    assert reopened.attachments == ()
+    assert pane._session is not None
+    assert pane._session.draft == ""
+    assert pane._draft_attachments == ()
+
+
+async def test_attachment_only_draft_is_persisted(
+    harness: AppHarness, tmp_path: Path
+) -> None:
+    pane = harness.chat_pane()
+    source = tmp_path / "draft.txt"
+    source.write_text("attachment-only content")
+    pane._draft_attachments = (read_attachment(source),)
+    pane._save_revision += 1
+    assert await _chat_persistence._save_session_now(pane)
+    reopened = load_session(
+        session_dir() / f"{_session_id(pane)}.json", pane._session_lock
+    )
+    assert reopened.draft == ""
+    assert reopened.attachments == pane._draft_attachments
+
+
+async def test_temporary_discard_confirmation_completes_transition(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pane = harness.chat_pane()
+    pane._new_temp_pressed()
+    harness.app.query_one("#chat-input", ChatInput).text = "temporary work"
+    await harness.pilot.pause()
+    confirmations: list[Callable[[bool], None]] = []
+
+    def capture_confirmation(screen: object, callback: Callable[[bool], None]) -> None:
+        confirmations.append(callback)
+
+    monkeypatch.setattr(harness.app, "push_screen", capture_confirmation)
+    pane._new_session_pressed()
+    assert len(confirmations) == 1
+    callback = confirmations[0]
+    assert callable(callback)
+    callback(True)
+    assert len(confirmations) == 1
+    assert not pane.is_temporary
+    assert pane._session is not None
+    assert pane._session.draft == ""
+
+
+async def test_clear_retry_saves_cleared_snapshot(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pane = harness.chat_pane()
+    await _send_and_wait(harness, "old conversation")
+    await _wait_saved(pane)
+    target = session_dir() / f"{_session_id(pane)}.json"
+    old_bytes = target.read_bytes()
+    harness.app.query_one("#chat-input", ChatInput).text = "old composer"
+    original_save = sessions_store.save_session
+
+    def fail_save(session: ChatSession) -> Path:
+        raise SessionPersistenceError("injected clear failure")
+
+    monkeypatch.setattr(sessions_store, "save_session", fail_save)
+    await _chat_persistence._clear_session(pane)
+    assert pane.save_failed
+    assert target.read_bytes() == old_bytes
+    monkeypatch.setattr(sessions_store, "save_session", original_save)
+    assert await _chat_persistence._retry_save(pane)
+    reopened = load_session(target, pane._session_lock)
+    assert reopened.attempts == ()
+    assert reopened.draft == ""
+    assert reopened.attachments == ()
+
+
+async def test_switch_flushes_empty_draft(harness: AppHarness) -> None:
+    pane = harness.chat_pane()
+    composer = harness.app.query_one("#chat-input", ChatInput)
+    composer.text = "draft to remove"
+    await harness.pilot.pause()
+    assert await _chat_persistence._save_session_now(pane)
+    previous_path = session_dir() / f"{_session_id(pane)}.json"
+    other = new_session(pane.capture_request_settings(), draft="other session")
+    save_session(other)
+    composer.clear()
+    await harness.pilot.pause()
+    if pane._draft_timer is not None:
+        pane._draft_timer.stop()
+    assert pane._save_revision != pane._saved_revision
+    assert await pane.open_session(other.session_id)
+    assert load_session(previous_path).draft == ""

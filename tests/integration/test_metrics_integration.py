@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 import time
 from dataclasses import replace
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from textual.widgets import Static
@@ -16,6 +19,17 @@ from mlx_tui.metrics_pane import MetricsPane
 from mlx_tui.operations import OperationKind
 from mlx_tui.process import ProcessIdentity
 from tests.conftest import AppHarness
+
+
+async def _sample_once(app: MlxTuiApp) -> None:
+    stop = threading.Event()
+
+    def stop_after_tick(_timeout: float) -> bool:
+        stop.set()
+        return True
+
+    with patch.object(stop, "wait", side_effect=stop_after_tick):
+        await asyncio.to_thread(polling._run_resource_loop, app, stop, 0)
 
 
 def _record(**overrides: object) -> TurnRecord:
@@ -276,8 +290,8 @@ async def test_resource_sampler_runs_hidden_without_http_probes(
     monkeypatch.setattr(harness.app._http, "get", counting_get)
 
     assert harness.app.query_one(TabbedContent).active != "metrics"
-    polling.sample_and_store(harness.app)
-    polling.sample_and_store(harness.app)
+    await _sample_once(harness.app)
+    await _sample_once(harness.app)
     await harness.pilot.pause()
 
     assert len(harness.app.resource_store) == 2
@@ -309,12 +323,13 @@ async def test_resource_sampling_continues_during_busy_operations(
 
     assert harness.app.operations.try_acquire(OperationKind.COMPARING)
     try:
-        polling.sample_and_store(harness.app)
+        await _sample_once(harness.app)
     finally:
         harness.app.operations.release(OperationKind.COMPARING)
     assert harness.app.operations.try_acquire(OperationKind.RESTARTING)
     try:
-        sample = polling.sample_and_store(harness.app)
+        await _sample_once(harness.app)
+        sample = harness.app.resource_store[-1]
     finally:
         harness.app.operations.release(OperationKind.RESTARTING)
 
@@ -347,9 +362,11 @@ async def test_resource_sampler_first_cpu_unknown_and_clean_stop(
     )
 
     harness.app._resource_first = True
-    first = polling.sample_and_store(harness.app)
+    await _sample_once(harness.app)
+    first = harness.app.resource_store[-1]
     assert first.cpu_percent is None
-    second = polling.sample_and_store(harness.app)
+    await _sample_once(harness.app)
+    second = harness.app.resource_store[-1]
     assert second.cpu_percent == 11.0
     assert len(harness.app.resource_store) == 2
 
@@ -358,7 +375,7 @@ async def test_resource_sampler_first_cpu_unknown_and_clean_stop(
 
     # Buffer stays bounded at 121 observations.
     for _ in range(130):
-        polling.sample_and_store(harness.app)
+        await _sample_once(harness.app)
     assert len(harness.app.resource_store) == 121
 
     # Closing blocks further appends and stop is idempotent.
@@ -370,8 +387,8 @@ async def test_resource_sampler_first_cpu_unknown_and_clean_stop(
     harness.app._closing = True
     try:
         before = len(harness.app.resource_store)
-        polling.sample_and_store(harness.app)
-        # sample is built but never stored once closing.
+        await _sample_once(harness.app)
+        # Closing prevents further sampling or appends.
         assert len(harness.app.resource_store) == before
     finally:
         harness.app._closing = False
@@ -392,11 +409,13 @@ async def test_resource_failures_record_unknown_with_bounded_diagnostic(
     monkeypatch.setattr("mlx_tui.process.sample_resources", failing_sample)
     monkeypatch.setattr("mlx_tui.app.polling.process.sample_resources", failing_sample)
 
-    sample = polling.sample_and_store(harness.app)
+    await _sample_once(harness.app)
+
+    sample = harness.app.resource_store[-1]
     assert sample.cpu_percent is None
     assert sample.rss_gib is None
     assert len(harness.app.resource_store) == 1
-    polling.sample_and_store(harness.app)
+    await _sample_once(harness.app)
     assert len(harness.app.resource_store) == 2
     # Bounded: identical repeats stay silent behind one log entry.
     assert harness.app._last_errors.get("resource-sample") is not None
@@ -416,7 +435,7 @@ async def test_resource_failures_record_unknown_with_bounded_diagnostic(
         "mlx_tui.app.polling.process.sample_resources",
         _good_sample,
     )
-    polling.sample_and_store(harness.app)
+    await _sample_once(harness.app)
     assert harness.app._last_errors.get("resource-sample") is None
 
 
@@ -532,15 +551,15 @@ async def test_identity_loss_and_replacement_keeps_gaps(
     harness.app.server_identity = _replace(
         harness.app.server_identity, pid=111, pid_create_time=222.0
     )
-    polling.sample_and_store(harness.app)
+    await _sample_once(harness.app)
     harness.app.server_identity = _replace(
         harness.app.server_identity, pid=None, pid_create_time=None
     )
-    polling.sample_and_store(harness.app)
+    await _sample_once(harness.app)
     harness.app.server_identity = _replace(
         harness.app.server_identity, pid=333, pid_create_time=444.0
     )
-    polling.sample_and_store(harness.app)
+    await _sample_once(harness.app)
 
     stored = list(harness.app.resource_store)
     assert [s.process_identity.pid if s.process_identity else None for s in stored] == [
@@ -556,7 +575,8 @@ async def test_identity_loss_and_replacement_keeps_gaps(
     # Restarting never attributes RSS even with a known identity.
     assert harness.app.operations.try_acquire(OperationKind.RESTARTING)
     try:
-        restarting = polling.sample_and_store(harness.app)
+        await _sample_once(harness.app)
+        restarting = harness.app.resource_store[-1]
     finally:
         harness.app.operations.release(OperationKind.RESTARTING)
     assert restarting.process_identity is None

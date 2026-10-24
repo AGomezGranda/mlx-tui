@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import cast
 
 from mlx_tui.comparison.contracts import (
+    TRIAL_REPEATS,
     ComparisonInput,
     ComparisonPersistenceError,
     ComparisonResult,
@@ -17,8 +18,28 @@ from mlx_tui.comparison.contracts import (
     TrialResult,
 )
 from mlx_tui.comparison.encoding import _identity_from_json, _json_value
-from mlx_tui.json_util import check_keys, require_dict, required_field, string_field
+from mlx_tui.json_util import (
+    bool_field,
+    check_keys,
+    optional_string_field,
+    require_dict,
+    required_field,
+    string_field,
+)
 from mlx_tui.profiles import CodingProfile, ProfileEntry, RecommendationEvidence
+
+_PROFILE_COUNT = 2
+
+
+def _nullable_scalar[T](
+    table: dict[str, object], key: str, expected: type[T]
+) -> T | None:
+    value = required_field(table, key, "trial", error=ComparisonValidationError)
+    if value is not None and type(value) is not expected:
+        raise ComparisonValidationError(
+            f"trial.{key} must be {expected.__name__} or null"
+        )
+    return value
 
 
 def _profile_from_json(value: object) -> CodingProfile:
@@ -230,11 +251,24 @@ def _input_from_json(value: object) -> ComparisonInput:
         raise ComparisonValidationError("input.profile_order is invalid")
     if not all(isinstance(item, str) for item in paths):
         raise ComparisonValidationError("input snapshot paths must be strings")
+    profiles = tuple(_entry_from_json(item) for item in raw_profiles)
+    ids = tuple(entry.profile.id for entry in profiles)
+    if len(profiles) != _PROFILE_COUNT or len(set(ids)) != _PROFILE_COUNT:
+        raise ComparisonValidationError("input requires two distinct profiles")
+    if len(paths) != len(profiles) or len(hashes) not in {0, len(profiles)}:
+        raise ComparisonValidationError(
+            "input paths and hashes must align with profiles"
+        )
+    if profile_order is not None and tuple(profile_order) != ids:
+        raise ComparisonValidationError("input.profile_order must match profiles")
+    result_path = optional_string_field(
+        table, "result_path", "input", error=ComparisonValidationError
+    )
     return ComparisonInput(
         endpoint=string_field(
             table, "endpoint", "input", error=ComparisonValidationError
         ),
-        profiles=tuple(_entry_from_json(item) for item in raw_profiles),
+        profiles=profiles,
         snapshot_paths=tuple(Path(item) for item in paths),
         verified_asset_hashes=tuple(
             {
@@ -299,9 +333,7 @@ def _input_from_json(value: object) -> ComparisonInput:
             table, "check_id", "input", error=ComparisonValidationError
         ),
         prompt=string_field(table, "prompt", "input", error=ComparisonValidationError),
-        result_path=Path(table["result_path"])
-        if isinstance(table.get("result_path"), str)
-        else None,
+        result_path=Path(result_path) if result_path is not None else None,
     )
 
 
@@ -373,14 +405,24 @@ def _trial_from_json(value: object) -> TrialResult:
         "trial.payload",
         error=ComparisonValidationError,
     )
+    counts = {
+        key: _nullable_scalar(table, key, int)
+        for key in ("prompt_tokens", "completion_tokens", "cached_prompt_tokens")
+    }
+    if any(value is not None and value < 0 for value in counts.values()):
+        raise ComparisonValidationError("trial token counts must be non-negative")
     return TrialResult(
         profile_id=string_field(
             table, "profile_id", "trial", error=ComparisonValidationError
         ),
         repeat_index=repeat_index,
         state=raw_state,  # type: ignore[arg-type]
-        error=table.get("error"),
-        cancelled=table.get("cancelled") is True,
+        error=optional_string_field(
+            table, "error", "trial", error=ComparisonValidationError
+        ),
+        cancelled=bool_field(
+            table, "cancelled", "trial", error=ComparisonValidationError
+        ),
         payload=payload,
         answer=string_field(table, "answer", "trial", error=ComparisonValidationError),
         reasoning=string_field(
@@ -390,16 +432,24 @@ def _trial_from_json(value: object) -> TrialResult:
             require_dict(item, "tool call", error=ComparisonValidationError)
             for item in raw_tools
         ),
-        response_model=table.get("response_model"),
-        finish_reason=table.get("finish_reason"),
-        stream_complete=table.get("stream_complete") is True,
-        quality_pass=table.get("quality_pass"),
-        quality_reason=table.get("quality_reason"),
-        prompt_tokens=table.get("prompt_tokens"),
-        completion_tokens=table.get("completion_tokens"),
-        prompt_estimated=table.get("prompt_estimated"),
-        completion_estimated=table.get("completion_estimated"),
-        cached_prompt_tokens=table.get("cached_prompt_tokens"),
+        response_model=optional_string_field(
+            table, "response_model", "trial", error=ComparisonValidationError
+        ),
+        finish_reason=optional_string_field(
+            table, "finish_reason", "trial", error=ComparisonValidationError
+        ),
+        stream_complete=bool_field(
+            table, "stream_complete", "trial", error=ComparisonValidationError
+        ),
+        quality_pass=_nullable_scalar(table, "quality_pass", bool),
+        quality_reason=optional_string_field(
+            table, "quality_reason", "trial", error=ComparisonValidationError
+        ),
+        prompt_tokens=counts["prompt_tokens"],
+        completion_tokens=counts["completion_tokens"],
+        prompt_estimated=_nullable_scalar(table, "prompt_estimated", bool),
+        completion_estimated=_nullable_scalar(table, "completion_estimated", bool),
+        cached_prompt_tokens=counts["cached_prompt_tokens"],
         **timings,
         rss_samples=tuple(_sample_from_json(item) for item in raw_samples),
         sample_scope=string_field(
@@ -444,7 +494,7 @@ def decode_comparison(value: str | dict[str, object]) -> ComparisonResult:
     if not isinstance(raw_trials, list):
         raise ComparisonValidationError("comparison.trials must be a list")
     status = table.get("status")
-    if status not in {"running", "completed", "failed", "cancelled", "interrupted"}:
+    if status not in ("running", "completed", "failed", "cancelled", "interrupted"):
         raise ComparisonValidationError("comparison status is invalid")
     result = ComparisonResult(
         run_id=string_field(
@@ -470,7 +520,9 @@ def decode_comparison(value: str | dict[str, object]) -> ComparisonResult:
             "summary",
             error=ComparisonValidationError,
         ),
-        error=table.get("error"),
+        error=optional_string_field(
+            table, "error", "comparison", error=ComparisonValidationError
+        ),
     )
     expected_fingerprints = [
         entry.profile.fingerprint for entry in result.comparison.profiles
@@ -478,6 +530,23 @@ def decode_comparison(value: str | dict[str, object]) -> ComparisonResult:
     if table.get("profile_fingerprints") != expected_fingerprints:
         raise ComparisonValidationError(
             "saved profile fingerprints do not match profiles"
+        )
+    expected_keys = {
+        (entry.profile.id, index)
+        for entry in result.comparison.profiles
+        for index in range(TRIAL_REPEATS + 1)
+    }
+    keys = [(trial.profile_id, trial.repeat_index) for trial in result.trials]
+    if len(keys) != len(set(keys)) or not set(keys) <= expected_keys:
+        raise ComparisonValidationError(
+            "comparison trial keys are invalid or duplicated"
+        )
+    if result.status == "completed" and (
+        set(keys) != expected_keys
+        or any(trial.state != "completed" for trial in result.trials)
+    ):
+        raise ComparisonValidationError(
+            "completed comparison requires every completed trial"
         )
     if result.status == "running":
         return replace(

@@ -13,12 +13,12 @@ from typing import TYPE_CHECKING, Any, cast, override
 from rich.text import Text
 from textual import on, work
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, VerticalScroll
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static, TabbedContent
 
-from mlx_tui.config import config_path, create_config
+import mlx_tui.app.ui as app_ui
 from mlx_tui.managed.install import install_runtime
 from mlx_tui.managed.paths import COMPLETION_MARKER, runtime_root
 from mlx_tui.models import resolve_cached_snapshot, verify_cached_assets
@@ -37,7 +37,7 @@ class SetupScreen(ModalScreen[None]):
     DEFAULT_CSS = """
     SetupScreen { align: center middle; }
     #setup-box {
-        width: 92%; max-height: 90%; padding: 1 2;
+        width: 92%; max-height: 90%; height: auto; padding: 1 2;
         border: round $primary; background: $surface;
     }
     #setup-box Static { height: auto; margin-bottom: 1; }
@@ -59,19 +59,14 @@ class SetupScreen(ModalScreen[None]):
 
     @override
     def compose(self) -> ComposeResult:
-        with Vertical(id="setup-box"):
-            yield Static("mlx-tui setup", classes="heading")
+        with VerticalScroll(id="setup-box"):
+            yield Static("Runtime setup", classes="heading")
             yield Static(
                 "Choose how this app may reach the local MLX server.", id="setup-mode"
             )
             yield Static("", id="setup-hardware")
             yield Static("", id="setup-candidates")
-            with Horizontal(classes="row"):
-                yield Button("Context budget: unknown", id="setup-context")
-                yield Button("Memory priority: unknown", id="setup-memory")
-            with Horizontal(classes="row"):
-                yield Button("Managed runtime", id="setup-managed")
-                yield Button("Attach server", id="setup-attach")
+            yield Button("Settings", id="setup-settings")
             with Horizontal(classes="row"):
                 yield Button("Install / repair runtime", id="setup-install")
                 yield Button("Download candidates", id="setup-download")
@@ -84,7 +79,7 @@ class SetupScreen(ModalScreen[None]):
 
     def on_mount(self) -> None:
         self._update_view()
-        self.query_one("#setup-attach", Button).focus()
+        self.query_one("#setup-settings", Button).focus()
 
     def _set_status(self, message: str, style: str | None = None) -> None:
         try:
@@ -130,6 +125,11 @@ class SetupScreen(ModalScreen[None]):
         details = (
             "mode: "
             + ("Managed (owned child stops on quit)" if mode == "managed" else "Attach")
+            + (
+                " · Restart required"
+                if app_ui.runtime_restart_required(self.tui)
+                else ""
+            )
             + "\n"
             + hardware
             + f"\nruntime: {runtime} · context budget: 8192 · output budget: 32"
@@ -144,18 +144,9 @@ class SetupScreen(ModalScreen[None]):
         self.query_one("#setup-candidates", Static).update(
             "Managed: install its runtime. Attach: use the bundled server or an existing one. Download a model to start."
         )
-        self.query_one(
-            "#setup-context", Button
-        ).label = f"Context budget: {self.tui.setup_preferences['context_budget']}"
-        self.query_one(
-            "#setup-memory", Button
-        ).label = f"Memory priority: {self.tui.setup_preferences['memory_priority']}"
         busy = self.tui.operations.is_busy or self._installing
         for selector in (
-            "#setup-context",
-            "#setup-memory",
-            "#setup-managed",
-            "#setup-attach",
+            "#setup-settings",
             "#setup-install",
             "#setup-download",
             "#setup-start",
@@ -170,65 +161,19 @@ class SetupScreen(ModalScreen[None]):
             except NoMatches:
                 pass
 
-    def _toggle_preference(self, key: str, values: tuple[str, ...], label: str) -> None:
-        current = self.tui.setup_preferences.get(key, values[0])
-        next_value = values[(values.index(current) + 1) % len(values)]
-        self.tui.setup_preferences[key] = next_value
-        self._set_status(f"{label}: {next_value} (advisory only)")
-        self._update_view()
-
-    @on(Button.Pressed, "#setup-context")
-    def _context_preference(self) -> None:
-        self._toggle_preference(
-            "context_budget",
-            ("unknown", "meets intended work", "needs more"),
-            "Context",
-        )
-
-    @on(Button.Pressed, "#setup-memory")
-    def _memory_preference(self) -> None:
-        self._toggle_preference(
-            "memory_priority", ("unknown", "priority", "not a priority"), "Memory"
-        )
-
-    def _persist_new_mode(self) -> None:
-        if not config_path().exists():
-            created = create_config(
-                config_path(),
-                runtime_mode=self.tui.config.runtime_mode,
-                host=self.tui.host,
-                port=self.tui.port,
-            )
-            if created and self.tui.config.runtime_mode == "attach":
-                self.tui.config = replace(
-                    self.tui.config,
-                    start_cmd=f"mlx_lm.server --port {self.tui.port}",
-                )
-        self.tui.needs_setup = False
-
-    def _select_mode(self, mode: str, note: str) -> None:
-        self.tui.set_runtime_mode(mode)  # type: ignore[arg-type]
-        self._persist_new_mode()
-        self._set_status(note)
-        self._update_view()
-
-    @on(Button.Pressed, "#setup-managed")
-    def _select_managed(self) -> None:
-        self._select_mode(
-            "managed", "Managed selected; the TUI owns only children it starts."
-        )
-
-    @on(Button.Pressed, "#setup-attach")
-    def _select_attach(self) -> None:
-        self._select_mode(
-            "attach",
-            "Attach selected; existing server commands remain operator-managed.",
-        )
+    @on(Button.Pressed, "#setup-settings")
+    def _settings(self) -> None:
+        if self._installing:
+            return
+        self.dismiss(None)
+        self.tui.call_after_refresh(self.tui.action_settings)
 
     @on(Button.Pressed, "#setup-install, #setup-retry")
     def _install(self) -> None:
         if self.tui.config.runtime_mode != "managed":
-            self._set_status("Choose Managed runtime first.", "yellow")
+            self._set_status(
+                "Choose Managed in Settings, save, and restart first.", "yellow"
+            )
             return
         if self._installing:
             return

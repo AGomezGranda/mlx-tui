@@ -2,10 +2,103 @@
 
 Configuration is optional. The file is
 `$XDG_CONFIG_HOME/mlx-tui/config.toml`, or
-`~/.config/mlx-tui/config.toml` when `XDG_CONFIG_HOME` is unset. Explicit
-`--host` and `--port` CLI flags take precedence. Press `Ctrl+G` in the TUI to
-create a commented template if needed and open the file in `$EDITOR`; it
-reloads on save. Restart the TUI after changing host or port.
+`~/.config/mlx-tui/config.toml` when `XDG_CONFIG_HOME` is unset or empty.
+Find that location without creating anything or starting the TUI:
+
+```sh
+mlx-tui --config-path
+```
+
+This flag cannot be combined with diagnostics, mode, host, or port flags.
+Installation, `--help`, `--version`, and `--config-path` do not create config.
+Diagnostics reads configuration but does not create or migrate it.
+
+## Settings and active work
+
+Run `mlx-tui` after installing. On a fresh launch, Settings opens before any
+connection polling or managed-runtime initialization. Choose a mode and
+**Save**, then select/download a model and start it from Models or Runtime
+setup. **Continue defaults** or Escape continues once in attach mode without
+creating the file. Explicit `--attach`/`--managed` flags bypass first-run
+onboarding for that run; `Ctrl+G` remains available afterward.
+
+Press `Ctrl+G` from the main screen to open the same Settings form later.
+It shows saved values, the active endpoint, CLI overrides, a form endpoint
+preview, and any pending restart. Host and port are attach settings; they
+are disabled while Managed is selected. **Runtime setup** remains available
+for installation, downloads, and recovery.
+
+| Action | Effect |
+| --- | --- |
+| Save | Writes only edited fields, updates saved defaults and presets, and imports legacy presets if needed. Active chat controls, draft, attachments, historical requests, and runtime ownership stay unchanged. |
+| Apply chat defaults | Copies the saved model, system prompt, temperature, top-p, max tokens, context, seed, and thinking choice into subsequent requests. It sends no request and marks an active coding profile modified. Unsaved form edits are not applied. |
+| Reload / return from Open TOML | Reads and validates the file, refreshes saved defaults/presets and the restart notice, and preserves active request controls. |
+| Cancel / Escape | Closes without saving unsaved edits; completed Saves remain saved. Dirty edits require discard confirmation, also before Reload or Open TOML. |
+
+Apply is unavailable during chat, comparison, installation, or model operations,
+and while a session is read-only or awaits a saved/current settings choice.
+You can still edit and Save defaults. Clearing the saved model and applying
+clears explicit selection; select a model before sending again. Apply does
+not stop a server or establish which model is resident.
+
+New chat inherits the current request controls. Reopening a saved chat retains
+its explicit saved-versus-current settings choice. Neither action writes
+defaults back to `config.toml`.
+
+Runtime mode, host, port, start/stop commands, shell execution, and swap policy
+take effect at the next launch. A **Restart required** notice stays visible
+while saved effective runtime settings differ from the launch snapshot.
+Reverting those changes clears it. Editing a field masked by a CLI override
+does not require restart for that field; overrides last for this process.
+Saving never reclassifies an owned managed child as attached or reconnects
+the existing HTTP client.
+
+## Fields and defaults
+
+The form edits Server and Chat defaults. Commands, shell execution, swap policy,
+and preset definitions are edited through **Open TOML**. Optional blank fields
+remove their keys; merely opening or saving an unchanged form does not write
+every effective default. Zero and false remain explicit values.
+
+| Key | Unset/default behavior | Accepted values / control |
+| --- | --- | --- |
+| `runtime_mode` | `"attach"` | `"attach"` or `"managed"`; form |
+| `host` | `"127.0.0.1"` for attach | Nonempty string; form |
+| `port` | `8080` for attach | Integer 1–65535; form |
+| `model` | No explicit request selection | Model identifier or local path; form |
+| `system` | No system prompt | String; multiline form |
+| `temperature` | `0.7` | Number 0–2; form |
+| `top_p` | `1.0` | Number 0–1; form |
+| `max_tokens` | `1024` | Integer 1–16384; form |
+| `max_ctx` | `8192` | Integer 1024–131072; form |
+| `max_context` | Compatibility alias, takes precedence over `max_ctx` | Same context range; TOML. Editing context in the form writes `max_ctx` and removes the alias. |
+| `seed` | Provider default | Optional integer; form |
+| `enable_thinking` | Provider default | Optional boolean; form Default removes the key, On/Off writes true/false |
+| `start_cmd` | No attach startup command | Optional string; TOML or the explicit local-start checkbox |
+| `stop_cmd` | No attach stop command | Optional string; TOML |
+| `command_shell` | `false` | Boolean; TOML |
+| `swap_policy` | `"auto"` | `"auto"`, `"warm"`, or `"restart"`; TOML |
+| `preset` | Canonical entries if present; otherwise legacy fallback | Array of preset tables, including `[]`; TOML |
+
+**Enable local server start** creates an argv command using the form's literal
+loopback host and port, with `command_shell = false`. Fresh attach onboarding
+selects it by default. Existing custom commands stay unchanged and appear as
+advanced settings; when changing endpoints, update their arguments in TOML
+as needed. The checkbox is unavailable for nonliteral/nonloopback hosts,
+existing commands, and Managed mode.
+
+### Endpoint and CLI precedence
+
+`--attach` and `--managed` are mutually exclusive and override the saved mode
+for this run. Explicit endpoint flags override only the supplied fields:
+
+| Effective mode | No endpoint flags | Example override |
+| --- | --- | --- |
+| Attach | Saved host/port, default `127.0.0.1:8080` | `--port 9000` retains the saved host |
+| Managed | `127.0.0.1:18080`; saved host/port remain attach settings | `--managed --port 8080` uses port 8080 explicitly |
+
+CLI overrides are never saved. They continue to affect the effective endpoint
+and pending-restart comparison after Save, Reload, and editor changes.
 
 ## Example
 
@@ -28,8 +121,8 @@ swap_policy = "auto"  # "auto", "warm", or "restart"
 ```
 
 `max_ctx` is the context budget. `max_context` is a compatibility alias; if
-both are present, `max_context` wins. Invalid or unknown `runtime_mode` values
-fall back to attach mode. CLI `--managed` and `--attach` select a mode for that
+both are present, `max_context` wins. Invalid known values open Settings for
+repair before connecting. CLI `--managed` and `--attach` select a mode for that
 run and are mutually exclusive.
 
 ## Server ownership and model switching
@@ -70,17 +163,72 @@ another client to the same server.
 
 ## Presets
 
-Presets live in a sibling file,
-`$XDG_CONFIG_HOME/mlx-tui/presets.toml` (or
-`~/.config/mlx-tui/presets.toml`):
+Presets live in `config.toml` as `[[preset]]` entries:
 
 ```toml
 [[preset]]
 name = "default"
 system = "You are helpful."
 temperature = 0.7
+top_p = 1.0
+max_tokens = 1024
 ```
 
-Press `Ctrl+N` / `Ctrl+O` to cycle presets forward / back. `Ctrl+G` reloads
-them after editing. Presets are managed through the file and editor; there is
-no preset-management screen.
+`name` is required and must be nonempty. `system` defaults to an empty prompt;
+omitted sampling/token fields retain the current controls when cycling. Their
+types and ranges match the corresponding config keys. Unknown preset fields
+warn and survive; invalid entries identify their index/name and block Save.
+
+Press `Ctrl+N` / `Ctrl+O` to cycle presets forward / back for this session.
+Cycling does not change saved defaults. Use Settings → Reload after editing.
+
+### Legacy import and rollback
+
+When `config.toml` has no `preset` key, the sibling `presets.toml` is a
+compatibility fallback. Settings shows **Legacy presets: import on Save**.
+Read-only startup, Reload, and diagnostics do not migrate it. The next
+successful Save imports the preset array in its original order with names
+preserved, leaving the legacy file untouched. If config already exists,
+`config.toml.pre-unification.bak` stores its exact pre-import bytes; an
+existing backup is never overwritten. Invalid legacy entries must be repaired
+before import; changes to either file require Reload before Save.
+
+Once `preset` exists in config, it is authoritative and later changes to the
+legacy file have no effect. To opt out, put `preset = []` at the root of
+`config.toml` (before any table headers). Settings names the canonical source.
+
+The old app can still read flat config keys and the untouched legacy file.
+If rolling back, manually copy presets edited after migration back into
+`presets.toml`; the old file does not receive those updates automatically.
+Restore the pre-unification backup only by explicit action after preserving
+newer work. See [upgrade and rollback](activation.md#upgrade-and-rollback).
+
+## Editing, validation, and write conflicts
+
+**Open TOML** uses `$VISUAL`, then `$EDITOR`, then `vi`. Configure GUI editors
+to wait for closing, for example `VISUAL="code --wait"`. A missing file is
+created from the standard commented template only after explicit confirmation.
+Successful editor exit uses the same validation/reload path as Reload.
+
+Known wrong types, booleans used as numbers, non-finite numbers, invalid enums,
+empty hosts, and out-of-range values are errors. Integer TOML values are
+accepted for floating fields. Form errors appear beside fields and focus the
+first invalid control; strict validation never silently clamps values.
+Unknown keys/tables produce warnings and survive writes. Alias use is also
+reported so the effective context budget is clear.
+
+Invalid TOML/UTF-8 or unreadable files open a repair state showing the path
+and error. Form Save is disabled for an unparseable document; repair through
+Open TOML and Reload. Startup defers services until repair succeeds or you
+explicitly continue with defaults for this run. Corrupt bytes are not replaced
+with defaults.
+
+Saves preserve comments, unrelated keys/tables, and unset optional values.
+Formatting of unusual TOML constructs may change. A changed/deleted file,
+late file creation, changed legacy presets, or a retargeted symlink rejects
+Save and retains the draft: Reload before trying again. App writers share a
+short advisory lock; lock contention and write failures remain visible.
+Writes use a flushed/fsynced sibling temporary file and atomic replacement;
+new files have mode `0600`. Existing symlinks are preserved and their resolved
+target is updated. External editors do not honor the lock, so an external
+write during the final compare/replace window can still race with Save.

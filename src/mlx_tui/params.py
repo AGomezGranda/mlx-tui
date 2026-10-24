@@ -10,17 +10,15 @@ from textual.containers import Vertical
 from textual.css.query import NoMatches
 from textual.widgets import Collapsible, Input, Label
 
-from mlx_tui.config import AppConfig
-
-_DEFAULT_TEMPERATURE = 0.7
-_DEFAULT_TOP_P = 1.0
-_DEFAULT_MAX_TOKENS = 1024
-_TEMP_MIN = 0.0
-_TEMP_MAX = 2.0
-_TOP_P_MIN = 0.0
-_TOP_P_MAX = 1.0
-_MAX_TOK_MIN = 1
-_MAX_TOK_MAX = 16384
+from mlx_tui.config import (
+    DEFAULT_MAX_TOKENS,
+    DEFAULT_TEMPERATURE,
+    DEFAULT_TOP_P,
+    MAX_TOKENS_RANGE,
+    TEMPERATURE_RANGE,
+    TOP_P_RANGE,
+    AppConfig,
+)
 
 
 def _parse_clamped(
@@ -75,7 +73,7 @@ class ParamsPane(Collapsible):
             Vertical(
                 Label("Temperature · 0–2", markup=False),
                 Input(
-                    value="0.7",
+                    value=str(DEFAULT_TEMPERATURE),
                     id="param-temp",
                     tooltip="Creativity: 0 deterministic → 2 very random",
                 ),
@@ -84,7 +82,7 @@ class ParamsPane(Collapsible):
             Vertical(
                 Label("Top-p · 0–1", markup=False),
                 Input(
-                    value="1.0",
+                    value=str(DEFAULT_TOP_P),
                     id="param-top-p",
                     tooltip="Nucleus sampling: lower = more focused",
                 ),
@@ -93,7 +91,9 @@ class ParamsPane(Collapsible):
             Vertical(
                 Label("Max tokens · 1–16384", markup=False),
                 Input(
-                    value="1024", id="param-max-tokens", tooltip="Maximum reply length"
+                    value=str(DEFAULT_MAX_TOKENS),
+                    id="param-max-tokens",
+                    tooltip="Maximum reply length",
                 ),
                 classes="param-field",
             ),
@@ -117,13 +117,11 @@ class ParamsPane(Collapsible):
             raw_top_p = self.query_one("#param-top-p", Input).value.strip()
             raw_max = self.query_one("#param-max-tokens", Input).value.strip()
         except NoMatches:
-            return (_DEFAULT_TEMPERATURE, _DEFAULT_TOP_P, _DEFAULT_MAX_TOKENS)
+            return (DEFAULT_TEMPERATURE, DEFAULT_TOP_P, DEFAULT_MAX_TOKENS)
         return (
-            _parse_clamped(raw_temp, _DEFAULT_TEMPERATURE, _TEMP_MIN, _TEMP_MAX, float),
-            _parse_clamped(raw_top_p, _DEFAULT_TOP_P, _TOP_P_MIN, _TOP_P_MAX, float),
-            _parse_clamped(
-                raw_max, _DEFAULT_MAX_TOKENS, _MAX_TOK_MIN, _MAX_TOK_MAX, int
-            ),
+            _parse_clamped(raw_temp, DEFAULT_TEMPERATURE, *TEMPERATURE_RANGE),
+            _parse_clamped(raw_top_p, DEFAULT_TOP_P, *TOP_P_RANGE),
+            _parse_clamped(raw_max, DEFAULT_MAX_TOKENS, *MAX_TOKENS_RANGE, ctor=int),
         )
 
     def apply_values(
@@ -147,9 +145,9 @@ class ParamsPane(Collapsible):
         self.apply_values(
             config.temperature
             if config.temperature is not None
-            else _DEFAULT_TEMPERATURE,
-            config.top_p if config.top_p is not None else _DEFAULT_TOP_P,
-            config.max_tokens if config.max_tokens is not None else _DEFAULT_MAX_TOKENS,
+            else DEFAULT_TEMPERATURE,
+            config.top_p if config.top_p is not None else DEFAULT_TOP_P,
+            config.max_tokens if config.max_tokens is not None else DEFAULT_MAX_TOKENS,
         )
 
     @on(Input.Submitted, "#param-temp, #param-top-p, #param-max-tokens")

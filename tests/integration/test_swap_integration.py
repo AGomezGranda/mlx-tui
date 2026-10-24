@@ -7,6 +7,7 @@ from collections.abc import Callable
 
 import pytest
 
+import mlx_tui.app.polling as _app_polling
 from mlx_tui import serverctl
 from mlx_tui.app import MlxTuiApp
 from mlx_tui.chat_ui.widgets import ChatInput
@@ -28,7 +29,7 @@ from tests.integration.model_helpers import (
 async def test_warm_swap_happy_path(stub_harness: AppHarness) -> None:
     harness = stub_harness
     harness.server.mode = "probe"
-    await harness.app._poll()  # green against the ok-mode GET handler
+    await _app_polling._poll(harness.app)  # green against the ok-mode GET handler
     await _select_row(harness)
 
     await harness.pilot.press("enter")
@@ -60,28 +61,28 @@ async def test_warm_swap_catalog_does_not_overwrite_verified_selection(
     def unexpected_wait(*args: object, **kwargs: object) -> None:
         pytest.fail("a verified completion must not wait for the catalog to change")
 
-    monkeypatch.setattr(MlxTuiApp, "_fetch_probe", catalog_probe)
+    monkeypatch.setattr("mlx_tui.app.polling._fetch_probe", catalog_probe)
     monkeypatch.setattr(serverctl, "warm_load", fake_warm)
     monkeypatch.setattr(serverctl, "wait_healthy", unexpected_wait)
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert harness.app.effective_model() is None
     await _select_row(harness)
     await harness.pilot.press("enter")
     assert await harness.wait_for(lambda a: "✓" in _log_text(harness))
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert harness.app.effective_model() == ROW.repo_id
     assert harness.app.operations.current is OperationKind.IDLE
 
     # A changed process generation invalidates success, not explicit selection.
     monkeypatch.setattr("mlx_tui.process.find_server_process", _fake_process_4242)
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert harness.app.effective_model() == ROW.repo_id
     assert harness.app.server_identity.generation_state == "unknown"
 
 
 async def test_swap_blocked_while_busy(stub_harness: AppHarness) -> None:
     harness = stub_harness
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert harness.app.operations.try_acquire(OperationKind.LOADING)
     await _select_row(harness)
 
@@ -99,7 +100,7 @@ async def test_cannot_swap_when_unreachable_and_unconfigured(
 ) -> None:
     harness = stub_harness
     harness.server.mode = "html"
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     await _select_row(harness)
 
     await harness.pilot.press("enter")
@@ -114,7 +115,7 @@ async def test_warm_swap_completion_respects_live_turn(
 ) -> None:
     """A live chat owns the lease, so a warm swap cannot start alongside it."""
     harness = stub_harness
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     await _select_row(harness)
 
     inp = harness.app.query_one("#chat-input", ChatInput)
@@ -141,7 +142,7 @@ async def test_amber_refuses_swap_even_with_commands(
 ) -> None:
     harness = stub_harness
     harness.server.mode = "html"
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert harness.app.status_state == "amber"
     harness.app.config = AppConfig(
         start_cmd=f"{sys.executable} -c \"print('booting')\"",
@@ -159,7 +160,7 @@ async def test_amber_refuses_swap_even_with_commands(
 
 async def test_warm_policy_rejects_non_green(stub_harness: AppHarness) -> None:
     harness = stub_harness
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     harness.app.status_state = "red"
     harness.app.config = AppConfig(swap_policy="warm")
     await _select_row(harness)
@@ -176,7 +177,7 @@ async def test_restart_policy_requires_both_commands(
     stub_harness: AppHarness,
 ) -> None:
     harness = stub_harness
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert harness.app.status_state == "green"
     harness.app.config = AppConfig(
         swap_policy="restart",
@@ -200,7 +201,7 @@ async def test_warm_mismatched_response_model_keeps_old_identity(
     harness.server.model_id = "old-model"
     harness.app.select_model("old-model")
     harness.app.record_generation_success("old-model", "old-model")
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert harness.app.server_identity.last_response_model == "old-model"
 
     def fake_warm(url: str, repo_id: str, *, timeout_s: float) -> str | None:
@@ -233,7 +234,7 @@ async def test_warm_mismatched_response_model_keeps_old_identity(
     ), _log_text(harness)
     assert called == []
     assert harness.app.operations.current is OperationKind.IDLE
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert harness.app.server_identity.last_response_model == "old-model"
     assert harness.app.effective_model() == ROW.repo_id
     assert harness.app.server_identity.generation_state == "failed"
@@ -247,7 +248,7 @@ async def test_warm_wrong_endpoint_model_keeps_old_marker(
     harness.server.model_id = "old-model"
     harness.app.select_model("old-model")
     harness.app.record_generation_success("old-model", "old-model")
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert harness.app.server_identity.last_response_model == "old-model"
 
     def fake_warm(url: str, repo_id: str, *, timeout_s: float) -> str | None:
@@ -278,7 +279,7 @@ async def test_rescan_failure_keeps_rows_and_logs_once(
     stub_harness: AppHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     harness = stub_harness
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     await _select_row(harness)
     pane = harness.models_pane()
 

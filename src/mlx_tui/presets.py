@@ -6,7 +6,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from mlx_tui.config import _clamp, _coerce_float_strict, config_path
+from mlx_tui.config import ConfigIssue, _from_mapping, config_path, validate_config
 
 
 @dataclass(frozen=True)
@@ -26,40 +26,53 @@ class PresetParseError(Exception):
     """Raised by :func:`parse_presets` when the file is unreadable or invalid."""
 
 
-def _preset_from_mapping(d: dict[str, object]) -> Preset | None:  # noqa: PLR0912
-    name = d.get("name")
-    if type(name) is not str:
-        return None
-    system = d.get("system", "")
-    if type(system) is not str:
-        return None
-    # allow extra keys ignored
-    temp: float | None = None
-    top_p: float | None = None
-    max_tok: int | None = None
-    if "temperature" in d:
-        temp = _coerce_float_strict(d["temperature"])
-        if temp is None:
-            return None
-    if "top_p" in d:
-        top_p = _coerce_float_strict(d["top_p"])
-        if top_p is None:
-            return None
-    if "max_tokens" in d:
-        v = d["max_tokens"]
-        if type(v) is int:
-            max_tok = v
-        else:
-            return None
-    if temp is not None:
-        temp = _clamp(temp, 0.0, 2.0)
-    if top_p is not None:
-        top_p = _clamp(top_p, 0.0, 1.0)
-    if max_tok is not None:
-        max_tok = _clamp(max_tok, 1, 16384)
-    return Preset(
-        name=name, system=system, temperature=temp, top_p=top_p, max_tokens=max_tok
-    )
+def presets_from_mapping(
+    data: dict[str, object],
+) -> tuple[tuple[Preset, ...], tuple[ConfigIssue, ...]]:
+    raw = data.get("preset", [])
+    if not isinstance(raw, list):
+        return (), (
+            ConfigIssue("preset", "Must be an array of preset tables", "error"),
+        )
+    presets: list[Preset] = []
+    issues: list[ConfigIssue] = []
+    allowed = {"name", "system", "temperature", "top_p", "max_tokens"}
+    for index, entry in enumerate(raw):
+        key = f"preset[{index}]"
+        if not isinstance(entry, dict):
+            issues.append(ConfigIssue(key, "Must be a preset table", "error"))
+            continue
+        label = f"{key} ({entry.get('name', 'unnamed')})"
+        fields = {k: v for k, v in entry.items() if k in allowed and k != "name"}
+        entry_issues = list(validate_config(fields))
+        if type(entry.get("name")) is not str or not entry["name"].strip():
+            entry_issues.append(
+                ConfigIssue("name", "Must be a nonempty string", "error")
+            )
+        for field in entry:
+            if field not in allowed:
+                entry_issues.append(
+                    ConfigIssue(field, "Unknown key; preserved on save", "warning")
+                )
+        issues.extend(
+            ConfigIssue(
+                f"{key}.{issue.key}", f"{label}: {issue.message}", issue.severity
+            )
+            for issue in entry_issues
+        )
+        if any(issue.severity == "error" for issue in entry_issues):
+            continue
+        config = _from_mapping(fields)
+        presets.append(
+            Preset(
+                name=entry["name"],
+                system=config.system or "",
+                temperature=config.temperature,
+                top_p=config.top_p,
+                max_tokens=config.max_tokens,
+            )
+        )
+    return tuple(presets), tuple(issues)
 
 
 def parse_presets(path: Path | None = None) -> list[Preset]:
@@ -68,21 +81,15 @@ def parse_presets(path: Path | None = None) -> list[Preset]:
     try:
         with path.open("rb") as fh:
             data: dict[str, object] = tomllib.load(fh)
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise PresetParseError(f"{path}: {exc}") from exc
-    raw = data.get("preset")
-    if raw is None:
-        return []
-    if not isinstance(raw, list):
-        raise PresetParseError(f"{path}: 'preset' must be a list")
-    presets: list[Preset] = []
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        preset = _preset_from_mapping(item)
-        if preset is not None:
-            presets.append(preset)
-    return presets
+    presets, issues = presets_from_mapping(data)
+    errors = [
+        f"{issue.key}: {issue.message}" for issue in issues if issue.severity == "error"
+    ]
+    if errors:
+        raise PresetParseError(f"{path}: {'; '.join(errors)}")
+    return list(presets)
 
 
 def load_presets(path: Path | None = None) -> list[Preset]:

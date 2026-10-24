@@ -17,7 +17,8 @@ Every run uses `coding-check-v1`:
 The expected answer is exactly:
 
 ```python
-def answer(): return 42
+def answer():
+    return 42
 ```
 
 A **model** is a repository or snapshot that the server can request. A **coding

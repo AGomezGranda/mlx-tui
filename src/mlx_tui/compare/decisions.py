@@ -11,6 +11,7 @@ from textual.widgets import (
     TabbedContent,
 )
 
+import mlx_tui.compare.render as _compare_render
 from mlx_tui.comparison.contracts import DecisionKind
 from mlx_tui.comparison.store import commit_choice
 from mlx_tui.operations import OperationKind
@@ -26,8 +27,9 @@ def _decision_reason(pane: Any) -> str:
 def _commit_decision(
     pane: Any, decision: DecisionKind, slot: int | None = None
 ) -> None:
-    if pane._is_busy():
-        pane._set_text(
+    if _compare_render._is_busy(pane):
+        _compare_render._set_text(
+            pane,
             "#comparison-saved",
             "decision unavailable while another operation runs",
             "yellow",
@@ -35,8 +37,8 @@ def _commit_decision(
         return
     result = pane.tui.last_comparison
     if result is None or result.status != "completed":
-        pane._set_text(
-            "#comparison-saved", "no completed comparison to decide", "yellow"
+        _compare_render._set_text(
+            pane, "#comparison-saved", "no completed comparison to decide", "yellow"
         )
         return
     profile_id = (
@@ -47,10 +49,12 @@ def _commit_decision(
             result,
             decision,
             profile_id=profile_id,
-            reason=pane._decision_reason(),
+            reason=_decision_reason(pane),
         )
     except (OSError, ValueError) as exc:
-        pane._set_text("#comparison-saved", f"choice not saved: {exc}", "red")
+        _compare_render._set_text(
+            pane, "#comparison-saved", f"choice not saved: {exc}", "red"
+        )
         return
     pane.tui.last_comparison = finalized
     pane.tui.saved_choice = choice
@@ -62,8 +66,9 @@ def _commit_decision(
                 profile_id, expected_fingerprint=choice.profile_fingerprint
             )
         except (OSError, ValueError) as exc:
-            pane._render_result(finalized)
-            pane._set_text(
+            _compare_render._render_result(pane, finalized)
+            _compare_render._set_text(
+                pane,
                 "#comparison-saved",
                 f"Choice saved; profile not applied: {exc}",
                 "red",
@@ -72,30 +77,33 @@ def _commit_decision(
         if pane.tui.config.runtime_mode == "managed":
             managed_activation = True
             pane._activate_managed_profile(profile_id)
-    pane._render_result(finalized)
+    _compare_render._render_result(pane, finalized)
     if managed_activation:
-        pane._set_text("#comparison-saved", "choice saved; activating managed profile")
+        _compare_render._set_text(
+            pane, "#comparison-saved", "choice saved; activating managed profile"
+        )
 
 
 def _keep_a(pane: Any) -> None:
-    pane._commit_decision("keep", 0)
+    _commit_decision(pane, "keep", 0)
 
 
 def _keep_b(pane: Any) -> None:
-    pane._commit_decision("keep", 1)
+    _commit_decision(pane, "keep", 1)
 
 
 def _retain(pane: Any) -> None:
-    pane._commit_decision("retain")
+    _commit_decision(pane, "retain")
 
 
 def _reject(pane: Any) -> None:
-    pane._commit_decision("reject")
+    _commit_decision(pane, "reject")
 
 
 def _use_saved(pane: Any) -> None:
-    if pane._is_busy():
-        pane._set_text(
+    if _compare_render._is_busy(pane):
+        _compare_render._set_text(
+            pane,
             "#comparison-saved",
             "saved profile unavailable while another operation runs",
             "yellow",
@@ -103,8 +111,8 @@ def _use_saved(pane: Any) -> None:
         return
     choice = pane.tui.saved_choice
     if choice is None or choice.decision != "keep" or choice.profile_id is None:
-        pane._set_text(
-            "#comparison-saved", "saved choice has no profile to apply", "yellow"
+        _compare_render._set_text(
+            pane, "#comparison-saved", "saved choice has no profile to apply", "yellow"
         )
         return
     try:
@@ -112,7 +120,9 @@ def _use_saved(pane: Any) -> None:
             choice.profile_id, expected_fingerprint=choice.profile_fingerprint
         )
     except (OSError, ValueError) as exc:
-        pane._set_text("#comparison-saved", f"saved profile not applied: {exc}", "red")
+        _compare_render._set_text(
+            pane, "#comparison-saved", f"saved profile not applied: {exc}", "red"
+        )
         return
     if pane.tui.config.runtime_mode == "managed":
         pane._activate_managed_profile(choice.profile_id)
@@ -122,7 +132,8 @@ def _use_saved(pane: Any) -> None:
 def _activate_managed_profile(pane: Any, profile_id: str) -> None:
     if not pane.tui.operations.try_acquire(OperationKind.RESTARTING):
         pane.app.call_from_thread(
-            pane._set_text,
+            _compare_render._set_text,
+            pane,
             "#comparison-saved",
             "Choice saved; activation blocked by another operation",
             "yellow",
@@ -142,14 +153,16 @@ def _activate_managed_profile(pane: Any, profile_id: str) -> None:
         )
     except Exception as exc:
         pane.app.call_from_thread(
-            pane._set_text,
+            _compare_render._set_text,
+            pane,
             "#comparison-saved",
             f"Choice saved; activation failed: {exc}",
             "red",
         )
     else:
         pane.app.call_from_thread(
-            pane._set_text,
+            _compare_render._set_text,
+            pane,
             "#comparison-saved",
             "choice saved; managed profile ready",
         )

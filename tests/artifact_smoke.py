@@ -152,8 +152,14 @@ def _install_and_smoke(
     assert "usage: mlx-tui" in result.stdout
     assert "--managed" in result.stdout
     assert "--attach" in result.stdout
+    assert "--config-path" in result.stdout
     result = _run(str(cli), "--version", cwd=workdir, env=env)
     assert result.stdout.strip() == expected_version
+    result = _run(str(cli), "--config-path", cwd=workdir, env=env)
+    assert result.stdout.strip() == str(
+        xdg_roots["XDG_CONFIG_HOME"] / "mlx-tui" / "config.toml"
+    )
+    assert all(not root.exists() for root in xdg_roots.values())
     diagnostics_path = workdir / f"{venv.name}-diagnostics.json"
     result = _run(
         str(cli), "--diagnostics", str(diagnostics_path), cwd=workdir, env=env

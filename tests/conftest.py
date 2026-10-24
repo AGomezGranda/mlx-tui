@@ -115,7 +115,8 @@ class StubHandler(BaseHTTPRequestHandler):
             body = (
                 b'{"model": '
                 + json.dumps(model).encode()
-                + b', "choices": [{"message": {"role": "assistant", "content": "hi"}}],'
+                + b', "choices": [{"message": {"role": "assistant", "content": "hi"},'
+                b' "finish_reason": "length"}],'
                 b' "usage": {"prompt_tokens": 1, "completion_tokens": 1,'
                 b' "total_tokens": 2}}'
             )

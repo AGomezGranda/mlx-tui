@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from functools import partial
 from typing import Any
 
 from textual.containers import Horizontal
 from textual.css.query import NoMatches
 from textual.widgets import Button, Static
 
+import mlx_tui.chat_ui.context as _chat_context
 import mlx_tui.sessions.errors as _sessions_errors
 import mlx_tui.sessions.models as _sessions_models
 import mlx_tui.sessions.store as _sessions_store
-from mlx_tui.chat_ui.context import _MAX_CONTEXT_TOKENS_EST
 from mlx_tui.chat_ui.widgets import ChatInput
 from mlx_tui.params import ParamsPane
 from mlx_tui.sessions.models import ChatSession, RequestSettings, SessionTurn
@@ -47,7 +48,7 @@ def capture_request_settings(pane: Any) -> RequestSettings:
             temperature=temp,
             top_p=top_p,
             max_tokens=max_tok,
-            max_ctx=_MAX_CONTEXT_TOKENS_EST,
+            max_ctx=_chat_context._MAX_CONTEXT_TOKENS_EST,
         )
     try:
         model = pane.tui.effective_model()
@@ -56,7 +57,7 @@ def capture_request_settings(pane: Any) -> RequestSettings:
     max_ctx = (
         cfg.max_ctx
         if isinstance(cfg.max_ctx, int) and cfg.max_ctx > 0
-        else _MAX_CONTEXT_TOKENS_EST
+        else _chat_context._MAX_CONTEXT_TOKENS_EST
     )
     system = cfg.system or ""
     profile_id: str | None = None
@@ -113,20 +114,20 @@ def capture_request_settings(pane: Any) -> RequestSettings:
 
 def mark_next_request_dirty(pane: Any) -> None:
     """Checkpoint both reconciliation choices through one path."""
-    session = pane._ensure_session()
+    session = _ensure_session(pane)
     if pane._read_only:
         return
     settings = pane.capture_request_settings()
     pane._session = replace(session, settings=settings, updated_at=pane._now_iso())
     pane._save_revision += 1
-    pane._update_save_status()
-    pane._schedule_draft_save()
+    _update_save_status(pane)
+    _schedule_draft_save(pane)
     pane.refresh_context_bar()
 
 
 def _schedule_draft_save(pane: Any, delay: float = 0.25) -> None:
     if pane._is_temporary or pane._read_only:
-        pane._update_save_status()
+        _update_save_status(pane)
         return
     try:
         if pane._draft_timer is not None:
@@ -134,15 +135,15 @@ def _schedule_draft_save(pane: Any, delay: float = 0.25) -> None:
     except Exception:
         pass
     try:
-        pane._draft_timer = pane.set_timer(delay, pane._draft_timer_fired)
+        pane._draft_timer = pane.set_timer(delay, partial(_draft_timer_fired, pane))
     except Exception:
         pass
-    pane._update_save_status()
+    _update_save_status(pane)
 
 
 def _draft_timer_fired(pane: Any) -> None:
     pane._draft_timer = None
-    pane._save_session_async()
+    _save_session_async(pane)
 
 
 def _save_session_async(pane: Any) -> None:
@@ -151,13 +152,11 @@ def _save_session_async(pane: Any) -> None:
     if pane._session is None:
         return
     # Coalesce draft changes at 250 ms; serialize with one async lock.
-    asyncio.ensure_future(pane._save_session_now())
+    asyncio.ensure_future(_save_session_now(pane))
 
 
 def _has_meaningful_content(pane: Any, session: ChatSession) -> bool:
-    if session.draft.strip():
-        return True
-    return len(session.attempts) > 0
+    return bool(session.draft.strip() or session.attachments or session.attempts)
 
 
 def _snapshot_for_save(pane: Any) -> ChatSession | None:
@@ -183,23 +182,38 @@ def _snapshot_for_save(pane: Any) -> ChatSession | None:
     )
 
 
-async def _save_session_now(pane: Any) -> bool:  # noqa: PLR0911, PLR0912, PLR0915
+async def _save_session_now(pane: Any) -> bool:
+    # A cancelled waiter must retain ownership until its threaded write settles.
+    save = asyncio.create_task(_write_session_now(pane))
+    try:
+        return await asyncio.shield(save)
+    except asyncio.CancelledError:
+        while not save.done():
+            try:
+                await asyncio.shield(save)
+            except asyncio.CancelledError:
+                continue
+        save.result()
+        raise
+
+
+async def _write_session_now(pane: Any) -> bool:  # noqa: PLR0911, PLR0912, PLR0915
     """Serialize writes; older saves never mark newer edits saved."""
     if pane._is_temporary or pane._read_only or pane._session is None:
         return True
     async with pane._write_lock:
         # Take the latest snapshot after acquiring the write lock.
-        snapshot = pane._snapshot_for_save()
+        snapshot = _snapshot_for_save(pane)
         if snapshot is None:
             return True
         pane._session = snapshot
-        if not pane._has_meaningful_content(snapshot):
+        if pane._session_lock is None and not _has_meaningful_content(pane, snapshot):
             # A spurious empty save must never clear a pending failure.
             if not pane._save_failed:
                 pane._saved_revision = pane._save_revision
                 pane._save_error = None
             try:
-                pane._update_save_status()
+                _update_save_status(pane)
             except Exception:
                 pass
             return not pane._save_failed
@@ -216,8 +230,8 @@ async def _save_session_now(pane: Any) -> bool:  # noqa: PLR0911, PLR0912, PLR09
                 pane._save_error = str(exc)
                 pane._read_only = True
                 try:
-                    pane._update_save_status()
-                    pane._update_action_visibility()
+                    _update_save_status(pane)
+                    _update_action_visibility(pane)
                 except Exception:
                     pass
                 return False
@@ -225,8 +239,8 @@ async def _save_session_now(pane: Any) -> bool:  # noqa: PLR0911, PLR0912, PLR09
                 pane._save_failed = True
                 pane._save_error = str(exc)
                 try:
-                    pane._update_save_status()
-                    pane._update_action_visibility()
+                    _update_save_status(pane)
+                    _update_action_visibility(pane)
                 except Exception:
                     pass
                 return False
@@ -239,8 +253,8 @@ async def _save_session_now(pane: Any) -> bool:  # noqa: PLR0911, PLR0912, PLR09
             pane._save_failed = True
             pane._save_error = str(exc)
             try:
-                pane._update_save_status()
-                pane._update_action_visibility()
+                _update_save_status(pane)
+                _update_action_visibility(pane)
             except Exception:
                 pass
             return False
@@ -252,8 +266,8 @@ async def _save_session_now(pane: Any) -> bool:  # noqa: PLR0911, PLR0912, PLR09
             pane._save_failed = True
             pane._save_error = str(exc)
             try:
-                pane._update_save_status()
-                pane._update_action_visibility()
+                _update_save_status(pane)
+                _update_action_visibility(pane)
             except Exception:
                 pass
             return False
@@ -266,12 +280,12 @@ async def _save_session_now(pane: Any) -> bool:  # noqa: PLR0911, PLR0912, PLR09
         else:
             # Newer edits arrived during save; schedule another pass.
             try:
-                pane._schedule_draft_save(delay=0.05)
+                _schedule_draft_save(pane, delay=0.05)
             except Exception:
                 pass
         try:
-            pane._update_save_status()
-            pane._update_action_visibility()
+            _update_save_status(pane)
+            _update_action_visibility(pane)
         except Exception:
             pass
         return not pane._save_failed
@@ -373,10 +387,9 @@ async def open_session(pane: Any, session_id: str) -> bool:  # noqa: PLR0911, PL
         pane._session is not None
         and not pane._is_temporary
         and not pane._read_only
-        and pane._has_meaningful_content(pane._session)
         and pane._save_revision != pane._saved_revision
     ):
-        await pane._save_session_now()
+        await _save_session_now(pane)
         if pane._save_failed:
             return False
     try:
@@ -415,7 +428,7 @@ async def open_session(pane: Any, session_id: str) -> bool:  # noqa: PLR0911, PL
                 except Exception:
                     pass
             return False
-        pane._release_session_lock()
+        _release_session_lock(pane)
         pane._session = loaded
         pane._session_lock_cm = lock_cm
         pane._session_lock = lock_handle
@@ -450,8 +463,8 @@ async def open_session(pane: Any, session_id: str) -> bool:  # noqa: PLR0911, PL
                 except NoMatches:
                     pass
                 break
-        pane._update_save_status()
-        pane._update_action_visibility()
+        _update_save_status(pane)
+        _update_action_visibility(pane)
         if read_only:
             pane.tui.log_app("session is locked elsewhere — read-only", "yellow")
         return True
@@ -465,21 +478,30 @@ async def open_session(pane: Any, session_id: str) -> bool:  # noqa: PLR0911, PL
         return False
 
 
-def _start_empty_session(pane: Any, *, temporary: bool) -> None:
+def _start_empty_session(
+    pane: Any, *, temporary: bool, discard_confirmed: bool = False
+) -> None:
     if pane._turn_active or pane.tui.operations.is_busy:
         pane.tui.log_app("finish the current turn before switching", "yellow")
         return
     if pane._save_failed:
         pane.tui.log_app("save failed — retry save or discard unsaved work", "yellow")
         return
-    if pane._is_temporary and not temporary and pane._session is not None:
-        has_work = bool(pane._session.draft.strip() or len(pane._session.attempts) > 0)
-        if has_work:
-            pane._confirm_discard(
-                lambda: pane._start_empty_session(temporary=temporary)
+    if (
+        pane._is_temporary
+        and not temporary
+        and pane._session is not None
+        and not discard_confirmed
+    ):
+        if _has_meaningful_content(pane, pane._session):
+            _confirm_discard(
+                pane,
+                lambda: _start_empty_session(
+                    pane, temporary=temporary, discard_confirmed=True
+                ),
             )
             return
-    pane._release_session_lock()
+    _release_session_lock(pane)
     settings = pane.capture_request_settings()
     pane._session = _sessions_models.new_session(settings, draft="")
     pane._is_temporary = temporary
@@ -491,8 +513,8 @@ def _start_empty_session(pane: Any, *, temporary: bool) -> None:
     pane._pending_reconcile = None
     pane._active_session_turn_id = None
     pane._render_session(pane._session)
-    pane._update_save_status()
-    pane._update_action_visibility()
+    _update_save_status(pane)
+    _update_action_visibility(pane)
 
 
 def _confirm_discard(pane: Any, proceed: Any) -> None:
@@ -530,12 +552,12 @@ def _open_picker(pane: Any) -> None:
 
 
 def _new_session_pressed(pane: Any) -> None:
-    pane._start_empty_session(temporary=False)
+    _start_empty_session(pane, temporary=False)
 
 
 def _new_temp_pressed(pane: Any) -> None:
     # Creating a temporary session never writes its draft or output.
-    pane._start_empty_session(temporary=True)
+    _start_empty_session(pane, temporary=True)
 
 
 def _clear_pressed(pane: Any) -> None:
@@ -552,7 +574,7 @@ def _clear_pressed(pane: Any) -> None:
 
     def _done(result: bool | None) -> None:
         if result is True:
-            asyncio.ensure_future(pane._clear_session())
+            asyncio.ensure_future(_clear_session(pane))
 
     try:
         pane.tui.push_screen(ConfirmScreen("Clear this session?"), _done)
@@ -569,8 +591,8 @@ async def _clear_session(pane: Any) -> None:
             updated_at=pane._now_iso(),
         )
         pane._render_session(pane._session)
-        pane._update_save_status()
-        pane._update_action_visibility()
+        _update_save_status(pane)
+        _update_action_visibility(pane)
         return
     cleared = replace(
         pane._session,
@@ -581,13 +603,14 @@ async def _clear_session(pane: Any) -> None:
     )
     pane._session = cleared
     pane._save_revision += 1
-    # Clear removes attempts/draft after successful replacement.
-    ok = await pane._save_session_now()
+    _update_save_status(pane)
+    # Clear the composer too, so checkpoints and retries save the same snapshot.
+    pane._render_session(cleared)
+    ok = await _save_session_now(pane)
     if not ok:
         return
-    pane._render_session(cleared)
-    pane._update_save_status()
-    pane._update_action_visibility()
+    _update_save_status(pane)
+    _update_action_visibility(pane)
 
 
 def _delete_pressed(pane: Any) -> None:
@@ -597,13 +620,13 @@ def _delete_pressed(pane: Any) -> None:
     if pane._session is None:
         return
     if pane._is_temporary:
-        pane._start_empty_session(temporary=False)
+        _start_empty_session(pane, temporary=False)
         return
     from mlx_tui.confirm import ConfirmScreen  # noqa: PLC0415
 
     def _done(result: bool | None) -> None:
         if result is True:
-            asyncio.ensure_future(pane._delete_session())
+            asyncio.ensure_future(_delete_session(pane))
 
     try:
         pane.tui.push_screen(ConfirmScreen("Delete this session?"), _done)
@@ -631,7 +654,7 @@ async def _delete_session(pane: Any) -> None:
         pane.tui.log_app(f"delete failed: {exc}", "red")
         return
     finally:
-        pane._release_session_lock()
+        _release_session_lock(pane)
     # Neither clear nor delete clears comparison results or Metrics.
     settings = pane.capture_request_settings()
     pane._session = _sessions_models.new_session(settings, draft="")
@@ -642,8 +665,8 @@ async def _delete_session(pane: Any) -> None:
     pane._save_failed = False
     pane._pending_reconcile = None
     pane._render_session(pane._session)
-    pane._update_save_status()
-    pane._update_action_visibility()
+    _update_save_status(pane)
+    _update_action_visibility(pane)
 
 
 def _last_retryable_turn(pane: Any) -> SessionTurn | None:
@@ -668,7 +691,7 @@ def _retry_request_pressed(pane: Any) -> None:
     if pane._read_only:
         pane.tui.log_app("session is locked read-only", "yellow")
         return
-    turn = pane._last_retryable_turn()
+    turn = _last_retryable_turn(pane)
     if turn is None:
         pane.tui.log_app("no failed turn to retry", "dim")
         return
@@ -683,7 +706,7 @@ def _retry_request_pressed(pane: Any) -> None:
 
         def _done(result: bool | None, _turn: SessionTurn = turn) -> None:
             if result is True:
-                pane._apply_retry_draft(_turn)
+                _apply_retry_draft(pane, _turn)
 
         try:
             pane.tui.push_screen(
@@ -692,7 +715,7 @@ def _retry_request_pressed(pane: Any) -> None:
         except Exception:
             pass
         return
-    pane._apply_retry_draft(turn)
+    _apply_retry_draft(pane, turn)
 
 
 def _apply_retry_draft(pane: Any, turn: SessionTurn) -> None:
@@ -715,10 +738,10 @@ def _apply_retry_draft(pane: Any, turn: SessionTurn) -> None:
         pane._save_revision += 1
     pane._draft_attachments = turn.attachments
     pane._attachment_index = max(0, len(pane._draft_attachments) - 1)
-    pane._refresh_attachment_ui()
-    pane._restore_retry_settings(turn.settings)
-    pane._update_save_status()
-    pane._schedule_draft_save()
+    _chat_context._refresh_attachment_ui(pane)
+    _restore_retry_settings(pane, turn.settings)
+    _update_save_status(pane)
+    _schedule_draft_save(pane)
     try:
         if not composer.disabled:
             composer.focus()
@@ -763,13 +786,13 @@ def _restore_retry_settings(pane: Any, saved: RequestSettings) -> None:
 
 def _retry_save_pressed(pane: Any) -> None:
     # Retry save performs no HTTP request.
-    asyncio.ensure_future(pane._retry_save())
+    asyncio.ensure_future(_retry_save(pane))
 
 
 async def _retry_save(pane: Any) -> bool:
     if pane._is_temporary or pane._read_only:
         return True
-    ok = await pane._save_session_now()
+    ok = await _save_session_now(pane)
     if ok:
         try:
             pane.tui.log_app("saved locally", "dim")
@@ -786,17 +809,17 @@ def _discard_pressed(pane: Any) -> None:
         if pane._session is not None:
             pane._save_revision += 1
             pane._saved_revision = pane._save_revision
-        pane._update_save_status()
-        pane._update_action_visibility()
+        _update_save_status(pane)
+        _update_action_visibility(pane)
 
-    pane._confirm_discard(_proceed)
+    _confirm_discard(pane, _proceed)
 
 
 def _use_saved_pressed(pane: Any) -> None:
     saved = pane._pending_reconcile
     if saved is None:
         return
-    asyncio.ensure_future(pane._apply_saved_settings(saved))
+    asyncio.ensure_future(_apply_saved_settings(pane, saved))
 
 
 async def _apply_saved_settings(pane: Any, saved: RequestSettings) -> None:
@@ -842,9 +865,9 @@ async def _apply_saved_settings(pane: Any, saved: RequestSettings) -> None:
     pane._pending_reconcile = None
     # Checkpoint both reconciliation choices through the single dirty path.
     pane.mark_next_request_dirty()
-    ok = await pane._save_session_now()
+    ok = await _save_session_now(pane)
     if ok:
-        pane._update_action_visibility()
+        _update_action_visibility(pane)
 
 
 def _keep_current_pressed(pane: Any) -> None:
@@ -853,7 +876,7 @@ def _keep_current_pressed(pane: Any) -> None:
     pane._pending_reconcile = None
     # Checkpoint the continue-with-current choice as well.
     pane.mark_next_request_dirty()
-    asyncio.ensure_future(pane._save_session_now())
+    asyncio.ensure_future(_save_session_now(pane))
 
 
 async def flush_for_shutdown(pane: Any) -> bool:
@@ -871,4 +894,4 @@ async def flush_for_shutdown(pane: Any) -> bool:
     if draft is not None and pane._session is not None and draft != pane._session.draft:
         pane._session = replace(pane._session, draft=draft, updated_at=pane._now_iso())
         pane._save_revision += 1
-    return await pane._save_session_now()
+    return await _save_session_now(pane)

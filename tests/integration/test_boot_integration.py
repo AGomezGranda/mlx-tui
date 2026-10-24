@@ -9,6 +9,7 @@ from collections.abc import Callable
 
 import pytest
 
+import mlx_tui.app.polling as _app_polling
 from mlx_tui import serverctl
 from mlx_tui.app import MlxTuiApp
 from mlx_tui.chat_ui.widgets import ChatInput
@@ -39,7 +40,7 @@ async def test_restart_swap_streams_and_completes(
     harness = stub_harness
     harness.server.mode = "ok"
     harness.server.model_id = ROW.repo_id
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     harness.app.config = AppConfig(
         start_cmd=f"{sys.executable} -c \"print('booting')\"",
         stop_cmd=f"{sys.executable} -c \"print('bye')\"",
@@ -58,7 +59,7 @@ async def test_restart_swap_streams_and_completes(
     assert "[swap] bye" in lines
     assert "[swap] booting" in lines
     assert harness.app.operations.current is OperationKind.IDLE
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert harness.app.server_identity.last_response_model == ROW.repo_id
 
 
@@ -70,8 +71,8 @@ async def test_cold_start_boots_server(
     stub_harness: AppHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     harness = stub_harness
-    monkeypatch.setattr(MlxTuiApp, "_classify_liveness", _always_red)
-    await harness.app._poll()
+    monkeypatch.setattr("mlx_tui.app.polling._classify_liveness", _always_red)
+    await _app_polling._poll(harness.app)
     harness.app.config = AppConfig(
         model="mlx-community/stub-test",
         start_cmd=f"{sys.executable} -c \"print('starting')\"",
@@ -96,8 +97,8 @@ async def test_double_cold_start_is_guarded(
 ) -> None:
     """A second ctrl+s inside a running boot must log, not crash the app."""
     harness = stub_harness
-    monkeypatch.setattr(MlxTuiApp, "_classify_liveness", _always_red)
-    await harness.app._poll()
+    monkeypatch.setattr("mlx_tui.app.polling._classify_liveness", _always_red)
+    await _app_polling._poll(harness.app)
     harness.app.config = AppConfig(start_cmd="sleep 0.5")
     started = threading.Event()
     release = threading.Event()
@@ -164,7 +165,7 @@ async def test_cold_start_with_unhealthy_process_restarts_it(
     """An existing mlx process holding the port is stopped first, not raced."""
     harness = stub_harness
     harness.server.mode = "html"
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     monkeypatch.setattr(
         "mlx_tui.models_pane.process.find_server_process",
         _fake_process_4242,
@@ -200,7 +201,7 @@ async def test_cold_start_with_unhealthy_process_restarts_it(
     assert "[swap] booting" in lines, lines
     assert procs, "restart path must spawn start_cmd"
     assert harness.app.operations.current is OperationKind.IDLE
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert harness.app.server_identity.last_response_model == ROW.repo_id
 
 
@@ -210,7 +211,7 @@ async def test_cold_start_with_process_but_no_stop_cmd_guides(
     """Without stop_cmd an existing process can only be reported, not raced."""
     harness = stub_harness
     harness.server.mode = "html"
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     monkeypatch.setattr(
         "mlx_tui.models_pane.process.find_server_process",
         _fake_process_4242,
@@ -245,8 +246,8 @@ async def test_cold_start_long_running_boot_keeps_ui_live(
 ) -> None:
     """A serving start_cmd never exits; the boot must finish regardless."""
     harness = stub_harness
-    monkeypatch.setattr(MlxTuiApp, "_classify_liveness", _always_red)
-    await harness.app._poll()
+    monkeypatch.setattr("mlx_tui.app.polling._classify_liveness", _always_red)
+    await _app_polling._poll(harness.app)
     harness.app.config = AppConfig(
         model=ROW.repo_id,
         start_cmd=_LONG_BOOT_CMD,
@@ -284,8 +285,8 @@ async def test_cold_start_instant_crash_fails_fast(
     stub_harness: AppHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     harness = stub_harness
-    monkeypatch.setattr(MlxTuiApp, "_classify_liveness", _always_red)
-    await harness.app._poll()
+    monkeypatch.setattr("mlx_tui.app.polling._classify_liveness", _always_red)
+    await _app_polling._poll(harness.app)
 
     def fail_boot(*_args: object, **_kwargs: object) -> ServerProbe:
         raise RuntimeError("[swap] start_cmd exited 3")
@@ -307,9 +308,9 @@ async def test_cold_start_reports_mid_boot_death(
 ) -> None:
     """A foreground server dying mid-boot ends the wait with its exit code."""
     harness = stub_harness
-    monkeypatch.setattr(MlxTuiApp, "_classify_liveness", _always_red)
+    monkeypatch.setattr("mlx_tui.app.polling._classify_liveness", _always_red)
     harness.server.model_id = "other-model"
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     harness.server.mode = "error500"
     harness.app.config = AppConfig(model=ROW.repo_id, start_cmd="server")
     proc = FakeProcess(None)
@@ -351,8 +352,8 @@ async def test_cold_start_timeout_scales_with_model_size(
 ) -> None:
     """Cold boot reuses the scanned row's size for its health deadline."""
     harness = stub_harness
-    monkeypatch.setattr(MlxTuiApp, "_classify_liveness", _always_red)
-    await harness.app._poll()
+    monkeypatch.setattr("mlx_tui.app.polling._classify_liveness", _always_red)
+    await _app_polling._poll(harness.app)
     big_row = ModelRow("mlx-community/big-model", 8 * 2**30, "4bit", ("def456",))
     harness.app.query_one(ModelsPane)._populate([ROW, big_row])
     harness.app.config = AppConfig(model=big_row.repo_id, start_cmd="true")
@@ -394,7 +395,7 @@ async def test_invalid_start_config_runs_no_stop(
     harness = stub_harness
     harness.server.mode = "ok"
     harness.server.model_id = ROW.repo_id
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     harness.app.config = AppConfig(
         start_cmd='prog "unterminated',
         stop_cmd=f"{sys.executable} -c \"print('bye')\"",
@@ -426,7 +427,7 @@ async def test_shell_mode_rejects_brace_placeholder(
 ) -> None:
     harness = stub_harness
     harness.server.mode = "ok"
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     harness.app.config = AppConfig(
         start_cmd="mlx_lm.server --model {model} --port 8080",
         stop_cmd=f"{sys.executable} -c \"print('bye')\"",
@@ -448,7 +449,7 @@ async def test_shell_mode_requires_env_reference(
 ) -> None:
     harness = stub_harness
     harness.server.mode = "ok"
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     harness.app.config = AppConfig(
         start_cmd="mlx_lm.server --port 8080",
         stop_cmd=f"{sys.executable} -c \"print('bye')\"",
@@ -470,7 +471,7 @@ async def test_shell_mode_restart_completes(
     harness = stub_harness
     harness.server.mode = "ok"
     harness.server.model_id = ROW.repo_id
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     harness.app.config = AppConfig(
         start_cmd=f'{sys.executable} -c "print(\'$MLX_TUI_MODEL\')" --model "$MLX_TUI_MODEL"',
         stop_cmd=f"{sys.executable} -c \"print('bye')\"",
@@ -495,7 +496,7 @@ async def test_failed_boot_terminates_proc_and_restores_controls(
     harness = stub_harness
     harness.server.mode = "ok"
     harness.server.model_id = "other-model"
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     harness.app.config = AppConfig(
         start_cmd=(
             f"{sys.executable} -c "
@@ -543,7 +544,7 @@ async def test_verified_boot_ui_failure_does_not_terminate_server(
 ) -> None:
     """A post-health refresh failure cannot reclaim the verified server."""
     harness = stub_harness
-    monkeypatch.setattr(MlxTuiApp, "_classify_liveness", _always_red)
+    monkeypatch.setattr("mlx_tui.app.polling._classify_liveness", _always_red)
     harness.app.config = AppConfig(model=ROW.repo_id, start_cmd="server")
 
     def fake_execute(  # noqa: PLR0913

@@ -6,24 +6,39 @@ import os
 import shlex
 import subprocess
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from rich.text import Text
 from textual.css.query import NoMatches
-from textual.widgets import Collapsible, RichLog, TabbedContent
+from textual.widgets import Collapsible, RichLog, Static, TabbedContent
 
+import mlx_tui.app.ops as _app_ops
+import mlx_tui.app.polling as _app_polling
+import mlx_tui.compare.render as _compare_render
 from mlx_tui.chat_ui.pane import ChatPane
 from mlx_tui.compare.pane import ComparePane
 from mlx_tui.config import (
+    AppConfig,
     ConfigParseError,
     config_path,
-    parse_config,
-    write_template,
+    resolve_launch,
 )
+from mlx_tui.config_io import ConfigDocument, ConfigWriteError, read_config, save_config
 from mlx_tui.models_pane import ModelsPane
 from mlx_tui.operations import OperationKind
 from mlx_tui.params import ParamsPane
-from mlx_tui.presets import Preset, load_presets
+from mlx_tui.presets import Preset
+
+_RUNTIME_FIELDS = (
+    "runtime_mode",
+    "host",
+    "port",
+    "start_cmd",
+    "stop_cmd",
+    "command_shell",
+    "swap_policy",
+)
 
 
 def _apply_preset(app: Any, preset: Preset) -> None:
@@ -50,29 +65,34 @@ def _apply_preset(app: Any, preset: Preset) -> None:
 
 def _cycle_preset(app: Any, step: int) -> None:
     if not app.presets:
-        app.log_app("no presets — create ~/.config/mlx-tui/presets.toml", "yellow")
+        path = (
+            app.config_document.path
+            if app.config_document is not None
+            else config_path()
+        )
+        app.log_app(f"no presets — add [[preset]] entries to {path}", "yellow")
         return
     app.preset_idx = (app.preset_idx + step) % len(app.presets)
-    app._apply_preset(app.presets[app.preset_idx])
+    _apply_preset(app, app.presets[app.preset_idx])
 
 
 def action_cycle_preset(app: Any) -> None:
-    app._cycle_preset(1)
+    _cycle_preset(app, 1)
 
 
 def action_cycle_preset_back(app: Any) -> None:
-    app._cycle_preset(-1)
+    _cycle_preset(app, -1)
 
 
 def _on_tab_activated(app: Any, event: TabbedContent.TabActivated) -> None:
-    pane = app._chat_pane_or_none()
+    pane = _app_ops._chat_pane_or_none(app)
     if pane is not None:
         pane._follow_from = None
         pane._restore_composer_focus = False
     if event.tabbed_content.active == "models":
         app.query_one(ModelsPane).rescan()
     elif event.tabbed_content.active == "metrics":
-        app._refresh_metrics()
+        _app_polling._refresh_metrics(app)
 
 
 def action_toggle_activity(app: Any) -> None:
@@ -126,7 +146,7 @@ def action_toggle_zen(app: Any) -> None:
         tabs.active = previous_tab
         app._zen_previous_tab = None
         app._zen_previous_focus = None
-        chat = app._chat_pane_or_none()
+        chat = _app_ops._chat_pane_or_none(app)
         if chat is not None:
             chat._refresh_composer_hint()
             chat.refresh_zen_info()
@@ -141,7 +161,7 @@ def action_toggle_zen(app: Any) -> None:
     app.zen_mode = True
     base_screen.set_class(True, "zen")
     tabs.active = "chat"
-    chat = app._chat_pane_or_none()
+    chat = _app_ops._chat_pane_or_none(app)
     if chat is not None:
         chat._refresh_composer_hint()
         chat.refresh_zen_info()
@@ -176,7 +196,7 @@ def refresh_activity(app: Any) -> None:
     activity.title = summary.plain
     app.refresh_bindings()
     try:
-        app.query_one(ComparePane)._update_controls()
+        _compare_render._update_controls(app.query_one(ComparePane))
     except NoMatches:
         pass
 
@@ -196,7 +216,7 @@ def log_app(app: Any, message: str, style: str | None = None) -> None:
             severity="error" if style == "red" else "warning",
             markup=False,
         )
-        pane = app._chat_pane_or_none()
+        pane = _app_ops._chat_pane_or_none(app)
         if pane is not None:
             pane.refresh_zen_info()
     app.refresh_activity()
@@ -226,7 +246,7 @@ def check_action(  # noqa: PLR0911
             except NoMatches:
                 return False
             return pane.has_live_comparison and not pane.cancel_requested
-        pane = app._chat_pane_or_none()
+        pane = _app_ops._chat_pane_or_none(app)
         return (
             len(app.screen_stack) == 1
             and pane is not None
@@ -255,49 +275,153 @@ def clear_error(app: Any, source: str) -> None:
     app._last_errors.pop(source, None)
 
 
-def action_edit_config(app: Any) -> None:
-    path = config_path()
-    before = (app.config.host, app.config.port)
-    editor = os.environ.get("EDITOR", "vi")
+def runtime_restart_required(app: Any) -> bool:
+    if app.config_document is None or not app.runtime_services_started:
+        return False
+    pending = resolve_launch(app.config_document.config, app.launch_overrides)
+    return any(
+        getattr(pending, key) != getattr(app.launch_config, key)
+        for key in _RUNTIME_FIELDS
+    )
+
+
+def update_config_document(app: Any, document: ConfigDocument) -> None:
+    app.config_document = document
+    app.config_error = None
+    app.presets = list(document.presets)
+    app.preset_idx = -1
+    restart = runtime_restart_required(app)
+    if app.is_mounted:
+        app.query_one("#config-notice", Static).display = restart
+    if restart:
+        app.log_app(
+            "Restart required — restart mlx-tui to apply runtime settings", "yellow"
+        )
+
+
+def can_apply_chat_defaults(app: Any) -> bool:
+    pane = _app_ops._chat_pane_or_none(app)
+    return (
+        app.runtime_services_started
+        and app.config_document is not None
+        and not any(i.severity == "error" for i in app.config_document.issues)
+        and not app.operations.is_busy
+        and pane is not None
+        and not pane.has_live_turn
+        and not pane._read_only
+        and pane._pending_reconcile is None
+    )
+
+
+def apply_chat_defaults(app: Any) -> bool:
+    if not can_apply_chat_defaults(app):
+        return False
+    saved = app.config_document.config
+    config = replace(
+        app.config,
+        **{
+            key: getattr(saved, key)
+            for key in (
+                "model",
+                "system",
+                "temperature",
+                "top_p",
+                "max_tokens",
+                "max_ctx",
+                "seed",
+                "enable_thinking",
+            )
+        },
+    )
+    app.mark_active_profile_modified()
+    app.restore_request_state(config, saved.model)
+    return True
+
+
+def action_settings(app: Any) -> None:
+    if len(app.screen_stack) != 1:
+        return
+    from mlx_tui.settings_screen import SettingsScreen  # noqa: PLC0415
+
+    document = app.config_document
+    error = app.config_error
+    if document is None and error is None:
+        try:
+            document = read_config()
+        except ConfigParseError as exc:
+            error = str(exc)
+
+    def dismissed(result: ConfigDocument | None) -> None:
+        if result is not None:
+            update_config_document(app, result)
+        if not app.runtime_services_started:
+            config = resolve_launch(
+                result.config if result is not None else AppConfig(),
+                app.launch_overrides,
+            )
+            app.needs_setup = False
+            app._start_runtime_services(config)
+
+    app.push_screen(
+        SettingsScreen(
+            document, error=error, first_run=not app.runtime_services_started
+        ),
+        dismissed,
+    )
+
+
+def action_runtime_setup(app: Any) -> None:
+    if len(app.screen_stack) != 1 or not app.runtime_services_started:
+        return
+    from mlx_tui.setup_screen import SetupScreen  # noqa: PLC0415
+
+    app.push_screen(SetupScreen())
+
+
+def action_edit_config(  # noqa: PLR0911
+    app: Any, *, path: Path | None = None, create: bool = False
+) -> ConfigDocument | None:
+    if path is None:
+        path = (
+            app.config_document.path
+            if app.config_document is not None
+            else config_path()
+        )
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR", "vi")
     try:
         editor_argv = shlex.split(editor)
     except ValueError as exc:
         app.log_app(f"config edit failed: {exc.__class__.__name__}: {exc}"[:200], "red")
-        return
+        return None
     if not editor_argv:
         app.log_app("config edit failed: EDITOR is empty", "red")
-        return
+        return None
     try:
         if not path.exists():
-            write_template(path)
+            if not create:
+                app.log_app(
+                    "Open Settings → Open TOML to create the config template", "yellow"
+                )
+                return None
+            save_config(read_config(path), {})
         with app.suspend():
             proc = subprocess.run([*editor_argv, str(path)], check=False)
-    except OSError as exc:
+    except (OSError, ConfigParseError, ConfigWriteError) as exc:
         app.log_app(f"config edit failed: {exc.__class__.__name__}: {exc}"[:200], "red")
-        return
+        return None
     if proc.returncode != 0:
         app.log_app(f"config edit failed: editor exited {proc.returncode}", "red")
-        return
+        return None
     try:
-        new_config = parse_config(path)
+        document = read_config(path)
     except ConfigParseError as exc:
-        # A typo must not silently wipe the session's commands/model;
-        # keep the previous config instead of adopting all-defaults.
         app.log_app(f"config kept — parse failed: {exc}", "red")
-        return
-    app.config = new_config
-    app.mark_active_profile_modified()
-    if new_config.model is not None and new_config.model != app.effective_model():
-        app.select_model(new_config.model)
+        return None
+    update_config_document(app, document)
+    for issue in document.issues:
+        app.log_app(
+            f"config {issue.key}: {issue.message}",
+            "red" if issue.severity == "error" else "yellow",
+        )
     app.log_app("config reloaded")
-    try:
-        pane = app.query_one(ChatPane)
-        pane.apply_config_params(app.config)
-        pane.refresh_context_bar()
-        pane.mark_next_request_dirty()
-    except NoMatches:
-        pass
-    app.presets = load_presets()
-    app.preset_idx = -1
-    if (app.config.host, app.config.port) != before:
-        app.log_app("restart mlx-tui to apply host/port", "yellow")
+    return document

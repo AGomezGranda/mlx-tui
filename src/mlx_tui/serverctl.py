@@ -387,7 +387,7 @@ def warm_load(url: str, repo_id: str, *, timeout_s: float) -> str | None:
     """Synchronous one-token probe-load; raises on any non-2xx/odd body."""
     timeout = httpx.Timeout(
         connect=min(5.0, max(0.1, timeout_s)),
-        read=min(5.0, max(0.1, timeout_s)),
+        read=max(0.1, timeout_s),
         write=5.0,
         pool=5.0,
     )
@@ -405,8 +405,22 @@ def warm_load(url: str, repo_id: str, *, timeout_s: float) -> str | None:
         body: object = response.json()
     except ValueError as exc:
         raise RuntimeError("unexpected probe response") from exc
-    if not isinstance(body, dict) or not body.get("choices"):
+    if not isinstance(body, dict):
         raise RuntimeError("unexpected probe response")
+    choices = body.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise RuntimeError("unexpected probe response")
+    for choice in choices:
+        if not isinstance(choice, dict):
+            raise RuntimeError("unexpected probe response")
+        message = choice.get("message")
+        if (
+            not isinstance(message, dict)
+            or message.get("role") != "assistant"
+            or not isinstance(message.get("content"), str)
+            or choice.get("finish_reason") not in ("stop", "length")
+        ):
+            raise RuntimeError("unexpected probe response")
     raw_model = body.get("model")
     response_model = raw_model if isinstance(raw_model, str) and raw_model else None
     return response_model
@@ -469,7 +483,7 @@ def wait_healthy(  # noqa: PLR0911,PLR0912,PLR0913
                     response_model = warm_load(
                         completion_url,
                         target_model,
-                        timeout_s=remaining,
+                        timeout_s=min(5.0, remaining),
                     )
                 except (httpx.HTTPError, RuntimeError):
                     response_model = None

@@ -7,8 +7,8 @@ The entry point is `mlx_tui.app:main`.
 
 ## Application ownership
 
-`MlxTuiApp` in `src/mlx_tui/app/__init__.py` is the coordinator. It owns the
-polling loop, endpoint/process identity, status bar values, config editing,
+`MlxTuiApp` in `src/mlx_tui/app/app.py` is the coordinator. It owns the
+polling loop, endpoint/process identity, status bar values, Settings,
 preset cycling, cross-pane operation UI, and the shared Activity log.
 Activity is a native Collapsible above the contextual Footer. Its closed
 container clips the allocated RichLog layout so writes still render; the hidden
@@ -76,6 +76,52 @@ health, and listener checks all must agree before the app reports managed
 readiness. Poll discovery can report an ownership mismatch but cannot replace
 the shutdown handle or authorize adoption. `close()` wins pending startup and
 stops/reaps only the retained identity; Attach has no such shutdown authority.
+
+## Configuration ownership
+
+`config.py` owns flat `AppConfig` conversion, validation/ranges, XDG location,
+and `resolve_launch()`. The same resolver combines saved mode/attach endpoint
+with process-lifetime `LaunchOverrides` for startup, previews, and pending
+restart comparisons. Managed defaults to `127.0.0.1:18080`; explicit endpoint
+flags replace only supplied fields. The CLI reads configuration once and
+passes its document and overrides to the app. `--config-path` exits before
+reading configuration or constructing the app and creates no directories.
+
+`config_io.py` owns the immutable `ConfigDocument` disk snapshot, preset source,
+source bytes/validation issues, and the sole production write path. Its private
+TOML document preserves comments and unrelated content while patching only
+edited keys. Save validates before mutation, checks bytes and resolved symlink
+target again under a short advisory lock, then uses `json_util.atomic_write_bytes()`
+for fsynced atomic replacement. Legacy preset import happens only on Save,
+retains its source, and creates an exclusive pre-import config backup. A root
+`preset` key, including an empty array, is authoritative. External writers do
+not honor the lock and can still race in the final compare/replace window.
+
+`app.config_document` is authoritative for saved defaults and presets.
+`app.config` remains the active request/runtime snapshot; presets, coding
+profiles, session restoration, and comparison cleanup may replace it in memory
+but never write the document. `app.launch_config` retains the resolved launch
+runtime settings. Save/Reload update the disk snapshot and preset list while
+preserving the HTTP client, runtime manager, selected model, live controls,
+composer, attachments, and historical request snapshots. Runtime differences
+produce a persistent restart notice; reverting or masking them with preserved
+CLI overrides clears the notice. There is no live reconnection.
+
+`SettingsScreen` owns form edits, inline errors, dirty-discard confirmation,
+Open TOML, and Reload. It reads the disk snapshot independently of active
+controls. Apply copies only the eight saved request fields through
+`restore_request_state()`, marking the active profile modified before session
+dirty capture. A cleared saved model clears explicit selection. Operations,
+read-only sessions, and unresolved reconciliation block Apply, while Save can
+continue. New chat inherits current controls; saved-chat reconciliation stays
+explicit. Runtime setup owns install/recovery operations and navigates to/from
+Settings without stacking the modals.
+
+First-run and invalid-config Settings precede HTTP polling and managed-manager
+construction. The first successful Save initializes services once from the
+resolved saved configuration. Continue defaults initializes once without
+writing; explicit CLI mode flags bypass missing-config onboarding. Corrupt
+documents disable form Save and retain editor/reload repair access.
 
 ## Models and server lifecycle
 
@@ -312,22 +358,6 @@ atomic sibling `choice.json`, then finalized run. Reopen accepts the choice only
 when its run ID and complete decision match the finalized run; corrupt, newer,
 pending, or mismatched files remain visible errors and are never auto-applied.
 
-## Configuration and presets
-
-`config.py` parses the optional TOML file at `$XDG_CONFIG_HOME/mlx-tui/config.toml`
-or `~/.config/mlx-tui/config.toml`. Known values require their declared TOML
-types, numeric controls are clamped, optional `seed`/`enable_thinking` are sent
-only when configured, and invalid files degrade to defaults at
-startup. The editor action creates a commented template when needed, runs a
-shell-split `$EDITOR` while Textual is suspended, and reloads only after a
-successful zero exit and valid TOML parse. Editor launch failures and nonzero
-exits are reported without claiming a reload. Host/port changes require a TUI
-restart.
-
-`presets.py` reads the sibling `presets.toml`; applying a preset updates the
-chat inputs and current config snapshot. Presets are intentionally a flat file
-and `$EDITOR` workflow, not a second management subsystem.
-
 ## Project layout
 
 ```text
@@ -354,7 +384,10 @@ src/mlx_tui/
   operations.py             # UI-free operation lease
   params.py                # parameter input pane and config synchronization
   process.py               # listener-based process identity and memory
-  presets.py                # flat preset loading and application data
+  config.py                # flat values, validation, shared launch resolver
+  config_io.py             # disk snapshots, TOML patches, safe save/import
+  settings_screen.py       # saved defaults form and first-run/repair flow
+  presets.py               # shared preset parsing and application data
   profiles.py              # strict profile/evidence parsing and fingerprints
   search.py                # UI-free Hub/search/download adapters
   search_screen.py         # search UI and acknowledged download lifecycle
@@ -387,7 +420,8 @@ locked dependencies, plus a packaging job on Linux that runs the same smoke
 check. The smoke check builds a fresh wheel and sdist, checks license and
 entry-point metadata, rebuilds a wheel from the extracted sdist, and installs
 both wheels outside the checkout before running `mlx-tui --help`,
-`--version`, diagnostics, and an import-path check.
+`--version`, `--config-path`, diagnostics, and an import-path check. Utility
+checks use disposable XDG roots and assert they remain absent.
 
 Unit/integration gates use the local HTTP stub and cannot prove real-server
 behavior. Installed-package smoke checks (`uv run python

@@ -59,6 +59,32 @@ def test_malformed_config_and_secret_canary_are_not_exported(
     assert secret not in json.dumps(report)
 
 
+@pytest.mark.parametrize(
+    "field",
+    [
+        "port = true",
+        "temperature = nan",
+        'runtime_mode = "SECRET-CANARY"',
+        '[[preset]]\nname = "SECRET-CANARY"\ntop_p = 4',
+    ],
+)
+def test_invalid_config_fields_have_private_malformed_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    path = _config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(field + "\n")
+    report = diagnostics.collect_diagnostics()
+    assert report["config"] == {
+        "present": True,
+        "status": "malformed",
+        "runtime_mode": None,
+    }
+    assert "SECRET-CANARY" not in json.dumps(report)
+    assert list(path.parent.iterdir()) == [path]
+
+
 def test_marker_values_are_allowlisted_and_validated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -158,10 +184,11 @@ def test_cli_diagnostics_runs_before_config_or_app(
     seen: list[Path] = []
     monkeypatch.setattr(sys, "argv", ["mlx-tui", "--diagnostics", str(tmp_path / "x")])
     monkeypatch.setattr("mlx_tui.app.cli.write_diagnostics", seen.append)
-    monkeypatch.setattr(
-        "mlx_tui.app.cli.load_config",
-        lambda: pytest.fail("diagnostics should not load ordinary config"),
-    )
+
+    def forbidden_read(_path: Path) -> None:
+        pytest.fail("diagnostics should not load ordinary config")
+
+    monkeypatch.setattr("mlx_tui.app.cli.read_config", forbidden_read)
 
     app_module.main()
 

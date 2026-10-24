@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import threading
-from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast, override
 
@@ -48,7 +47,6 @@ from mlx_tui.models import (
 from mlx_tui.operations import OperationKind
 from mlx_tui.search import (
     CancelledDownload,
-    HubApi,
     RepoSnapshot,
     download_snapshot,
     exact_repo_id,
@@ -430,23 +428,6 @@ class DiscoverPane(Vertical):
         self._search_generation += 1
         self._populate(self._search_generation, [item.repo_id])
 
-    def _call_list_results(self, api: HubApi, query: str) -> list[str]:
-        hook = getattr(self._host, "discover_list_results", None)
-        if hook is not None:
-            if self._limit != _INITIAL_LIMIT or self._publisher:
-                return hook(
-                    api,
-                    query,
-                    limit=self._limit,
-                    author=self._publisher or None,
-                )
-            return hook(api, query)
-        if self._limit != _INITIAL_LIMIT or self._publisher:
-            return list_results(
-                api, query, limit=self._limit, author=self._publisher or None
-            )
-        return list_results(api, query)
-
     @work(exclusive=True, group="hf-search", thread=True)
     def _run_search(self, query: str, generation: int) -> None:
         key = (query, self._publisher, self._limit)
@@ -455,7 +436,9 @@ class DiscoverPane(Vertical):
             self.app.call_from_thread(self._populate, generation, cached, True)
             return
         try:
-            ids = self._call_list_results(HfApi(), query)
+            ids = list_results(
+                HfApi(), query, limit=self._limit, author=self._publisher or None
+            )
         except Exception as exc:
             self.app.call_from_thread(self._search_failed, generation, exc)
             return
@@ -605,41 +588,12 @@ class DiscoverPane(Vertical):
         self._schedule_metadata(repo_id)
 
     def _schedule_metadata(self, repo_id: str) -> None:
-        hook = getattr(self._host, "discover_schedule_metadata", None)
-        if hook is not None:
-            hook(self, repo_id)
-            return
-        self._schedule_metadata_impl(repo_id)
-
-    def _schedule_metadata_impl(self, repo_id: str) -> None:
         if repo_id in self._inspected or repo_id in self._metadata_pending:
             return
         self._metadata_pending.add(repo_id)
         self._fetch_size(
             repo_id, self._search_generation, self._pinned_revisions.get(repo_id)
         )
-
-    def _call_repo_snapshot(
-        self, api: HubApi, repo_id: str, revision: str | None
-    ) -> RepoSnapshot:
-        hook = getattr(self._host, "discover_repo_snapshot", None)
-        if hook is not None:
-            if revision is None:
-                return hook(api, repo_id)
-            return hook(api, repo_id, revision=revision)
-        if revision is None:
-            return repo_snapshot(api, repo_id)
-        return repo_snapshot(api, repo_id, revision=revision)
-
-    def _call_free_disk_bytes(self) -> int | None:
-        hook = getattr(self._host, "discover_free_disk_bytes", None)
-        return hook() if hook is not None else free_disk_bytes()
-
-    def _call_hf_download(self, repo_id: str, filename: str, revision: str) -> str:
-        hook = getattr(self._host, "discover_hf_hub_download", None)
-        if hook is not None:
-            return hook(repo_id, filename, revision=revision)
-        return hf_hub_download(repo_id, filename, revision=revision)
 
     @work(group="hf-size", thread=True)
     def _fetch_size(
@@ -665,14 +619,8 @@ class DiscoverPane(Vertical):
                 snapshot = RepoSnapshot(revision, files)
                 size = None
                 resolved_revision = revision
-            elif revision is None:
-                snapshot = self._call_repo_snapshot(HfApi(), repo_id, None)
-                size = (
-                    filtered_download_size(snapshot.files) if snapshot.files else None
-                )
-                resolved_revision = snapshot.revision
             else:
-                snapshot = self._call_repo_snapshot(HfApi(), repo_id, revision)
+                snapshot = repo_snapshot(HfApi(), repo_id, revision=revision)
                 size = (
                     filtered_download_size(snapshot.files) if snapshot.files else None
                 )
@@ -697,8 +645,8 @@ class DiscoverPane(Vertical):
             and len(resolved_revision) == 40  # noqa: PLR2004
         ):
             try:
-                config_path = self._call_hf_download(
-                    repo_id, "config.json", resolved_revision
+                config_path = hf_hub_download(
+                    repo_id, "config.json", revision=resolved_revision
                 )
                 config = json.loads(Path(config_path).read_text(encoding="utf-8"))
                 if snapshot is not None:
@@ -707,10 +655,10 @@ class DiscoverPane(Vertical):
                         name == "model.safetensors.index.json"
                         for name, _ in snapshot.files
                     ):
-                        index_path = self._call_hf_download(
+                        index_path = hf_hub_download(
                             repo_id,
                             "model.safetensors.index.json",
-                            resolved_revision,
+                            revision=resolved_revision,
                         )
                         index = read_cached_index(Path(index_path).parent)
                     facts = facts_from_metadata(
@@ -720,9 +668,7 @@ class DiscoverPane(Vertical):
                 pass
         glyph_map: dict[bool | None, str] = {True: "✓", False: "⚠", None: "—"}
         glyph = (
-            glyph_map[fits_disk(size, self._call_free_disk_bytes())]
-            if size is not None
-            else "—"
+            glyph_map[fits_disk(size, free_disk_bytes())] if size is not None else "—"
         )
         self.app.call_from_thread(
             self._fill_size_cell,
@@ -916,7 +862,7 @@ class DiscoverPane(Vertical):
             return
         self._download_lease_owned = True
         size = self._sizes.get(repo_id)
-        free = self._call_free_disk_bytes()
+        free = free_disk_bytes()
         if size is not None and fits_disk(size, free) is False:
             self._set_line(
                 "#dl-progress",
@@ -929,30 +875,6 @@ class DiscoverPane(Vertical):
         self.query_one("#search-input", Input).disabled = True
         table.disabled = True
         self._run_download(repo_id, self._cancel_event, revision)
-
-    def _call_download_snapshot(
-        self,
-        repo_id: str,
-        *,
-        on_progress: Callable[[int, int], None],
-        cancel_event: threading.Event,
-        revision: str | None,
-    ) -> None:
-        hook = getattr(self._host, "discover_download_snapshot", None)
-        if hook is not None:
-            hook(
-                repo_id,
-                on_progress=on_progress,
-                cancel_event=cancel_event,
-                revision=revision,
-            )
-            return
-        download_snapshot(
-            repo_id,
-            on_progress=on_progress,
-            cancel_event=cancel_event,
-            revision=revision,
-        )
 
     @work(exclusive=True, group="hf-download", thread=True)
     def _run_download(
@@ -967,7 +889,7 @@ class DiscoverPane(Vertical):
             self.app.call_from_thread(self._progress_line, repo_id, done, expected)
 
         try:
-            self._call_download_snapshot(
+            download_snapshot(
                 repo_id,
                 on_progress=on_progress,
                 cancel_event=cancel_event,

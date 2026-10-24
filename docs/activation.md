@@ -15,12 +15,20 @@ Install a versioned wheel explicitly and check the installed version:
 ```sh
 uv tool install --python 3.13.1 /absolute/path/to/mlx_tui-<version>-py3-none-any.whl
 mlx-tui --version
+mlx-tui --config-path
+mlx-tui
 ```
 
 Wheel installation is measured separately from managed-runtime installation
 and model downloads. On Apple silicon, the wheel installs MLX-LM and MLX for
 attach-mode server startup. It does not download models or install the pinned
 managed runtime.
+
+Installation and the utility commands above create no configuration. The
+first `mlx-tui` launch opens Settings: choose Attach or Managed, **Save**,
+then select/download a model and start it. Reopen with `Ctrl+G` at any time;
+**Runtime setup** provides installation and recovery after onboarding too.
+See [configuration](configuration.md) for Save, Apply, and restart behavior.
 
 ## Upgrade and rollback
 
@@ -50,6 +58,11 @@ Rollback is separate from upgrade. Stop the new installation and its owned child
 make a separate backup of post-upgrade work, reinstall the retained
 predecessor wheel, and restore the pre-upgrade backup only by explicit
 operator action. Never merge schemas or delete newer work automatically.
+Unified configuration leaves `presets.toml` untouched and, when importing into
+an existing config, creates `config.toml.pre-unification.bak` exclusively.
+Presets edited after import must be copied back to `presets.toml` manually
+for an older app; restoring a backup can discard newer edits. See
+[legacy import and rollback](configuration.md#legacy-import-and-rollback).
 
 ## Private diagnostics
 
@@ -115,16 +128,22 @@ their elapsed time are recorded separately by the later setup flow.
 
 ## First-run setup and ownership
 
-Run `mlx-tui` from any directory. With no config file, the keyboard-first setup
-screen offers **Managed runtime** and **Attach server**. Managed mode is the
-explicit opt-in path; `--managed` and `--attach` are mutually exclusive CLI
-shortcuts. Existing config files remain untouched and keep attach mode unless
-their `runtime_mode` is changed or a flag is supplied.
+Run `mlx-tui` from any directory. With no config file, Settings offers
+**Managed** and **Attach** before initializing runtime services. Save creates
+the file and starts the chosen connection; **Continue defaults**/Escape continues once with
+default attach settings without saving. `--managed` and `--attach` are
+temporary, mutually exclusive CLI shortcuts that bypass onboarding.
+`Ctrl+G` → **Runtime setup** remains available for installation, downloads,
+and recovery. Later runtime edits take effect after restarting the app.
 
 Managed setup installs only under the versioned runtime directory above. It
 does not use `start_cmd` or `stop_cmd`, does not adopt a discovered process,
-and starts the verified runtime with the fixed endpoint
-`127.0.0.1:18080`. Model downloads remain separate from runtime installation.
+and starts the verified runtime at `127.0.0.1:18080` by default. Explicit
+`--host`/`--port` flags override only the supplied fields for this run.
+For example, `mlx-tui --managed --port 8080` explicitly uses port 8080.
+Saved host/port stay available as attach settings and do not change the
+managed default. CLI overrides survive Settings Reload and are never saved.
+Model downloads remain separate from runtime installation.
 Only complete snapshots (tokenizer/config files and all indexed or standalone
 Safetensors weights) can be started offline; partial caches produce a repair or
 download action. Remote model code is not enabled.

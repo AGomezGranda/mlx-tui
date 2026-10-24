@@ -19,7 +19,6 @@ from mlx_tui.attachments import (
     AttachmentSnapshot,
 )
 from mlx_tui.chat import (
-    TurnProgress,
     TurnResult,
 )
 from mlx_tui.chat_turn import ChatTurn, render_session_turn
@@ -28,7 +27,7 @@ from mlx_tui.history.tokens import (
     ContextWindow,
 )
 from mlx_tui.params import ParamsPane
-from mlx_tui.sessions.models import ChatSession, RequestSettings, SessionTurn
+from mlx_tui.sessions.models import ChatSession, RequestSettings
 from mlx_tui.sessions.store import SessionLock
 
 if TYPE_CHECKING:
@@ -220,10 +219,10 @@ class ChatPane(Vertical):
         self.watch(self.screen, "focused", self._focus_changed, init=False)
         self.watch(viewport, "scroll_y", self._scroll_changed, init=False)
         self.watch(viewport, "scroll_target_y", self._scroll_changed, init=False)
-        self._ensure_session()
-        self._refresh_attachment_ui()
-        self._update_save_status()
-        self._update_action_visibility()
+        _chat_persistence._ensure_session(self)
+        _chat_context._refresh_attachment_ui(self)
+        _chat_persistence._update_save_status(self)
+        _chat_persistence._update_action_visibility(self)
         self._refresh_composer_hint()
 
     def refresh_zen_info(self) -> None:
@@ -473,40 +472,13 @@ class ChatPane(Vertical):
                 self._draft_timer.stop()
         except Exception:
             pass
-        self._release_session_lock()
-
-    def _ensure_session(self) -> ChatSession:
-        return _chat_persistence._ensure_session(self)
+        _chat_persistence._release_session_lock(self)
 
     def capture_request_settings(self) -> RequestSettings:
         return _chat_persistence.capture_request_settings(self)
 
     def mark_next_request_dirty(self) -> None:
         return _chat_persistence.mark_next_request_dirty(self)
-
-    def _schedule_draft_save(self, delay: float = 0.25) -> None:
-        return _chat_persistence._schedule_draft_save(self, delay)
-
-    def _draft_timer_fired(self) -> None:
-        return _chat_persistence._draft_timer_fired(self)
-
-    def _save_session_async(self) -> None:
-        return _chat_persistence._save_session_async(self)
-
-    def _has_meaningful_content(self, session: ChatSession) -> bool:
-        return _chat_persistence._has_meaningful_content(self, session)
-
-    def _snapshot_for_save(self) -> ChatSession | None:
-        return _chat_persistence._snapshot_for_save(self)
-
-    async def _save_session_now(self) -> bool:  # noqa: PLR0911, PLR0912, PLR0915
-        return await _chat_persistence._save_session_now(self)
-
-    def _update_save_status(self) -> None:
-        return _chat_persistence._update_save_status(self)
-
-    def _update_action_visibility(self) -> None:
-        return _chat_persistence._update_action_visibility(self)
 
     @property
     def save_failed(self) -> bool:
@@ -516,49 +488,13 @@ class ChatPane(Vertical):
     def is_temporary(self) -> bool:
         return _chat_persistence.is_temporary(self)
 
-    def _get_max_ctx(self) -> int:
-        return _chat_context._get_max_ctx(self)
-
-    def _request_destination(self) -> str:
-        return _chat_context._request_destination(self)
-
     @staticmethod
     def _is_loopback_destination(host: str) -> bool:
         return _chat_context._is_loopback_destination(host)
 
-    def _current_draft(self) -> str:
-        return _chat_context._current_draft(self)
-
-    def _prepare_window(
-        self,
-        draft: str,
-        attachments: tuple[AttachmentSnapshot, ...],
-    ) -> tuple[str, ContextWindow]:
-        return _chat_context._prepare_window(self, draft, attachments)
-
-    def _refresh_attachment_ui(self) -> None:
-        return _chat_context._refresh_attachment_ui(self)
-
-    def _current_window(self) -> tuple[str, ContextWindow] | None:
-        return _chat_context._current_window(self)
-
-    def _included_turn_ids(self, window: ContextWindow) -> tuple[str, ...]:
-        return _chat_context._included_turn_ids(self, window)
-
     @on(Button.Pressed, "#btn-context-preview")
     def _context_preview_pressed(self) -> None:
         return _chat_context._context_preview_pressed(self)
-
-    def _attachment_failed(self, message: str) -> None:
-        return _chat_context._attachment_failed(self, message)
-
-    def _attachment_added(self, snapshot: AttachmentSnapshot) -> None:
-        return _chat_context._attachment_added(self, snapshot)
-
-    def _attachment_picker_finished(
-        self, snapshot: AttachmentSnapshot | None, error: str | None
-    ) -> None:
-        return _chat_context._attachment_picker_finished(self, snapshot, error)
 
     @work(exclusive=True, group="attachment-picker", thread=True)
     def _choose_attachment_worker(self) -> None:
@@ -568,9 +504,6 @@ class ChatPane(Vertical):
     def _add_attachment_pressed(self) -> None:
         return _chat_context._add_attachment_pressed(self)
 
-    def _selected_attachment(self) -> tuple[int, AttachmentSnapshot] | None:
-        return _chat_context._selected_attachment(self)
-
     @on(Button.Pressed, "#btn-inspect-attachment")
     def _inspect_attachment_pressed(self) -> None:
         return _chat_context._inspect_attachment_pressed(self)
@@ -578,9 +511,6 @@ class ChatPane(Vertical):
     @on(Button.Pressed, "#btn-remove-attachment")
     def _remove_attachment_pressed(self) -> None:
         return _chat_context._remove_attachment_pressed(self)
-
-    def _send_blocked_reason(self) -> str | None:
-        return _chat_turns._send_blocked_reason(self)
 
     @on(TextArea.Changed, "#chat-input")
     def _on_draft_changed(self, event: TextArea.Changed) -> None:
@@ -597,9 +527,6 @@ class ChatPane(Vertical):
     @on(Button.Pressed, "#btn-send")
     def _send_pressed(self) -> None:
         return _chat_turns._send_pressed(self)
-
-    def _do_submit(self, raw: str, editor: ChatInput) -> None:  # noqa: PLR0911, PLR0912, PLR0915
-        return _chat_turns._do_submit(self, raw, editor)
 
     def apply_config_params(self, cfg: AppConfig) -> None:
         return _chat_turns.apply_config_params(self, cfg)
@@ -652,142 +579,17 @@ class ChatPane(Vertical):
     ) -> list[str]:
         return _chat_turns._outcome_notices(result, max_tok, excluded_turns)
 
-    def _record_outcome(  # noqa: PLR0913, PLR0917
-        self,
-        model_at_send: str,
-        result: TurnResult,
-        outcome: str,
-        ctx_len_estimate: int,
-        reserved_ctx_len: int,
-        excluded_turns: int,
-    ) -> None:
-        return _chat_turns._record_outcome(
-            self,
-            model_at_send,
-            result,
-            outcome,
-            ctx_len_estimate,
-            reserved_ctx_len,
-            excluded_turns,
-        )
-
-    def _drop_running_attempt(self) -> None:
-        return _chat_turns._drop_running_attempt(self)
-
-    def _update_running_estimates(
-        self,
-        estimated_input: int,
-        reserved_output: int,
-        excluded: int,
-        included_turn_ids: tuple[str, ...],
-    ) -> None:
-        return _chat_turns._update_running_estimates(
-            self, estimated_input, reserved_output, excluded, included_turn_ids
-        )
-
-    def _on_turn_progress(self, progress: TurnProgress) -> None:
-        return _chat_turns._on_turn_progress(self, progress)
-
-    def _merged_progress_tools(self) -> tuple[dict[str, Any], ...]:
-        return _chat_turns._merged_progress_tools(self)
-
-    def _finalize_session_attempt(  # noqa: PLR0913, PLR0917
-        self,
-        outcome: str,
-        answer: str | None = None,
-        reasoning: str | None = None,
-        tool_calls: tuple[dict[str, object], ...] | None = None,
-        response_model: str | None = None,
-        finish_reason: str | None = None,
-        skipped_frames: int | None = None,
-        stream_complete: bool | None = None,
-        prompt_tokens: int | None = None,
-        completion_tokens: int | None = None,
-        cached_prompt_tokens: int | None = None,
-        first_output_s: float | None = None,
-        answer_started_s: float | None = None,
-        total_s: float | None = None,
-        error_category: str | None = None,
-        error_detail: str | None = None,  # noqa: A002
-    ) -> None:
-        return _chat_turns._finalize_session_attempt(
-            self,
-            outcome,
-            answer,
-            reasoning,
-            tool_calls,
-            response_model,
-            finish_reason,
-            skipped_frames,
-            stream_complete,
-            prompt_tokens,
-            completion_tokens,
-            cached_prompt_tokens,
-            first_output_s,
-            answer_started_s,
-            total_s,
-            error_category,
-            error_detail,
-        )
-
-    async def _checkpoint_terminal(self) -> None:
-        return await _chat_turns._checkpoint_terminal(self)
-
     def abort(self) -> None:
         return _chat_turns.abort(self)
 
     async def wait_for_cleanup(self) -> None:
         return await _chat_turns.wait_for_cleanup(self)
 
-    def _commit_success(  # noqa: PLR0913, PLR0917
-        self,
-        pending_user: dict[str, str],
-        full_text: str,
-        stamp: str,
-        notices: list[str],
-        reasoning: str = "",
-        tool_calls: tuple[dict[str, object], ...] = (),
-    ) -> None:
-        return _chat_turns._commit_success(
-            self, pending_user, full_text, stamp, notices, reasoning, tool_calls
-        )
-
-    def _complete_turn_ui(
-        self,
-        full_text: str,
-        stamp: str,
-        notices: list[str],
-        reasoning: str = "",
-        tool_calls: tuple[dict[str, object], ...] = (),
-    ) -> None:
-        return _chat_turns._complete_turn_ui(
-            self, full_text, stamp, notices, reasoning, tool_calls
-        )
-
-    def _record_cancelled(
-        self,
-        model_at_send: str,
-        ctx_len_estimate: int,
-        reserved_ctx_len: int,
-    ) -> None:
-        return _chat_turns._record_cancelled(
-            self, model_at_send, ctx_len_estimate, reserved_ctx_len
-        )
-
     def end_turn(self) -> None:
         return _chat_turns.end_turn(self)
 
-    def _release_session_lock(self) -> None:
-        return _chat_persistence._release_session_lock(self)
-
     async def open_session(self, session_id: str) -> bool:  # noqa: PLR0911, PLR0912, PLR0915
         return await _chat_persistence.open_session(self, session_id)
-
-    def _start_empty_session(self, *, temporary: bool) -> None:
-        return _chat_persistence._start_empty_session(self, temporary=temporary)
-
-    def _confirm_discard(self, proceed: Any) -> None:
-        return _chat_persistence._confirm_discard(self, proceed)
 
     @on(Button.Pressed, "#btn-sessions")
     def _open_picker(self) -> None:
@@ -805,35 +607,17 @@ class ChatPane(Vertical):
     def _clear_pressed(self) -> None:
         return _chat_persistence._clear_pressed(self)
 
-    async def _clear_session(self) -> None:
-        return await _chat_persistence._clear_session(self)
-
     @on(Button.Pressed, "#btn-delete-session")
     def _delete_pressed(self) -> None:
         return _chat_persistence._delete_pressed(self)
-
-    async def _delete_session(self) -> None:
-        return await _chat_persistence._delete_session(self)
-
-    def _last_retryable_turn(self) -> SessionTurn | None:
-        return _chat_persistence._last_retryable_turn(self)
 
     @on(Button.Pressed, "#btn-retry-request")
     def _retry_request_pressed(self) -> None:
         return _chat_persistence._retry_request_pressed(self)
 
-    def _apply_retry_draft(self, turn: SessionTurn) -> None:
-        return _chat_persistence._apply_retry_draft(self, turn)
-
-    def _restore_retry_settings(self, saved: RequestSettings) -> None:
-        return _chat_persistence._restore_retry_settings(self, saved)
-
     @on(Button.Pressed, "#btn-retry-save")
     def _retry_save_pressed(self) -> None:
         return _chat_persistence._retry_save_pressed(self)
-
-    async def _retry_save(self) -> bool:
-        return await _chat_persistence._retry_save(self)
 
     @on(Button.Pressed, "#btn-discard-unsaved")
     def _discard_pressed(self) -> None:
@@ -842,9 +626,6 @@ class ChatPane(Vertical):
     @on(Button.Pressed, "#btn-use-saved")
     def _use_saved_pressed(self) -> None:
         return _chat_persistence._use_saved_pressed(self)
-
-    async def _apply_saved_settings(self, saved: RequestSettings) -> None:
-        return await _chat_persistence._apply_saved_settings(self, saved)
 
     @on(Button.Pressed, "#btn-keep-current")
     def _keep_current_pressed(self) -> None:

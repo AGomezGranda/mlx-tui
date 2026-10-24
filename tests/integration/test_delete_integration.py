@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import mlx_tui.app.polling as _app_polling
 from mlx_tui.chat_ui.widgets import ChatInput
 from mlx_tui.confirm import ConfirmScreen
 from mlx_tui.models import CacheNotFound, ModelRow
@@ -128,7 +129,7 @@ async def test_delete_refuses_selected_model(
     stub_harness: AppHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     harness = stub_harness
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     harness.app.select_model(ROW.repo_id)
     assert harness.app.effective_model() == ROW.repo_id
     await _select_row(harness)

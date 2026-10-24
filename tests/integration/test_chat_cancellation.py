@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
+
 import pytest
 from textual.widgets import Input
 
+import mlx_tui.app.polling as _app_polling
+import mlx_tui.sessions.store as sessions_store
 from mlx_tui.app import MlxTuiApp
+from mlx_tui.chat import TurnProgress
+from mlx_tui.chat_ui import turns
+from mlx_tui.chat_ui.persistence import _save_session_now
 from mlx_tui.chat_ui.widgets import ChatInput
 from mlx_tui.models import ModelRow
 from mlx_tui.operations import OperationKind
+from mlx_tui.sessions.store import load_session, session_dir
 from tests.conftest import AppHarness
 
 
@@ -19,7 +28,7 @@ def _current_op(app: MlxTuiApp) -> OperationKind:
 
 async def test_cancel_closes_stream(harness: AppHarness) -> None:
     harness.server.mode = "slow"
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     inp = harness.app.query_one("#chat-input", ChatInput)
     inp.text = "hi"
     inp.focus()
@@ -48,7 +57,7 @@ async def test_chat_lease_blocks_swap_and_delete_until_cleanup(
     harness: AppHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     harness.server.mode = "slow"
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     models = harness.models_pane()
     models._populate(
         [ModelRow("mlx-community/other-model", 1_000_000_000, "4bit", ("x",))]
@@ -473,3 +482,124 @@ async def test_unmounted_cleanup_releases_lease(
     pane.end_turn()
     assert pane._pending_draft is None
     assert pane._active_turn is None
+
+
+async def test_cancel_during_presend_save_retains_lease_until_write_finishes(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+
+    pane = harness.chat_pane()
+    entered = threading.Event()
+    finish = threading.Event()
+    original_save = sessions_store.save_session
+
+    def blocked_save(session):  # type: ignore[no-untyped-def]
+        if any(turn.outcome == "running" for turn in session.attempts):
+            entered.set()
+            if not finish.wait(timeout=5):
+                raise AssertionError("test did not release write")
+        return original_save(session)
+
+    monkeypatch.setattr(sessions_store, "save_session", blocked_save)
+    inp = harness.app.query_one("#chat-input", ChatInput)
+    pane._on_input_submitted(ChatInput.Submitted(inp, "cancel while saving"))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        pane.abort()
+        await asyncio.sleep(0.05)
+        assert pane.has_live_turn
+        assert _current_op(harness.app) is OperationKind.CHATTING
+        assert inp.disabled
+        assert pane._write_lock.locked()
+    finally:
+        finish.set()
+    assert await harness.wait_for(lambda _a: not pane.has_live_turn)
+    assert _current_op(harness.app) is OperationKind.IDLE
+    assert not inp.disabled
+    assert inp.text == "cancel while saving"
+    assert pane._session is not None
+    reopened = load_session(
+        session_dir() / f"{pane._session.session_id}.json", pane._session_lock
+    )
+    assert reopened.attempts[-1].outcome == "cancelled"
+    assert not any("messages" in request for request in harness.server.requests)
+
+
+async def test_running_checkpoint_preserves_streamed_progress(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+
+    pane = harness.chat_pane()
+    entered = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def stream(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        pane._last_checkpoint = 0.0
+        turns._on_turn_progress(
+            pane,
+            TurnProgress(
+                answer_delta="partial answer",
+                reasoning_delta="partial reasoning",
+                tool_fragments=({"index": 0, "id": "call-1", "arguments": "{"},),
+                response_model=harness.server.model_id,
+            ),
+        )
+        entered.set()
+        await finish.wait()
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(turns, "stream_turn", stream)
+    inp = harness.app.query_one("#chat-input", ChatInput)
+    pane._on_input_submitted(ChatInput.Submitted(inp, "checkpoint me"))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        assert await _save_session_now(pane)
+        assert pane._session is not None
+        reopened = load_session(
+            session_dir() / f"{pane._session.session_id}.json", pane._session_lock
+        )
+        attempt = reopened.attempts[-1]
+        assert attempt.answer == "partial answer"
+        assert attempt.reasoning == "partial reasoning"
+        assert attempt.tool_calls[0]["arguments"] == "{"
+        assert attempt.response_model == harness.server.model_id
+        assert pane._session.attempts[-1].outcome == "running"
+    finally:
+        finish.set()
+    assert await harness.wait_for(lambda _a: not pane.has_live_turn)
+
+
+async def test_cancel_during_terminal_save_preserves_completed_answer(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pane = harness.chat_pane()
+    entered = threading.Event()
+    finish = threading.Event()
+    original_save = sessions_store.save_session
+
+    def blocked_save(session):  # type: ignore[no-untyped-def]
+        if any(turn.outcome == "success" for turn in session.attempts):
+            entered.set()
+            if not finish.wait(timeout=5):
+                raise AssertionError("test did not release write")
+        return original_save(session)
+
+    monkeypatch.setattr(sessions_store, "save_session", blocked_save)
+    inp = harness.app.query_one("#chat-input", ChatInput)
+    pane._on_input_submitted(ChatInput.Submitted(inp, "finish before cancellation"))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        pane.abort()
+        await asyncio.sleep(0.05)
+        assert _current_op(harness.app) is OperationKind.CHATTING
+    finally:
+        finish.set()
+    assert await harness.wait_for(lambda _a: not pane.has_live_turn)
+    assert _current_op(harness.app) is OperationKind.IDLE
+    assert pane._session is not None
+    reopened = load_session(
+        session_dir() / f"{pane._session.session_id}.json", pane._session_lock
+    )
+    assert reopened.attempts[-1].outcome == "success"
+    assert len(pane.messages) == 2
+    assert pane._active_session_turn_id is None

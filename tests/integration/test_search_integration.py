@@ -9,7 +9,7 @@ import pytest
 from textual.coordinate import Coordinate
 from textual.widgets import Input, Select, Static, TabbedContent
 
-from mlx_tui.discover_pane import DiscoverPane
+from mlx_tui.discover_pane import DiscoverPane, ResultsTable
 from mlx_tui.models_pane import ModelsPane
 from mlx_tui.operations import OperationKind
 from mlx_tui.search import (
@@ -18,7 +18,7 @@ from mlx_tui.search import (
     RepoSnapshot,
     filtered_download_size,
 )
-from mlx_tui.search_screen import ResultsTable, SearchScreen
+from mlx_tui.search_screen import SearchScreen
 from mlx_tui.table import ModelsTable
 from tests.conftest import AppHarness
 
@@ -39,10 +39,10 @@ def _downloading(screen: DiscoverPane) -> str | None:
 async def open_search(
     harness: AppHarness, monkeypatch: pytest.MonkeyPatch
 ) -> DiscoverPane:
-    def _stub_list(api: object, q: str) -> list[str]:
+    def _stub_list(api: object, q: str, **_kwargs: object) -> list[str]:
         return [ROW]
 
-    def _stub_snapshot(api: object, rid: str) -> RepoSnapshot:
+    def _stub_snapshot(api: object, rid: str, **_kwargs: object) -> RepoSnapshot:
         return RepoSnapshot(revision="rev-a", files=tuple(SIZE_PAIRS))
 
     def _stub_free() -> int:
@@ -277,7 +277,9 @@ async def test_enter_downloads_hands_off_and_dismisses(
 
     screen = await open_search(harness, monkeypatch)
 
-    def _stub_expanded_snapshot(_api: object, _repo_id: str) -> RepoSnapshot:
+    def _stub_expanded_snapshot(
+        _api: object, _repo_id: str, **_kwargs: object
+    ) -> RepoSnapshot:
         return RepoSnapshot(revision="rev-a", files=tuple(expanded))
 
     monkeypatch.setattr(
@@ -452,10 +454,10 @@ async def test_low_disk_warns_then_proceeds(
     harness: AppHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # low disk: 1 GB free, size is 2 GB → fits_disk False → warning but proceed
-    def _stub_list_low(api: object, q: str) -> list[str]:
+    def _stub_list_low(api: object, q: str, **_kwargs: object) -> list[str]:
         return [ROW]
 
-    def _stub_snapshot_low(api: object, rid: str) -> RepoSnapshot:
+    def _stub_snapshot_low(api: object, rid: str, **_kwargs: object) -> RepoSnapshot:
         return RepoSnapshot(revision="rev-a", files=tuple(SIZE_PAIRS))
 
     def _stub_free_low() -> int:
@@ -750,10 +752,10 @@ async def test_size_lookup_failure_logs_once_with_repo_id(
 ) -> None:
     screen = await open_search(harness, monkeypatch)
 
-    def failing_snapshot(api: object, rid: str) -> RepoSnapshot:
+    def failing_snapshot(api: object, rid: str, **_kwargs: object) -> RepoSnapshot:
         raise OSError("disk gone")
 
-    def working_snapshot(api: object, rid: str) -> RepoSnapshot:
+    def working_snapshot(api: object, rid: str, **_kwargs: object) -> RepoSnapshot:
         return RepoSnapshot(revision="rev-a", files=tuple(SIZE_PAIRS))
 
     def size_failed(app: object) -> bool:
@@ -800,7 +802,7 @@ async def test_old_search_completion_cannot_replace_new_results(
     old_started = threading.Event()
     release_old = threading.Event()
 
-    def delayed_list(api: object, query: str) -> list[str]:
+    def delayed_list(api: object, query: str, **_kwargs: object) -> list[str]:
         if query == "old":
             old_started.set()
             assert release_old.wait(timeout=5)
@@ -833,7 +835,7 @@ async def test_empty_submit_invalidates_pending_search(
     old_started = threading.Event()
     release_old = threading.Event()
 
-    def delayed_list(api: object, query: str) -> list[str]:
+    def delayed_list(api: object, query: str, **_kwargs: object) -> list[str]:
         old_started.set()
         assert release_old.wait(timeout=5)
         return ["old/repo"]
@@ -862,7 +864,7 @@ async def test_removed_row_ignores_pending_size_completion(
     size_started = threading.Event()
     release_size = threading.Event()
 
-    def delayed_snapshot(api: object, rid: str) -> RepoSnapshot:
+    def delayed_snapshot(api: object, rid: str, **_kwargs: object) -> RepoSnapshot:
         size_started.set()
         assert release_size.wait(timeout=5)
         return RepoSnapshot(revision="rev-old", files=tuple(SIZE_PAIRS))
@@ -891,7 +893,7 @@ async def test_same_repo_new_generation_keeps_new_metadata(
     old_pairs = (("old.safetensors", 2_000_000_000),)
     new_pairs = (("new.safetensors", 3_000_000_000),)
 
-    def snapshots(api: object, rid: str) -> RepoSnapshot:
+    def snapshots(api: object, rid: str, **_kwargs: object) -> RepoSnapshot:
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -922,7 +924,7 @@ async def test_stale_search_error_does_not_replace_current_status(
     old_started = threading.Event()
     release_old = threading.Event()
 
-    def delayed_list(api: object, query: str) -> list[str]:
+    def delayed_list(api: object, query: str, **_kwargs: object) -> list[str]:
         if query == "old":
             old_started.set()
             assert release_old.wait(timeout=5)
@@ -955,7 +957,7 @@ async def test_stale_size_error_does_not_clear_new_metadata(
     release_old = threading.Event()
     calls = 0
 
-    def snapshots(api: object, rid: str) -> RepoSnapshot:
+    def snapshots(api: object, rid: str, **_kwargs: object) -> RepoSnapshot:
         nonlocal calls
         calls += 1
         if calls == 1:

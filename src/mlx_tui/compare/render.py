@@ -50,7 +50,11 @@ def _set_rich_text(pane: Any, selector: str, text: Text) -> None:
 
 
 def _is_busy(pane: Any) -> bool:
-    return pane._comparison_active or pane.tui.operations.is_busy
+    return (
+        not pane.tui.runtime_services_started
+        or pane._comparison_active
+        or pane.tui.operations.is_busy
+    )
 
 
 def refresh_profile_state(pane: Any) -> None:
@@ -69,19 +73,21 @@ def refresh_profile_state(pane: Any) -> None:
     tier = tier_raw or "unknown"
     catalogue_error = pane.tui.profile_error
     if catalogue_error:
-        pane._set_text(
+        _set_text(
+            pane,
             "#comparison-setup-details",
             f"catalogue unavailable: {catalogue_error}",
             "red",
         )
-        pane._set_text("#comparison-details", "", None)
+        _set_text(pane, "#comparison-details", "", None)
     elif not entries:
-        pane._set_text(
+        _set_text(
+            pane,
             "#comparison-setup-details",
             "no pinned profiles available",
             "yellow",
         )
-        pane._set_text("#comparison-details", "", None)
+        _set_text(pane, "#comparison-details", "", None)
     else:
         lines: list[str] = []
         for slot, entry in enumerate(entries):
@@ -92,7 +98,8 @@ def refresh_profile_state(pane: Any) -> None:
             except Exception as exc:
                 cache = f"cache missing: {exc.__class__.__name__}"
             name = "a" if slot == 0 else "b"
-            pane._set_text(
+            _set_text(
+                pane,
                 f"#comparison-candidate-{name}-status",
                 f"{profile.repo_id}\n"
                 f"{'Cached locally' if cache.startswith('cached') else 'Download needed'}"
@@ -105,22 +112,23 @@ def refresh_profile_state(pane: Any) -> None:
         if len(entries) == _PROFILE_COUNT:
             lines.append(f"Order: {entries[0].profile.id} then {entries[1].profile.id}")
         details = "\n".join(lines)
-        pane._set_text(
+        _set_text(
+            pane,
             "#comparison-setup-details",
             "Runs in order: A → B · fixed coding-check-v1",
         )
-        pane._set_text("#comparison-details", details)
-    pane._render_task_details()
-    pane._render_evidence_details()
-    pane._render_saved()
-    pane._update_keep_labels()
-    pane._update_controls()
+        _set_text(pane, "#comparison-details", details)
+    _render_task_details(pane)
+    _render_evidence_details(pane)
+    _render_saved(pane)
+    _update_keep_labels(pane)
+    _update_controls(pane)
 
 
 def _render_task_details(pane: Any) -> None:
     entries = pane.tui.selected_comparison_profiles()
     if not entries:
-        pane._set_text("#comparison-task-details", "no profiles selected")
+        _set_text(pane, "#comparison-task-details", "no profiles selected")
         return
     first = entries[0].profile
     lines = [
@@ -132,7 +140,7 @@ def _render_task_details(pane: Any) -> None:
         f"thinking {first.enable_thinking}",
         "comparison profiles are not editable here",
     ]
-    pane._set_text("#comparison-task-details", "\n".join(lines))
+    _set_text(pane, "#comparison-task-details", "\n".join(lines))
 
 
 def _operator_input_value(pane: Any, selector: str) -> str:
@@ -143,13 +151,13 @@ def _operator_input_value(pane: Any, selector: str) -> str:
 
 
 def _render_evidence_details(pane: Any) -> None:
-    runtime = pane._operator_input_value("#comparison-runtime") or "unknown"
-    install = pane._operator_input_value("#comparison-install") or "unknown"
-    launch = pane._operator_input_value("#comparison-launch") or "unknown"
-    conditions = pane._operator_input_value("#comparison-conditions") or "unknown"
-    isolation = pane._operator_input_value("#comparison-isolation") or "unknown"
+    runtime = _operator_input_value(pane, "#comparison-runtime") or "unknown"
+    install = _operator_input_value(pane, "#comparison-install") or "unknown"
+    launch = _operator_input_value(pane, "#comparison-launch") or "unknown"
+    conditions = _operator_input_value(pane, "#comparison-conditions") or "unknown"
+    isolation = _operator_input_value(pane, "#comparison-isolation") or "unknown"
     try:
-        tier = pane._operator_input_value("#comparison-machine-tier") or "unknown"
+        tier = _operator_input_value(pane, "#comparison-machine-tier") or "unknown"
     except NoMatches:
         tier = "unknown"
     lines = [
@@ -159,7 +167,7 @@ def _render_evidence_details(pane: Any) -> None:
         "operator text is a declaration, not verification; unknown "
         "provenance allows a run but blocks an advantage recommendation",
     ]
-    pane._set_text("#comparison-evidence-details", "\n".join(lines))
+    _set_text(pane, "#comparison-evidence-details", "\n".join(lines))
 
 
 def _render_saved(pane: Any) -> None:
@@ -181,7 +189,7 @@ def _render_saved(pane: Any) -> None:
     result = pane.tui.last_comparison
     if result is not None:
         text += f"\nresult: {pane._result_text(result)}"
-    pane._set_text("#comparison-saved", text)
+    _set_text(pane, "#comparison-saved", text)
 
 
 def _result_text(result: ComparisonResult) -> str:
@@ -217,7 +225,7 @@ def _update_keep_labels(pane: Any) -> None:
 def _update_controls(pane: Any) -> None:  # noqa: PLR0912, PLR0915
     if not pane.is_mounted:
         return
-    busy = pane._is_busy()
+    busy = _is_busy(pane)
     catalogue_broken = pane.tui.profile_error is not None
     readiness = pane._preflight_input is not None and not busy
     result = pane.tui.last_comparison
@@ -323,10 +331,10 @@ def _update_controls(pane: Any) -> None:  # noqa: PLR0912, PLR0915
 
 
 def _clear_result_display(pane: Any) -> None:
-    pane._set_text("#comparison-result-header", "")
-    pane._set_text("#comparison-latency", "")
-    pane._set_text("#comparison-memory", "")
-    pane._set_text("#comparison-trial-detail", "No trial selected")
+    _set_text(pane, "#comparison-result-header", "")
+    _set_text(pane, "#comparison-latency", "")
+    _set_text(pane, "#comparison-memory", "")
+    _set_text(pane, "#comparison-trial-detail", "No trial selected")
     try:
         pane.query_one("#comparison-measurements", DataTable).clear()
     except NoMatches:
@@ -338,7 +346,7 @@ def _clear_result_display(pane: Any) -> None:
 
 
 def _render_result(pane: Any, result: ComparisonResult) -> None:
-    pane._set_rich_text("#comparison-result-header", result_header(result))
+    _set_rich_text(pane, "#comparison-result-header", result_header(result))
     try:
         table = pane.query_one("#comparison-measurements", DataTable)
         table.clear()
@@ -346,8 +354,8 @@ def _render_result(pane: Any, result: ComparisonResult) -> None:
             table.add_row(measurement.plain, left.plain, right.plain, height=2)
     except NoMatches:
         pass
-    pane._set_rich_text("#comparison-latency", latency_text(result))
-    pane._set_rich_text("#comparison-memory", memory_text(result))
+    _set_rich_text(pane, "#comparison-latency", latency_text(result))
+    _set_rich_text(pane, "#comparison-memory", memory_text(result))
     try:
         trials = pane.query_one("#comparison-trials", DataTable)
         trials.clear()
@@ -359,7 +367,8 @@ def _render_result(pane: Any, result: ComparisonResult) -> None:
         pass
     if pane._selected_trial is not None:
         profile_id, repeat_index = pane._selected_trial
-        pane._set_rich_text(
+        _set_rich_text(
+            pane,
             "#comparison-trial-detail",
             trial_detail_text(result, profile_id, repeat_index),
         )
@@ -367,13 +376,14 @@ def _render_result(pane: Any, result: ComparisonResult) -> None:
         failures = [t for t in result.trials if t.error or t.quality_pass is False]
         if failures:
             first = failures[0]
-            pane._set_rich_text(
+            _set_rich_text(
+                pane,
                 "#comparison-trial-detail",
                 trial_detail_text(result, first.profile_id, first.repeat_index),
             )
         else:
-            pane._set_text("#comparison-trial-detail", "No trial selected")
-    pane._set_rich_text("#comparison-progress", progress_text(result))
-    pane._update_keep_labels()
-    pane._render_saved()
-    pane._update_controls()
+            _set_text(pane, "#comparison-trial-detail", "No trial selected")
+    _set_rich_text(pane, "#comparison-progress", progress_text(result))
+    _update_keep_labels(pane)
+    _render_saved(pane)
+    _update_controls(pane)

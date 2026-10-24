@@ -15,6 +15,7 @@ import httpx
 import psutil
 from textual.css.query import NoMatches
 
+import mlx_tui.app.ops as _app_ops
 from mlx_tui import process
 from mlx_tui.comparison.contracts import ComparisonValidationError, parse_loopback_url
 from mlx_tui.config import AppConfig
@@ -83,16 +84,17 @@ def _advance_observation(app: Any) -> int:
 async def _poll(app: Any) -> None:  # noqa: PLR0912
     if (
         app._closing
+        or not app.runtime_services_started
         or app._poll_in_flight
         or app.operations.current in (OperationKind.COMPARING, OperationKind.RESTARTING)
     ):
         return
     app._poll_in_flight = True
-    poll_sequence = app._advance_observation()
+    poll_sequence = _advance_observation(app)
     prev_state = app.status_state
     prev_identity = app.server_identity
     try:
-        probe = await app._fetch_probe()
+        probe = await _fetch_probe(app)
         if (
             poll_sequence != app._observation_seq
             or app.operations.current is OperationKind.RESTARTING
@@ -137,13 +139,14 @@ async def _poll(app: Any) -> None:  # noqa: PLR0912
                 psutil.ZombieProcess,
             ):
                 pass
-        app._render_status(
+        _render_status(
+            app,
             rss_gib=rss_gib,
             snapshot=snapshot,
             ownership_state=ownership_state,
         )
         app.refresh_models()
-        app._refresh_metrics()
+        _refresh_metrics(app)
     except Exception as exc:
         # Unexpected worker fault: keep the last known state instead of
         # fabricating ordinary server downtime, and surface one bounded
@@ -185,7 +188,7 @@ def update_server_identity(
         last_success_at = time.time()
         generation_state = "succeeded"
         if poll_sequence is None:
-            app._advance_observation()
+            _advance_observation(app)
     app.server_identity = replace(
         app.server_identity,
         host=app.host,
@@ -204,14 +207,14 @@ def update_server_identity(
 
 def select_model(app: Any, model: str) -> None:
     """Set the explicit request target and invalidate current-success claims."""
-    app._advance_observation()
+    _advance_observation(app)
     app.server_identity = replace(
         app.server_identity,
         selected_model=model,
         generation_state="unknown",
     )
     app.mark_active_profile_modified()
-    pane = app._chat_pane_or_none()
+    pane = _app_ops._chat_pane_or_none(app)
     if pane is not None and not app._applying_profile:
         pane.mark_next_request_dirty()
 
@@ -219,13 +222,13 @@ def select_model(app: Any, model: str) -> None:
 def restore_request_state(app: Any, config: AppConfig, model: str | None) -> None:
     """Restore the exact pre-comparison request controls as unverified state."""
     app.config = config
-    app._advance_observation()
+    _advance_observation(app)
     app.server_identity = replace(
         app.server_identity,
         selected_model=model,
         generation_state="unknown",
     )
-    pane = app._chat_pane_or_none()
+    pane = _app_ops._chat_pane_or_none(app)
     app._applying_profile = True
     try:
         if pane is not None:
@@ -242,7 +245,7 @@ def record_generation_success(
     app: Any, selected_model: str, response_model: str | None
 ) -> None:
     """Record dated response evidence; identity must match when supplied."""
-    app._advance_observation()
+    _advance_observation(app)
     state = (
         "succeeded"
         if response_model is not None and response_model == selected_model
@@ -264,7 +267,7 @@ def record_generation_success(
 
 
 def record_generation_failure(app: Any, *, cancelled: bool = False) -> None:
-    app._advance_observation()
+    _advance_observation(app)
     app.server_identity = replace(
         app.server_identity,
         generation_state="client_cancelled" if cancelled else "failed",
@@ -420,7 +423,7 @@ def _refresh_metrics(app: Any) -> None:
 
 
 async def _classify_liveness(app: Any) -> str:
-    return (await app._fetch_probe()).state
+    return (await _fetch_probe(app)).state
 
 
 def _render_status(
@@ -461,7 +464,7 @@ def _render_status(
         )
     except NoMatches:
         pass
-    pane = app._chat_pane_or_none()
+    pane = _app_ops._chat_pane_or_none(app)
     if pane is not None:
         pane.refresh_zen_info()
 
@@ -539,29 +542,19 @@ def _record_resource_failure(app: Any, sample: ResourceSample, exc: Exception) -
         pass
 
 
-def sample_and_store(app: Any) -> ResourceSample:
-    """Synchronous capture/sample/append for tests and manual ticks."""
-    op, ident = _capture_sampler_context(app)
-    try:
-        sample = process.sample_resources(ident, op)
-    except Exception as exc:
-        sample = ResourceSample(
-            ts=time.monotonic(),
-            operation=op,
-            process_identity=ident,
-            cpu_percent=None,
-            rss_gib=None,
-            avail_gib=None,
-            total_gib=None,
-            swap_gib=None,
-        )
-        _record_resource_failure(app, sample, exc)
-        return sample
-    if getattr(app, "_resource_first", False):
-        sample = replace(sample, cpu_percent=None)
-        app._resource_first = False
-    _confirm_resource_sample(app, sample)
-    return sample
+def _unknown_sample(
+    operation: OperationKind, ident: ProcessIdentity | None
+) -> ResourceSample:
+    return ResourceSample(
+        ts=time.monotonic(),
+        operation=operation,
+        process_identity=ident,
+        cpu_percent=None,
+        rss_gib=None,
+        avail_gib=None,
+        total_gib=None,
+        swap_gib=None,
+    )
 
 
 def _run_resource_loop(app: Any, stop: threading.Event, interval: float) -> None:
@@ -580,16 +573,7 @@ def _run_resource_loop(app: Any, stop: threading.Event, interval: float) -> None
                 app.call_from_thread(
                     _record_resource_failure,
                     app,
-                    ResourceSample(
-                        ts=time.monotonic(),
-                        operation=OperationKind.IDLE,
-                        process_identity=None,
-                        cpu_percent=None,
-                        rss_gib=None,
-                        avail_gib=None,
-                        total_gib=None,
-                        swap_gib=None,
-                    ),
+                    _unknown_sample(OperationKind.IDLE, None),
                     exc,
                 )
             except Exception:
@@ -599,16 +583,7 @@ def _run_resource_loop(app: Any, stop: threading.Event, interval: float) -> None
         try:
             sample = process.sample_resources(ident, op)
         except Exception as exc:
-            unknown = ResourceSample(
-                ts=time.monotonic(),
-                operation=op,
-                process_identity=ident,
-                cpu_percent=None,
-                rss_gib=None,
-                avail_gib=None,
-                total_gib=None,
-                swap_gib=None,
-            )
+            unknown = _unknown_sample(op, ident)
             try:
                 app.call_from_thread(_record_resource_failure, app, unknown, exc)
             except Exception:

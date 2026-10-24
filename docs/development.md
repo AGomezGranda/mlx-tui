@@ -19,6 +19,21 @@ belong there too. For full-suite timings and a JUnit report, run
 `uv run pytest --durations=20 --junitxml=/tmp/mlx-tui-testing.xml`. Neither
 suite verifies compatibility with an actual MLX provider.
 
+For configuration and Settings work, run the focused boundary checks:
+
+```sh
+uv run pytest tests/unit/test_config.py tests/unit/test_config_io.py tests/integration/test_settings_integration.py tests/integration/test_config_integration.py tests/integration/test_sessions.py tests/integration/test_compare_integration.py tests/unit/test_managed.py
+```
+
+These cover patch conflicts/migration, first-run repair, saved versus active
+requests, Apply guards, session/profile restoration, runtime ownership, CLI
+overrides, and `--config-path`. Installed wheel and rebuilt-sdist smoke checks
+also run `--config-path` with disposable XDG roots and assert no directories
+are created. For UI verification, use disposable config/state roots at 80×24
+and a larger terminal: save/reopen, Open TOML/Reload, invalid input recovery,
+legacy import, and restart after runtime edits. Confirm that saving during a
+chat preserves parameters until Apply.
+
 For a real-server run, start `mlx_lm.server` in another terminal and use
 `uv run mlx-tui --attach --port 8080`. Automated behavior coverage uses a
 local HTTP stub, supplemented by installed-package smoke checks; the stub

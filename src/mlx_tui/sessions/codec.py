@@ -558,10 +558,6 @@ def _session_from_json(document: object, expected_id: str | None = None) -> Chat
     )
 
 
-def _settings_to_json(settings: RequestSettings) -> dict[str, JSONValue]:
-    return cast(dict[str, JSONValue], asdict(settings))
-
-
 def _turn_to_json(turn: SessionTurn) -> dict[str, JSONValue]:
     return {
         **asdict(turn),
@@ -577,7 +573,7 @@ def _session_to_json(session: ChatSession) -> dict[str, JSONValue]:
         "session_id": session.session_id,
         "created_at": session.created_at,
         "updated_at": session.updated_at,
-        "settings": _settings_to_json(session.settings),
+        "settings": cast(dict[str, JSONValue], asdict(session.settings)),
         "draft": session.draft,
         "attachments": _attachments_to_json(session.attachments),
         "attempts": [_turn_to_json(turn) for turn in session.attempts],

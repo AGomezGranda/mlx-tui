@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import argparse
 import signal
-from dataclasses import replace
 from importlib.metadata import version as package_version
 from pathlib import Path
 
 from mlx_tui.app.app import MlxTuiApp
-from mlx_tui.config import ConfigParseError, config_path, load_config, parse_config
+from mlx_tui.config import (
+    AppConfig,
+    ConfigParseError,
+    LaunchOverrides,
+    config_path,
+    resolve_launch,
+)
+from mlx_tui.config_io import read_config
 from mlx_tui.diagnostics import DiagnosticsError, write_diagnostics
 
 
@@ -19,6 +25,9 @@ def main() -> None:
         "--version", action="version", version=package_version("mlx-tui")
     )
     parser.add_argument("--diagnostics", metavar="PATH")
+    parser.add_argument(
+        "--config-path", action="store_true", help="print the config location and exit"
+    )
     parser.add_argument("--host", default=None)
     parser.add_argument("--port", default=None, type=int)
     mode = parser.add_mutually_exclusive_group()
@@ -29,6 +38,19 @@ def main() -> None:
         "--attach", action="store_true", help="use an operator-managed server"
     )
     args = parser.parse_args()
+    if args.config_path:
+        if (
+            args.diagnostics is not None
+            or args.host is not None
+            or args.port is not None
+            or args.managed
+            or args.attach
+        ):
+            parser.error(
+                "--config-path cannot be combined with diagnostics, endpoint or mode flags"
+            )
+        print(config_path())
+        return
     if args.diagnostics is not None:
         if (
             args.host is not None
@@ -44,26 +66,25 @@ def main() -> None:
         return
     path = config_path()
     config_error: str | None = None
-    cfg = load_config()
-    if path.exists():
-        try:
-            parse_config(path)
-        except ConfigParseError as exc:
-            config_error = str(exc)
-    if args.managed:
-        cfg = replace(cfg, runtime_mode="managed")
-    elif args.attach:
-        cfg = replace(cfg, runtime_mode="attach")
-    # CLI flags win only when explicitly passed; otherwise the config file's
-    # values apply (which already carry the hardcoded defaults).
-    host = args.host if args.host is not None else cfg.host
-    port = args.port if args.port is not None else cfg.port
-    if cfg.runtime_mode == "managed" and args.host is None and args.port is None:
-        host, port = "127.0.0.1", 18080
+    document = None
+    try:
+        document = read_config(path)
+    except ConfigParseError as exc:
+        config_error = str(exc)
+    overrides = LaunchOverrides(
+        host=args.host,
+        port=args.port,
+        runtime_mode="managed" if args.managed else "attach" if args.attach else None,
+    )
+    cfg = resolve_launch(
+        document.config if document is not None else AppConfig(), overrides
+    )
     app = MlxTuiApp(
-        host=host,
-        port=port,
+        host=cfg.host,
+        port=cfg.port,
         config=cfg,
+        config_document=document,
+        launch_overrides=overrides,
         needs_setup=not path.exists() and not (args.managed or args.attach),
         config_error=config_error,
     )

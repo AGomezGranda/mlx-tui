@@ -23,16 +23,26 @@ server you run yourself or start an app-owned runtime through the guided setup.
 ## Quick start
 
 You need macOS with Apple silicon, Python 3.13.1, and
-[uv](https://docs.astral.sh/uv/). From this checkout:
+[uv](https://docs.astral.sh/uv/). Install a versioned wheel:
+
+```sh
+uv tool install --python 3.13.1 /absolute/path/to/mlx_tui-<version>-py3-none-any.whl
+mlx-tui
+```
+
+Or run from this checkout:
 
 ```sh
 uv sync
 uv run mlx-tui
 ```
 
-On first run, choose **Attach server** to use the MLX-LM server installed with
-the TUI. Download or select a model, then press **Start**. You can also attach
-to a server you already operate. **Managed runtime** is a separate pinned path
+On first run, Settings opens before connecting. Choose **Attach**, keep
+**Enable local server start** selected to use the bundled MLX-LM server, and
+**Save**. Download or select a model, then press `Ctrl+S` to start it. Reopen
+Settings with `Ctrl+G`; **Runtime setup** provides installation, downloads,
+and recovery. You can also attach to a server you already operate.
+**Managed** is a separate pinned path
 with exact version requirements; see the [activation guide](docs/activation.md).
 
 For a server you run yourself, start it in another terminal, then point the
@@ -54,8 +64,12 @@ mode guide](docs/usage.md#zen-mode) explains its return behavior and compact
 context estimate; the [usage guide](docs/usage.md) covers other controls.
 
 Use `uv run mlx-tui --help` for CLI options. Explicit `--host` and `--port`
-flags override the config file. You can also install a versioned wheel; see
-the [activation guide](docs/activation.md).
+flags override the config file for this run. `mlx-tui --config-path` prints
+the config location without creating it. Settings **Save** changes defaults;
+**Apply chat defaults** changes subsequent requests in the current chat.
+Runtime edits show **Restart required** until the next launch. See the
+[configuration guide](docs/configuration.md) for precedence and migration,
+and the [activation guide](docs/activation.md) for runtime installation.
 
 ## Documentation
 

@@ -9,6 +9,7 @@ from typing import Any
 from textual.css.query import NoMatches
 from textual.widgets import Button, Static
 
+import mlx_tui.app.polling as _app_polling
 from mlx_tui import process
 from mlx_tui.managed.runtime import ManagedRuntime
 from mlx_tui.models import resolve_cached_snapshot
@@ -47,8 +48,11 @@ def set_operation_ui(app: Any, busy: bool) -> None:
 
 async def action_cold_start(app: Any) -> None:  # noqa: PLR0911
     """Check the endpoint, then own a complete cold-start worker lifetime."""
+    if not app.runtime_services_started:
+        app.log_app("Save Settings or continue with defaults first", "yellow")
+        return
     if app.config.runtime_mode == "managed":
-        app._action_managed_start()
+        _action_managed_start(app)
         return
     if not app.config.start_cmd:
         app.log_app("set start_cmd in the config to enable cold start", "yellow")
@@ -64,7 +68,7 @@ async def action_cold_start(app: Any) -> None:  # noqa: PLR0911
     try:
         # The 2s poll leaves startup windows where status_state still carries
         # its initial red against an already-running server.
-        live_state = await app._classify_liveness()
+        live_state = await _app_polling._classify_liveness(app)
         if live_state == "green":
             app.status_state = live_state
             app.log_app("server is already up", "dim")
@@ -74,7 +78,7 @@ async def action_cold_start(app: Any) -> None:  # noqa: PLR0911
         # configured commands instead of racing a second instance onto the port.
         proc_ident = process.find_server_process(app.host, app.port)
         if proc_ident is not None:
-            worker_started = app._restart_config_model(proc_ident.pid)
+            worker_started = _restart_config_model(app, proc_ident.pid)
             return
         if live_state == "amber":
             app.log_app(
@@ -105,6 +109,8 @@ async def action_cold_start(app: Any) -> None:  # noqa: PLR0911
 
 
 def ensure_managed_runtime(app: Any) -> ManagedRuntime:
+    if not app.runtime_services_started or app.config.runtime_mode != "managed":
+        raise RuntimeError("Managed runtime is not active; save Settings and restart")
     if app.managed_runtime is None or app.managed_runtime.closed:
         app.managed_runtime = ManagedRuntime(host=app.host, port=app.port)
     return app.managed_runtime
@@ -117,17 +123,6 @@ def reassess_models(app: Any) -> None:
         pane.reassess(context=pane.applied_context)
     except NoMatches:
         return
-
-
-def set_runtime_mode(app: Any, mode: str) -> None:
-    if mode not in ("attach", "managed"):
-        mode = "attach"
-    from dataclasses import replace  # noqa: PLC0415
-
-    app.config = replace(app.config, runtime_mode=mode)  # type: ignore[arg-type]
-    if mode == "managed":
-        app.ensure_managed_runtime()
-    reassess_models(app)
 
 
 def _managed_target(app: Any) -> object:
@@ -147,7 +142,7 @@ def _managed_target(app: Any) -> object:
 
 
 def _action_managed_start(app: Any) -> None:
-    target = app._managed_target()
+    target = _managed_target(app)
     if not isinstance(target, Path):
         app.log_app(
             "managed setup needs a verified cached model; open Setup to install/download it",
@@ -233,7 +228,7 @@ def _chat_pane_or_none(app: Any) -> Any | None:
 
 
 def cancel_chat_for_swap(app: Any) -> None:
-    pane = app._chat_pane_or_none()
+    pane = _chat_pane_or_none(app)
     if pane is not None:
         pane.abort()
         app.log_app("cancellation requested — retry after cleanup", "yellow")
@@ -257,6 +252,6 @@ def action_cancel_chat(app: Any) -> None:
         except NoMatches:
             pass
         return
-    pane = app._chat_pane_or_none()
+    pane = _chat_pane_or_none(app)
     if pane is not None:
         pane.abort()

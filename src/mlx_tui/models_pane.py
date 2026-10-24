@@ -654,6 +654,9 @@ class ModelsPane(Vertical):
             return
 
     def _reject_if_busy(self) -> bool:
+        if not self.tui.runtime_services_started:
+            self.tui.log_app("Save Settings or continue with defaults first", "yellow")
+            return True
         current = self.tui.operations.current
         if current is OperationKind.IDLE:
             return False
@@ -740,6 +743,8 @@ class ModelsPane(Vertical):
             raise
 
     def _start_managed(self, row: ModelRow) -> None:
+        if self._reject_if_busy():
+            return
         if not self.tui.operations.try_acquire(OperationKind.RESTARTING):
             self._reject_if_busy()
             return
@@ -790,6 +795,8 @@ class ModelsPane(Vertical):
 
     @work(exclusive=True, group="swap", thread=True)
     def run_warm_swap(self, row: ModelRow) -> None:
+        import mlx_tui.app.polling as _app_polling  # noqa: PLC0415
+
         try:
             full_timeout = health_timeout(row.size_on_disk)
             rendered = f"[{self.tui.host}]" if ":" in self.tui.host else self.tui.host
@@ -817,7 +824,7 @@ class ModelsPane(Vertical):
                 f"✓ request succeeded for {row.repo_id}; residency unknown",
             )
             self.tui.call_from_thread(self.tui.refresh_models)
-            self.tui.call_from_thread(self.tui._refresh_metrics)
+            self.tui.call_from_thread(_app_polling._refresh_metrics, self.tui)
         except Exception as exc:
             self.tui.call_from_thread(self.tui.record_generation_failure)
             detail = f"{exc.__class__.__name__}: {exc}"[:200]
@@ -832,6 +839,8 @@ class ModelsPane(Vertical):
 
     @work(exclusive=True, group="swap", thread=True)
     def run_boot(self, plan: BootPlan) -> None:  # noqa: PLR0915
+        import mlx_tui.app.polling as _app_polling  # noqa: PLC0415
+
         def stream(line: str) -> None:
             try:
                 self.tui.call_from_thread(self.tui.log_app, f"[swap] {line}")
@@ -886,7 +895,7 @@ class ModelsPane(Vertical):
                 )
                 self.tui.call_from_thread(self.tui.log_app, plan.success_line)
                 self.tui.call_from_thread(self.tui.refresh_models)
-                self.tui.call_from_thread(self.tui._refresh_metrics)
+                self.tui.call_from_thread(_app_polling._refresh_metrics, self.tui)
             except Exception as exc:
                 detail = f"[swap] UI update failed: {exc}"[:240]
                 try:

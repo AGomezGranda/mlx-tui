@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import replace
+from hashlib import sha256
 from pathlib import Path
 from typing import override
 
@@ -14,6 +15,9 @@ from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Collapsible, Static, TabbedContent
 
+import mlx_tui.app.polling as _app_polling
+import mlx_tui.chat_ui.context as _chat_context
+import mlx_tui.chat_ui.persistence as _chat_persistence
 from mlx_tui.attachments import AttachmentSnapshot
 from mlx_tui.chat_ui.pane import ChatPane
 from mlx_tui.chat_ui.widgets import ChatInput
@@ -56,7 +60,7 @@ async def test_zen_toggle_preserves_chat_and_restores_view(
     composer.select_line(1)
     selection = composer.selection
     attachment = AttachmentSnapshot(
-        Path("notes.txt"), Path("/notes.txt"), 5, "digest", "notes"
+        Path("notes.txt"), Path("/notes.txt"), 5, sha256(b"notes").hexdigest(), "notes"
     )
     pane._draft_attachments = (attachment,)
     params = app.query_one(ParamsPane)
@@ -121,7 +125,7 @@ async def test_zen_toggle_respects_modal_and_stream(  # noqa: PLR0915
         raise AssertionError("unreachable")
 
     monkeypatch.setattr("mlx_tui.chat_ui.turns.stream_turn", controlled_stream)
-    await app._poll()
+    await _app_polling._poll(app)
     pane = harness.chat_pane()
     viewport = pane.query_one("#chat-transcript", VerticalScroll)
     await viewport.mount(*(Static(f"previous turn {index}") for index in range(80)))
@@ -191,7 +195,7 @@ async def test_zen_info_tracks_attempt_context_and_restored_sessions(  # noqa: P
     app = harness.app
     app.config = replace(app.config, max_ctx=512, max_tokens=64)
     pane.apply_config_params(app.config)
-    pane._start_empty_session(temporary=True)
+    _chat_persistence._start_empty_session(pane, temporary=True)
     pane.messages = [
         message
         for _ in range(12)
@@ -201,12 +205,12 @@ async def test_zen_info_tracks_attempt_context_and_restored_sessions(  # noqa: P
         )
     ]
     attachment = AttachmentSnapshot(
-        Path("notes.txt"), Path("/notes.txt"), 5, "digest", "notes"
+        Path("notes.txt"), Path("/notes.txt"), 5, sha256(b"notes").hexdigest(), "notes"
     )
     pane._draft_attachments = (attachment,)
     composer.text = "review this"
     pane.refresh_context_bar()
-    prepared = pane._current_window()
+    prepared = _chat_context._current_window(pane)
     assert prepared is not None
     _, window = prepared
     assert window.reserved_tokens == window.input_tokens + 64
@@ -320,19 +324,25 @@ async def test_zen_blockers_remain_actionable(
 ) -> None:
     pane = harness.chat_pane()
     app = harness.app
-    pane._start_empty_session(temporary=True)
+    _chat_persistence._start_empty_session(pane, temporary=True)
     await harness.pilot.press("ctrl+z")
     await harness.pilot.pause()
     info = pane.query_one("#zen-info", Static)
     pane._draft_attachments = (
-        AttachmentSnapshot(Path("notes.txt"), Path("/notes.txt"), 5, "digest", "notes"),
+        AttachmentSnapshot(
+            Path("notes.txt"),
+            Path("/notes.txt"),
+            5,
+            sha256(b"notes").hexdigest(),
+            "notes",
+        ),
     )
-    pane._refresh_attachment_ui()
+    _chat_context._refresh_attachment_ui(pane)
     await harness.pilot.pause()
     assert "1 file" in _zen_text(pane)
 
     pane._read_only = True
-    pane._update_action_visibility()
+    _chat_persistence._update_action_visibility(pane)
     await harness.pilot.pause()
     assert "read-only" in _zen_text(pane) and "1 file attached" in _zen_text(pane)
     row = pane.query_one("#chat-session-row")
@@ -345,7 +355,7 @@ async def test_zen_blockers_remain_actionable(
     pane._read_only = False
     pane._save_failed = True
     pane._save_error = "disk full · permission denied " * 8
-    pane._update_action_visibility()
+    _chat_persistence._update_action_visibility(pane)
     await harness.pilot.pause()
     assert "disk full" in _zen_text(pane)
     assert "permission denied" in _zen_text(pane)
@@ -362,7 +372,7 @@ async def test_zen_blockers_remain_actionable(
     pane._discard_pressed()
     assert not pane._save_failed
     pane._pending_reconcile = pane.capture_request_settings()
-    pane._update_action_visibility()
+    _chat_persistence._update_action_visibility(pane)
     await harness.pilot.pause()
     assert "settings differ" in _zen_text(pane)
     assert pane.query_one("#chat-reconcile-row").display
@@ -395,7 +405,13 @@ async def test_zen_layout_and_resize(
         selected_model="publisher/" + "very-long-model-name-" * 8,
     )
     pane._draft_attachments = (
-        AttachmentSnapshot(Path("notes.txt"), Path("/notes.txt"), 5, "digest", "notes"),
+        AttachmentSnapshot(
+            Path("notes.txt"),
+            Path("/notes.txt"),
+            5,
+            sha256(b"notes").hexdigest(),
+            "notes",
+        ),
     )
     await harness.pilot.press("ctrl+z")
     await harness.pilot.pause()
@@ -414,7 +430,7 @@ async def test_zen_layout_and_resize(
         assert abs(2 * pane.region.x + pane.region.width - size[0]) <= 1
         assert pane.region.x >= 2 and pane.region.x + pane.region.width <= size[0] - 2
         assert pane.region.y >= 1 and pane.region.y + pane.region.height <= size[1] - 1
-        assert info.region.height == 1
+        assert info.region.height == 1, _zen_text(pane)
         assert transcript.region.y + transcript.region.height <= info.region.y
         assert info.region.y + info.region.height <= composer_row.region.y
         assert composer_row.region.y + composer_row.region.height == (

@@ -173,11 +173,8 @@ def inspect_runtime(path: Path) -> dict[str, JSONValue]:  # noqa: PLR0912
             )
         if source is not None and name == "mlx-lm":
             direct = direct_urls.get(name)
-            commit = (
-                direct.get("vcs_info", {}).get("commit_id")
-                if isinstance(direct, dict)
-                else None
-            )
+            vcs = direct.get("vcs_info") if isinstance(direct, dict) else None
+            commit = vcs.get("commit_id") if isinstance(vcs, dict) else None
             if commit != RUNTIME_COMMIT:
                 raise ManagedRuntimeError(
                     "MLX-LM direct URL commit does not match the pin"

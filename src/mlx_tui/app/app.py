@@ -7,6 +7,8 @@ import threading
 from collections import deque
 from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import override
 
@@ -19,6 +21,7 @@ from textual.widgets import (
     Collapsible,
     Footer,
     RichLog,
+    Static,
     TabbedContent,
     TabPane,
 )
@@ -27,24 +30,26 @@ import mlx_tui.app.ops as _app_ops
 import mlx_tui.app.polling as _app_polling
 import mlx_tui.app.state as _app_state
 import mlx_tui.app.ui as _app_ui
+import mlx_tui.chat_ui.persistence as _chat_persistence
 from mlx_tui.catalog.cache import SearchCache
 from mlx_tui.chat_ui.pane import ChatPane
 from mlx_tui.compare.pane import ComparePane
 from mlx_tui.comparison.contracts import ComparisonResult, SavedChoice
-from mlx_tui.config import AppConfig
+from mlx_tui.config import AppConfig, LaunchOverrides, resolve_launch
+from mlx_tui.config_io import ConfigDocument
 from mlx_tui.history.store import HistoryStore, ResourceSample
 from mlx_tui.managed.runtime import ManagedRuntime
 from mlx_tui.metrics_pane import MetricsPane
 from mlx_tui.models_pane import ModelsPane
 from mlx_tui.operations import OperationCoordinator
-from mlx_tui.presets import Preset, load_presets
+from mlx_tui.presets import Preset
 from mlx_tui.process import ProcessIdentity
 from mlx_tui.profiles import (
     ProfileEntry,
     ProfileValidationError,
     load_coding_profiles,
 )
-from mlx_tui.status import MemorySnapshot, ServerIdentity, ServerProbe
+from mlx_tui.status import ServerIdentity, ServerProbe
 from mlx_tui.status_bar import StatusBar
 
 _COMPACT_HEIGHT = 32
@@ -55,7 +60,7 @@ class MlxTuiApp(App[None]):
         ("ctrl+q", "quit", "Quit"),
         ("escape", "cancel_chat", "Cancel"),
         Binding("ctrl+s", "cold_start", "Start server", show=False),
-        ("ctrl+g", "edit_config", "Config"),
+        ("ctrl+g", "settings", "Settings"),
         Binding("ctrl+n", "cycle_preset", "Preset", show=False),
         Binding("ctrl+o", "cycle_preset_back", "Preset back", show=False),
         ("f2", "toggle_activity", "Activity"),
@@ -85,6 +90,7 @@ class MlxTuiApp(App[None]):
         display: block;
     }
     #app-log { height: 6; padding: 0 2; }
+    #config-notice { display: none; height: auto; color: $warning; padding: 0 1; }
     .compact #app-log { height: 3; }
     .compact #chat-input { height: 2; min-height: 2; }
     .compact #chat-composer-row Button { height: 2; min-height: 2; }
@@ -128,29 +134,26 @@ class MlxTuiApp(App[None]):
 
     _http: httpx.AsyncClient
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
-        host: str = "127.0.0.1",
-        port: int = 8080,
+        host: str | None = None,
+        port: int | None = None,
         config: AppConfig | None = None,
         *,
         needs_setup: bool = False,
         config_error: str | None = None,
+        config_document: ConfigDocument | None = None,
+        launch_overrides: LaunchOverrides | None = None,
     ) -> None:
         super().__init__()
-        if (
-            config is not None
-            and config.runtime_mode == "managed"
-            and (
-                host,
-                port,
-            )
-            == ("127.0.0.1", 8080)
-        ):
-            host, port = "127.0.0.1", 18080
-        self.host = host
-        self.port = port
+        self.config_document = config_document
+        self.launch_overrides = launch_overrides or LaunchOverrides()
+        if config is None and config_document is not None:
+            config = resolve_launch(config_document.config, self.launch_overrides)
         self.config = config if config is not None else AppConfig()
+        self.host = host = host if host is not None else self.config.host
+        self.port = port = port if port is not None else self.config.port
+        self.launch_config = replace(self.config, host=host, port=port)
         self.needs_setup = needs_setup
         self.config_error = config_error
         self._poll_in_flight: bool = False
@@ -171,7 +174,9 @@ class MlxTuiApp(App[None]):
         self._resource_thread: threading.Thread | None = None
         self._resource_first: bool = True
         self._last_ownership_state: str | None = None
-        self.presets: list[Preset] = load_presets()
+        self.presets: list[Preset] = (
+            list(config_document.presets) if config_document is not None else []
+        )
         self.preset_idx: int = -1
         try:
             self.profile_entries = load_coding_profiles()
@@ -186,28 +191,18 @@ class MlxTuiApp(App[None]):
         self.saved_choice_error: str | None = None
         self.active_profile_id: str | None = None
         self.active_profile_modified = False
-        self.setup_preferences: dict[str, str] = {
-            "context_budget": "unknown",
-            "memory_priority": "unknown",
-        }
         self._applying_profile = False
         self._closing = False
         self.zen_mode = False
         self._zen_previous_tab: str | None = None
         self._zen_previous_focus: object | None = None
-        self.managed_runtime = (
-            ManagedRuntime(host=self.host, port=self.port)
-            if self.config.runtime_mode == "managed"
-            else None
-        )
-        self._load_saved_choice()
+        self.runtime_services_started = False
+        self.managed_runtime: ManagedRuntime | None = None
+        _app_state._load_saved_choice(self)
 
     @property
     def swap_busy(self) -> bool:
         return _app_state.swap_busy(self)
-
-    def _load_saved_choice(self) -> None:
-        return _app_state._load_saved_choice(self)
 
     def profile_entry(self, profile_id: str) -> ProfileEntry | None:
         return _app_state.profile_entry(self, profile_id)
@@ -234,6 +229,9 @@ class MlxTuiApp(App[None]):
     @override
     def compose(self) -> ComposeResult:
         yield StatusBar(id="status-bar", port=self.port)
+        yield Static(
+            "Restart required · Ctrl+G for saved runtime settings", id="config-notice"
+        )
         with TabbedContent(initial="models"):
             with TabPane("Models", id="models"):
                 yield ModelsPane(id="models-pane")
@@ -254,13 +252,6 @@ class MlxTuiApp(App[None]):
     def on_mount(self) -> None:
         self.screen.set_class(self.size.height < _COMPACT_HEIGHT, "compact")
         self.query_one("#app-log", RichLog).can_focus = False
-        rendered = f"[{self.host}]" if ":" in self.host else self.host
-        self._http = httpx.AsyncClient(
-            base_url=f"http://{rendered}:{self.port}",
-            timeout=httpx.Timeout(0.5),
-        )
-        self.set_interval(2.0, self._poll)
-        _app_polling.start_resource_sampler(self)
         self.query_one(ModelsPane).rescan()
         try:
             self.query_one(MetricsPane).refresh_metrics()
@@ -270,15 +261,40 @@ class MlxTuiApp(App[None]):
             self.query_one(ChatPane).apply_config_params(self.config)
         except NoMatches:
             pass
-        if self.config_error:
-            self.log_app(f"config needs repair: {self.config_error}", "red")
-        elif self.needs_setup:
-            from mlx_tui.setup_screen import SetupScreen  # noqa: PLC0415
+        invalid = self.config_document is not None and any(
+            issue.severity == "error" for issue in self.config_document.issues
+        )
+        if self.config_error or self.needs_setup or invalid:
+            self.call_after_refresh(self.action_settings)
+        else:
+            self._start_runtime_services(self.launch_config)
+        if self.config_document is not None:
+            for issue in self.config_document.issues:
+                self.log_app(
+                    f"config {issue.key}: {issue.message}",
+                    "red" if issue.severity == "error" else "yellow",
+                )
 
-            self.push_screen(SetupScreen())
-
-    def _refresh_metrics(self) -> None:
-        return _app_polling._refresh_metrics(self)
+    def _start_runtime_services(self, config: AppConfig) -> None:
+        if self.runtime_services_started:
+            return
+        self.config = self.launch_config = config
+        self.host, self.port = config.host, config.port
+        self.server_identity = ServerIdentity(
+            self.host, self.port, selected_model=config.model
+        )
+        if config.runtime_mode == "managed":
+            self.managed_runtime = ManagedRuntime(host=self.host, port=self.port)
+        rendered = f"[{self.host}]" if ":" in self.host else self.host
+        self._http = httpx.AsyncClient(
+            base_url=f"http://{rendered}:{self.port}", timeout=httpx.Timeout(0.5)
+        )
+        self.runtime_services_started = True
+        self.set_interval(2.0, partial(_app_polling._poll, self))
+        _app_polling.start_resource_sampler(self)
+        self.query_one(ChatPane).apply_config_params(config)
+        _app_polling._render_status(self, rss_gib=None)
+        self.reassess_models()
 
     @on(TabbedContent.TabActivated)
     def _on_tab_activated(self, event: TabbedContent.TabActivated) -> None:
@@ -315,7 +331,7 @@ class MlxTuiApp(App[None]):
                 await compare.wait_for_cleanup()
             except Exception as exc:
                 report_shutdown_error("comparison cleanup", exc)
-        chat = self._chat_pane_or_none()
+        chat = _app_ops._chat_pane_or_none(self)
         if chat is not None:
             try:
                 chat.abort()
@@ -345,7 +361,7 @@ class MlxTuiApp(App[None]):
     @override
     async def action_quit(self) -> None:
         """Normal quit: abort/await/flush, offering Retry on save failure."""
-        chat = self._chat_pane_or_none()
+        chat = _app_ops._chat_pane_or_none(self)
         if chat is not None:
             chat.abort()
             await chat.wait_for_cleanup()
@@ -361,7 +377,7 @@ class MlxTuiApp(App[None]):
                         # Retry save; stay open on failure, exit on success.
                         async def _retry_then_exit() -> None:
                             try:
-                                succeeded = await chat._retry_save()
+                                succeeded = await _chat_persistence._retry_save(chat)
                             except Exception:
                                 succeeded = False
                             if succeeded:
@@ -383,15 +399,6 @@ class MlxTuiApp(App[None]):
                 )
                 return
         self.exit()
-
-    async def _fetch_probe(self) -> ServerProbe:
-        return await _app_polling._fetch_probe(self)
-
-    def _advance_observation(self) -> int:
-        return _app_polling._advance_observation(self)
-
-    async def _poll(self) -> None:  # noqa: PLR0912
-        return await _app_polling._poll(self)
 
     def update_server_identity(
         self,
@@ -440,34 +447,11 @@ class MlxTuiApp(App[None]):
     def reassess_models(self) -> None:
         return _app_ops.reassess_models(self)
 
-    def _apply_preset(self, preset: Preset) -> None:
-        return _app_ui._apply_preset(self, preset)
-
-    def _cycle_preset(self, step: int) -> None:
-        return _app_ui._cycle_preset(self, step)
-
     def action_cycle_preset(self) -> None:
         return _app_ui.action_cycle_preset(self)
 
     def action_cycle_preset_back(self) -> None:
         return _app_ui.action_cycle_preset_back(self)
-
-    async def _classify_liveness(self) -> str:
-        return await _app_polling._classify_liveness(self)
-
-    def _render_status(
-        self,
-        *,
-        rss_gib: float | None,
-        snapshot: MemorySnapshot | None = None,
-        ownership_state: str | None = None,
-    ) -> None:
-        return _app_polling._render_status(
-            self,
-            rss_gib=rss_gib,
-            snapshot=snapshot,
-            ownership_state=ownership_state,
-        )
 
     def set_operation_ui(self, busy: bool) -> None:
         return _app_ops.set_operation_ui(self, busy)
@@ -478,25 +462,10 @@ class MlxTuiApp(App[None]):
     def ensure_managed_runtime(self) -> ManagedRuntime:
         return _app_ops.ensure_managed_runtime(self)
 
-    def set_runtime_mode(self, mode: str) -> None:
-        return _app_ops.set_runtime_mode(self, mode)
-
-    def _managed_target(self) -> object:
-        return _app_ops._managed_target(self)
-
-    def _action_managed_start(self) -> None:
-        return _app_ops._action_managed_start(self)
-
     def start_managed(
         self, model: Path, *, on_line: Callable[[str], None]
     ) -> ServerProbe:
         return _app_ops.start_managed(self, model, on_line=on_line)
-
-    def _restart_config_model(self, pid: int) -> bool:
-        return _app_ops._restart_config_model(self, pid)
-
-    def _chat_pane_or_none(self) -> ChatPane | None:
-        return _app_ops._chat_pane_or_none(self)
 
     def cancel_chat_for_swap(self) -> None:
         return _app_ops.cancel_chat_for_swap(self)
@@ -530,5 +499,11 @@ class MlxTuiApp(App[None]):
     def clear_error(self, source: str) -> None:
         return _app_ui.clear_error(self, source)
 
-    def action_edit_config(self) -> None:
+    def action_settings(self) -> None:
+        return _app_ui.action_settings(self)
+
+    def action_runtime_setup(self) -> None:
+        return _app_ui.action_runtime_setup(self)
+
+    def action_edit_config(self) -> ConfigDocument | None:
         return _app_ui.action_edit_config(self)

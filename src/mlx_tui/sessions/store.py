@@ -245,12 +245,8 @@ def load_session(path: Path, lock_handle: SessionLock | None = None) -> ChatSess
         )
     if locked_by_other:
         return session
-    return ChatSession(
-        session_id=session.session_id,
-        created_at=session.created_at,
-        updated_at=session.updated_at,
-        settings=session.settings,
-        draft=session.draft,
+    return replace(
+        session,
         attempts=tuple(
             replace(
                 turn,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -16,6 +17,7 @@ from textual.widgets import (
     Select,
 )
 
+import mlx_tui.compare.render as _compare_render
 from mlx_tui import process
 from mlx_tui.compare.presenter import (
     trial_detail_text,
@@ -47,7 +49,7 @@ def _candidate_changed(pane: Any, event: Select.Changed) -> None:
     slot = 0 if event.select.id == "comparison-profile-a" else 1
     pane._preflight_input = None
     pane.tui.update_comparison_candidate(slot, event.value)
-    pane._update_controls()
+    _compare_render._update_controls(pane)
 
 
 def _setup_input_changed(pane: Any) -> None:
@@ -109,11 +111,11 @@ def _build_comparison_input(pane: Any) -> ComparisonInput:
             raise ComparisonValidationError(
                 "attached server process identity is unavailable"
             )
-        runtime_evidence = pane._operator_value("#comparison-runtime")
-        install_evidence = pane._operator_value("#comparison-install")
-        launch_evidence = pane._operator_value("#comparison-launch")
+        runtime_evidence = _operator_value(pane, "#comparison-runtime")
+        install_evidence = _operator_value(pane, "#comparison-install")
+        launch_evidence = _operator_value(pane, "#comparison-launch")
         provenance = {"source": "operator preflight"}
-        isolation_evidence = pane._operator_value("#comparison-isolation")
+        isolation_evidence = _operator_value(pane, "#comparison-isolation")
     try:
         tier = pane.query_one("#comparison-machine-tier", Input).value.strip()
     except NoMatches:
@@ -130,15 +132,16 @@ def _build_comparison_input(pane: Any) -> ComparisonInput:
         process_identity=identity,
         isolation_evidence=isolation_evidence,
         machine_tier=tier or "unknown",
-        operator_conditions=pane._operator_value("#comparison-conditions"),
+        operator_conditions=_operator_value(pane, "#comparison-conditions"),
         profile_order=(entries[0].profile.id, entries[1].profile.id),
         result_path=comparison_dir() / f"{uuid.uuid4()}.json",
     )
 
 
 def _preflight(pane: Any) -> None:
-    if pane._is_busy():
-        pane._set_text(
+    if _compare_render._is_busy(pane):
+        _compare_render._set_text(
+            pane,
             "#comparison-progress",
             "comparison or another operation is already running",
             "yellow",
@@ -146,20 +149,24 @@ def _preflight(pane: Any) -> None:
         return
     catalogue_error = pane.tui.profile_error
     if catalogue_error is not None:
-        pane._set_text(
+        _compare_render._set_text(
+            pane,
             "#comparison-progress",
             f"catalogue unavailable: {catalogue_error}",
             "red",
         )
         return
     try:
-        pane._preflight_input = pane._build_comparison_input()
+        pane._preflight_input = _build_comparison_input(pane)
     except (OSError, ValueError) as exc:
         pane._preflight_input = None
-        pane._set_text("#comparison-progress", f"readiness failed: {exc}", "red")
-        pane._update_controls()
+        _compare_render._set_text(
+            pane, "#comparison-progress", f"readiness failed: {exc}", "red"
+        )
+        _compare_render._update_controls(pane)
         return
-    pane._set_text(
+    _compare_render._set_text(
+        pane,
         "#comparison-progress",
         (
             "ready · managed child identity retained; "
@@ -169,25 +176,28 @@ def _preflight(pane: Any) -> None:
             "readiness is not proof the runtime applied all settings"
         ),
     )
-    pane._update_controls()
+    _compare_render._update_controls(pane)
 
 
 def _start_comparison(pane: Any) -> None:
-    if pane._is_busy():
-        pane._set_text(
+    if _compare_render._is_busy(pane):
+        _compare_render._set_text(
+            pane,
             "#comparison-progress",
             "comparison or another operation is already running",
             "yellow",
         )
         return
     if pane._preflight_input is None:
-        pane._set_text("#comparison-progress", "run Check readiness first", "yellow")
+        _compare_render._set_text(
+            pane, "#comparison-progress", "run Check readiness first", "yellow"
+        )
         return
     if not pane.tui.operations.try_acquire(OperationKind.COMPARING):
         pane.tui.log_app("operation already in progress", "yellow")
         return
     try:
-        comparison_input = pane._build_comparison_input()
+        comparison_input = _build_comparison_input(pane)
         params = pane.tui.query_one(ParamsPane).read_values()
         previous_config = replace(
             pane.tui.config,
@@ -200,11 +210,11 @@ def _start_comparison(pane: Any) -> None:
         pane._run_started = False
         pane._comparison_active = True
         pane._selected_trial = None
-        pane._clear_result_display()
+        _compare_render._clear_result_display(pane)
         if pane.query_one("#comparison-run", Button).has_focus:
             pane.focus()
         pane.tui.set_operation_ui(True)
-        pane._update_controls()
+        _compare_render._update_controls(pane)
         pane._comparison_worker = pane._run_comparison(
             comparison_input, previous_config, previous_model
         )
@@ -212,25 +222,29 @@ def _start_comparison(pane: Any) -> None:
         pane._comparison_active = False
         pane.tui.operations.release(OperationKind.COMPARING)
         pane.tui.set_operation_ui(False)
-        pane._set_text("#comparison-progress", f"readiness changed: {exc}", "red")
-        pane._update_controls()
+        _compare_render._set_text(
+            pane, "#comparison-progress", f"readiness changed: {exc}", "red"
+        )
+        _compare_render._update_controls(pane)
 
 
 def _on_progress(pane: Any, result: ComparisonResult) -> None:
     pane.tui.last_comparison = result
-    pane._render_result(result)
+    _compare_render._render_result(pane, result)
 
 
-async def _run_comparison(
+async def _run_comparison(  # noqa: PLR0912, PLR0915
     pane: Any,
     comparison_input: ComparisonInput,
     previous_config: AppConfig,
     previous_model: str | None,
 ) -> None:
+    import mlx_tui.app.polling as _app_polling  # noqa: PLC0415
+
     pane._run_started = True
     try:
         task = asyncio.create_task(
-            run_comparison(comparison_input, on_progress=pane._on_progress)
+            run_comparison(comparison_input, on_progress=partial(_on_progress, pane))
         )
         pane._comparison_task = task
         await asyncio.sleep(0)
@@ -238,7 +252,7 @@ async def _run_comparison(
             task.cancel()
         result = await task
         pane.tui.last_comparison = result
-        pane._on_progress(result)
+        _on_progress(pane, result)
         if result.status == "failed":
             pane.tui.log_app(f"comparison failed: {result.error}", "red")
     except asyncio.CancelledError:
@@ -247,45 +261,55 @@ async def _run_comparison(
                 comparison_input.result_path  # type: ignore[arg-type]
             )
             if pane.tui.last_comparison is not None:
-                pane._render_result(pane.tui.last_comparison)
+                _compare_render._render_result(pane, pane.tui.last_comparison)
         except ComparisonPersistenceError:
             pass
-        pane._set_text(
+        _compare_render._set_text(
+            pane,
             "#comparison-progress",
             "cancelled · partial checkpoint retained; engine state unknown",
             "yellow",
         )
     except Exception as exc:
-        pane._set_text(
+        _compare_render._set_text(
+            pane,
             "#comparison-progress",
             f"comparison failed: {exc.__class__.__name__}: {exc}",
             "red",
         )
         pane.tui.log_app(f"comparison failed: {exc}", "red")
     finally:
-        if pane._cancel_requested and pane.tui.managed_runtime is not None:
+        try:
+            if pane._cancel_requested and pane.tui.managed_runtime is not None:
+                try:
+                    await asyncio.to_thread(pane.tui.managed_runtime.stop)
+                except Exception as exc:
+                    pane.tui.log_app(f"managed shutdown failed: {exc}", "red")
+        finally:
+            pane._comparison_task = None
+            pane._comparison_worker = None
+            pane._run_started = False
+            pane._comparison_active = False
+            pane._preflight_input = None
             try:
-                await asyncio.to_thread(pane.tui.managed_runtime.stop)
-            except Exception as exc:
-                pane.tui.log_app(f"managed shutdown failed: {exc}", "red")
-        pane._comparison_task = None
-        pane._comparison_worker = None
-        pane._run_started = False
-        pane._comparison_active = False
-        pane._preflight_input = None
-        pane.tui.restore_request_state(previous_config, previous_model)
-        pane.tui.operations.release(OperationKind.COMPARING)
-        pane.tui.set_operation_ui(False)
-        await pane.tui._poll()
+                try:
+                    pane.tui.restore_request_state(previous_config, previous_model)
+                except Exception as exc:
+                    pane.tui.log_app(f"request state restoration failed: {exc}", "red")
+            finally:
+                pane.tui.operations.release(OperationKind.COMPARING)
+                pane.tui.set_operation_ui(False)
+        await _app_polling._poll(pane.tui)
         pane.refresh_profile_state()
         if pane.tui.last_comparison is not None:
-            pane._render_result(pane.tui.last_comparison)
-        pane._update_controls()
+            _compare_render._render_result(pane, pane.tui.last_comparison)
+        _compare_render._update_controls(pane)
 
 
 def _download(pane: Any) -> None:
-    if pane._is_busy():
-        pane._set_text(
+    if _compare_render._is_busy(pane):
+        _compare_render._set_text(
+            pane,
             "#comparison-progress",
             "download unavailable while another operation runs",
             "yellow",
@@ -296,27 +320,29 @@ def _download(pane: Any) -> None:
         (entry.profile.repo_id, entry.profile.revision)
         for entry in pane.tui.selected_comparison_profiles()
     )
-    pane._update_controls()
+    _compare_render._update_controls(pane)
     pane.app.push_screen(SearchScreen(candidates))
 
 
 async def _restart(pane: Any) -> None:
-    if pane._is_busy():
-        pane._set_text(
+    if _compare_render._is_busy(pane):
+        _compare_render._set_text(
+            pane,
             "#comparison-progress",
             "server start unavailable while another operation runs",
             "yellow",
         )
         return
     pane._preflight_input = None
-    pane._update_controls()
+    _compare_render._update_controls(pane)
     await pane.tui.action_cold_start()
-    pane._update_controls()
+    _compare_render._update_controls(pane)
 
 
 def _open_result(pane: Any) -> None:
-    if pane._is_busy():
-        pane._set_text(
+    if _compare_render._is_busy(pane):
+        _compare_render._set_text(
+            pane,
             "#comparison-open-status",
             "result opening unavailable while another operation runs",
             "yellow",
@@ -327,15 +353,16 @@ def _open_result(pane: Any) -> None:
     except NoMatches:
         return
     if not raw:
-        pane._set_text(
-            "#comparison-open-status", "enter a result path to open", "yellow"
+        _compare_render._set_text(
+            pane, "#comparison-open-status", "enter a result path to open", "yellow"
         )
         return
     opened_path = Path(raw).expanduser()
     try:
         loaded = load_comparison(opened_path)
     except (OSError, ValueError) as exc:
-        pane._set_text(
+        _compare_render._set_text(
+            pane,
             "#comparison-open-status",
             f"could not open result: {exc}",
             "red",
@@ -347,8 +374,9 @@ def _open_result(pane: Any) -> None:
     )
     pane.tui.last_comparison = authoritative
     pane._selected_trial = None
-    pane._render_result(authoritative)
-    pane._set_text(
+    _compare_render._render_result(pane, authoritative)
+    _compare_render._set_text(
+        pane,
         "#comparison-open-status",
         f"opened {loaded.status} result {loaded.run_id}; "
         "saved choice, setup, and active settings unchanged",
@@ -373,7 +401,8 @@ def _trial_selected(pane: Any, event: DataTable.RowSelected) -> None:
     result = pane.tui.last_comparison
     if result is None:
         return
-    pane._set_rich_text(
+    _compare_render._set_rich_text(
+        pane,
         "#comparison-trial-detail",
         trial_detail_text(result, profile_id, repeat_index),
     )

@@ -115,6 +115,16 @@ the context budget.
 
 ## Sessions and attachments
 
+`Ctrl+G` opens Settings for saved defaults. **Save** and **Reload** preserve
+the current model, parameters, system prompt, draft, attachments, and historical
+request snapshots. **Apply chat defaults** explicitly changes subsequent
+requests using saved values; it sends nothing. It is disabled during active
+operations, read-only sessions, and unresolved saved/current reconciliation.
+**New** inherits current controls. Presets and coding profiles also change
+current controls without rewriting saved defaults. Runtime changes show a
+persistent **Restart required** notice until reverted or applied at next launch.
+See [configuration](configuration.md#settings-and-active-work).
+
 Ordinary chat sessions are local versioned JSON snapshots in
 `$XDG_STATE_HOME/mlx-tui/sessions/` (default
 `~/.local/state/mlx-tui/sessions/`). A file appears only after a draft or
@@ -162,9 +172,10 @@ Temporary-session snapshots stay in memory.
 | `F3` | Main screen | Show the endpoint preview |
 | `Ctrl+Z` | Main screen | Enter or exit Zen chat view (`F2` is unavailable in Zen) |
 | `Ctrl+S` | Server startup available | Start the server |
-| `Ctrl+G` | Main screen | Open config in `$EDITOR` and reload on save |
+| `Ctrl+G` | Main screen | Open Settings (saved defaults, Open TOML, Runtime setup) |
 | `Ctrl+N` / `Ctrl+O` | Main screen | Cycle presets forward / back |
 | `Esc` | Active operation | Request cancellation or return from Discover |
+| `Esc` | Settings | Cancel unsaved edits, with discard confirmation if dirty |
 | `Ctrl+Q` | Main screen | Quit |
 
 Download cancellation waits for the worker to acknowledge it, then rescans

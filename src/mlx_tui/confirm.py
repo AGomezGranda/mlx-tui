@@ -35,16 +35,17 @@ class ConfirmScreen(ModalScreen[bool]):
         ("escape", "dismiss_no", "keep"),
     ]
 
-    def __init__(self, prompt: str) -> None:
+    def __init__(self, prompt: str, *, confirm_label: str = "delete") -> None:
         super().__init__()
         self.prompt = prompt
+        self.confirm_label = confirm_label
 
     @override
     def compose(self) -> ComposeResult:
         with Vertical(id="confirm-box"):
             yield Static(self.prompt)
             with Horizontal():
-                yield Button("delete", id="btn-yes")
+                yield Button(self.confirm_label, id="btn-yes")
                 yield Button("keep", id="btn-no")
 
     def action_confirm(self) -> None:

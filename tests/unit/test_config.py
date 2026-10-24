@@ -15,11 +15,10 @@ from mlx_tui.config import (
     ConfigParseError,
     _coerce_float_strict,
     config_path,
-    create_config,
     load_config,
     parse_config,
-    write_template,
 )
+from mlx_tui.config_io import ConfigDocument, ConfigWriteError, read_config, save_config
 
 
 def _write(tmp_path: Path, content: str) -> Path:
@@ -28,20 +27,45 @@ def _write(tmp_path: Path, content: str) -> Path:
     return path
 
 
-def test_write_template_creates_parents_and_default_content(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", ["attach", "managed"])
+@pytest.mark.parametrize(
+    ("host", "port"),
+    [(None, None), ("cli.test", None), (None, 8080), ("cli.test", 9000)],
+)
+@pytest.mark.parametrize("override_mode", [None, "attach", "managed"])
+def test_resolve_launch_precedence(
+    mode: str, host: str | None, port: int | None, override_mode: str | None
+) -> None:
+    from mlx_tui.config import LaunchOverrides, resolve_launch  # noqa: PLC0415
+
+    saved = AppConfig(host="saved.test", port=9090, runtime_mode=mode)  # type: ignore[arg-type]
+    overrides = LaunchOverrides(host, port, override_mode)  # type: ignore[arg-type]
+    resolved = resolve_launch(saved, overrides)
+    effective_mode = override_mode or mode
+    assert resolved.runtime_mode == effective_mode
+    assert resolved.host == (
+        host or ("127.0.0.1" if effective_mode == "managed" else "saved.test")
+    )
+    assert resolved.port == (
+        port if port is not None else (18080 if effective_mode == "managed" else 9090)
+    )
+    assert saved == AppConfig(host="saved.test", port=9090, runtime_mode=mode)  # type: ignore[arg-type]
+
+
+def test_save_new_config_creates_parents_and_template(tmp_path: Path) -> None:
     path = tmp_path / "sub" / "config.toml"
 
-    write_template(path)
+    save_config(read_config(path), {})
 
     assert path.exists()
     assert path.read_bytes().startswith(b"# mlx-tui config")
     assert b'start_cmd = "mlx_lm.server --port 8080"' in path.read_bytes()
 
 
-def test_write_template_parses_as_all_defaults(tmp_path: Path) -> None:
+def test_saved_template_parses_as_all_defaults(tmp_path: Path) -> None:
     path = tmp_path / "sub" / "config.toml"
 
-    write_template(path)
+    save_config(read_config(path), {})
 
     # Every line is commented out, so parsing yields all-default values.
     assert parse_config(path) == AppConfig()
@@ -49,6 +73,15 @@ def test_write_template_parses_as_all_defaults(tmp_path: Path) -> None:
 
 def test_missing_file_yields_all_defaults(tmp_path: Path) -> None:
     assert load_config(tmp_path / "absent.toml") == AppConfig()
+
+
+def test_invalid_utf8_uses_config_recovery(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_bytes(b'host = "\xff"')
+    with pytest.raises(ConfigParseError) as caught:
+        parse_config(path)
+    assert isinstance(caught.value.__cause__, UnicodeDecodeError)
+    assert load_config(path) == AppConfig()
 
 
 def test_string_keys_round_trip(tmp_path: Path) -> None:
@@ -93,15 +126,19 @@ def test_runtime_mode_defaults_to_attach_and_accepts_managed(
     )
 
 
-def test_create_config_is_atomic_and_does_not_overwrite_existing_file(
+def test_save_missing_snapshot_does_not_overwrite_late_creation(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "nested" / "config.toml"
 
-    assert create_config(path, runtime_mode="managed", host="127.0.0.1", port=18080)
+    document = read_config(path)
+    save_config(
+        document, {"runtime_mode": "managed", "host": "127.0.0.1", "port": 18080}
+    )
     original = path.read_text()
     assert 'runtime_mode = "managed"' in original
-    assert not create_config(path, runtime_mode="attach", host="0.0.0.0", port=9)
+    with pytest.raises(ConfigWriteError, match="Reload"):
+        save_config(document, {"runtime_mode": "attach", "host": "0.0.0.0", "port": 9})
     assert path.read_text() == original
     assert load_config(_write(tmp_path, 'runtime_mode = "other"\n')).runtime_mode == (
         "attach"
@@ -110,7 +147,15 @@ def test_create_config_is_atomic_and_does_not_overwrite_existing_file(
 
 def test_new_attach_config_can_start_bundled_server(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
-    assert create_config(path, runtime_mode="attach", host="127.0.0.1", port=8081)
+    save_config(
+        read_config(path),
+        {
+            "runtime_mode": "attach",
+            "host": "127.0.0.1",
+            "port": 8081,
+            "start_cmd": "mlx_lm.server --port 8081",
+        },
+    )
     assert load_config(path).start_cmd == "mlx_lm.server --port 8081"
 
 
@@ -203,6 +248,54 @@ def test_config_path_falls_back_to_home_config(
     assert config_path() == Path.home() / ".config" / "mlx-tui" / "config.toml"
 
 
+def test_config_path_flag_has_no_side_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "absent"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(root))
+    monkeypatch.setattr(sys, "argv", ["mlx-tui", "--config-path"])
+
+    def unexpected(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("--config-path must not read config, construct the app or diagnose")
+
+    monkeypatch.setattr("mlx_tui.app.cli.read_config", unexpected)
+    monkeypatch.setattr("mlx_tui.app.cli.MlxTuiApp", unexpected)
+    monkeypatch.setattr("mlx_tui.app.cli.write_diagnostics", unexpected)
+    app_main()
+    assert capsys.readouterr().out == f"{root / 'mlx-tui' / 'config.toml'}\n"
+    assert not root.exists()
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--diagnostics", "report.json"],
+        ["--managed"],
+        ["--attach"],
+        ["--host", "example.test"],
+        ["--port", "8080"],
+    ],
+)
+def test_config_path_flag_rejects_other_actions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    flags: list[str],
+) -> None:
+    root = tmp_path / "absent"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(root))
+    monkeypatch.setattr(sys, "argv", ["mlx-tui", "--config-path", *flags])
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit) as caught:
+        app_main()
+    assert caught.value.code == 2
+    assert "cannot be combined" in capsys.readouterr().err
+    assert not root.exists()
+    assert not (tmp_path / "report.json").exists()
+
+
 def test_default_max_ctx_is_8000() -> None:
     assert AppConfig().max_ctx == 8192
 
@@ -282,10 +375,10 @@ def test_command_shell_wrong_type_degrades_to_false(
     assert cfg.command_shell is False
 
 
-def test_write_template_mentions_command_shell(tmp_path: Path) -> None:
+def test_saved_template_mentions_command_shell(tmp_path: Path) -> None:
     path = tmp_path / "sub" / "config.toml"
 
-    write_template(path)
+    save_config(read_config(path), {})
 
     content = path.read_bytes()
     assert b"command_shell" in content
@@ -333,7 +426,12 @@ def _stub_main(
 ) -> dict[str, object]:
     seen: dict[str, object] = {}
     monkeypatch.setattr(sys, "argv", argv)
-    monkeypatch.setattr("mlx_tui.app.cli.load_config", lambda: cfg)
+    document = replace(read_config(), config=cfg)
+
+    def fake_read(_path: Path) -> ConfigDocument:
+        return document
+
+    monkeypatch.setattr("mlx_tui.app.cli.read_config", fake_read)
 
     def fake_run(self: MlxTuiApp) -> None:
         seen["app"] = self
@@ -350,7 +448,7 @@ def test_main_uses_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(app, MlxTuiApp)
     assert app.host == "127.0.0.1"
     assert app.port == 8080
-    assert app.config is cfg
+    assert app.config == cfg
 
 
 def test_main_explicit_host_port_win_over_config(
@@ -365,6 +463,59 @@ def test_main_explicit_host_port_win_over_config(
     assert isinstance(app, MlxTuiApp)
     assert app.host == "0.0.0.0"
     assert app.port == 1234
+
+
+@pytest.mark.parametrize(
+    "flags,expected",
+    [
+        (["--managed"], ("127.0.0.1", 18080)),
+        (["--managed", "--host", "cli.test"], ("cli.test", 18080)),
+        (["--managed", "--port", "8080"], ("127.0.0.1", 8080)),
+        (["--attach"], ("saved.test", 9090)),
+    ],
+)
+def test_main_reads_once_and_resolves_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    flags: list[str],
+    expected: tuple[str, int],
+) -> None:
+    path = _write(tmp_path, 'host = "saved.test"\nport = 9090\n')
+    document = read_config(path)
+    seen = _stub_main(monkeypatch, ["mlx-tui", *flags], document.config)
+    calls: list[Path] = []
+
+    def read_once(path: Path) -> ConfigDocument:
+        calls.append(path)
+        return document
+
+    monkeypatch.setattr("mlx_tui.app.cli.read_config", read_once)
+    app_main()
+    app = seen["app"]
+    assert isinstance(app, MlxTuiApp)
+    assert (app.host, app.port) == expected
+    assert (app.launch_config.host, app.launch_config.port) == expected
+    assert app.config_document is document
+    assert len(calls) == 1
+    assert path.read_bytes() == document.source
+
+
+def test_app_document_resolves_endpoint_without_constructor_rewrite(
+    tmp_path: Path,
+) -> None:
+    path = _write(tmp_path, 'runtime_mode = "managed"\nport = 9090\n')
+    app = MlxTuiApp(config_document=read_config(path))
+    try:
+        assert (app.host, app.port) == ("127.0.0.1", 18080)
+        explicit = MlxTuiApp(host="127.0.0.1", port=8080, config=app.config)
+        try:
+            assert explicit.port == 8080
+        finally:
+            if explicit.managed_runtime is not None:
+                explicit.managed_runtime.close()
+    finally:
+        if app.managed_runtime is not None:
+            app.managed_runtime.close()
 
 
 def test_main_help_exits_without_launch(

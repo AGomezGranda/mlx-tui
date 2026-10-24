@@ -20,6 +20,9 @@ from textual.widgets import (
 )
 from textual.widgets._data_table import Coordinate
 
+import mlx_tui.app.polling as _app_polling
+import mlx_tui.compare.decisions as _compare_decisions
+import mlx_tui.compare.render as _compare_render
 from mlx_tui.app import MlxTuiApp
 from mlx_tui.chat_ui.widgets import ChatInput
 from mlx_tui.compare.pane import ComparePane
@@ -31,6 +34,8 @@ from mlx_tui.comparison.store import (
 )
 from mlx_tui.comparison.summary import _summary
 from mlx_tui.config import AppConfig
+from mlx_tui.config_io import read_config
+from mlx_tui.discover_pane import DiscoverPane
 from mlx_tui.operations import OperationKind
 from mlx_tui.process import ProcessIdentity
 from mlx_tui.search_screen import SearchScreen
@@ -102,6 +107,12 @@ async def test_compare_keep_and_next_chat_preserve_state_and_exact_settings(
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     _stub_comparison_preflight(harness, monkeypatch, tmp_path)
 
+    config_path = tmp_path / "config.toml"
+    config_path.write_text('temperature = 0.9\nsystem = "disk defaults"\n')
+    document = read_config(config_path)
+    harness.app.config_document = document
+    active = harness.chat_pane().capture_request_settings()
+
     async def complete(
         value: comparison.ComparisonInput,
         *,
@@ -131,12 +142,16 @@ async def test_compare_keep_and_next_chat_preserve_state_and_exact_settings(
     )
     assert harness.chat_pane().messages == original_messages
     assert draft.text == "draft stays"
+    assert harness.chat_pane().capture_request_settings() == active
+    assert harness.app.config_document is document
 
     pane._keep_a()
     profile = harness.app.last_comparison.comparison.profiles[0].profile  # type: ignore[union-attr]
     assert harness.app.active_profile_id == profile.id
     assert harness.app.config.seed == profile.seed
     assert harness.app.config.enable_thinking == profile.enable_thinking
+    assert harness.app.config_document is document
+    assert config_path.read_bytes() == document.source
     assert harness.app.saved_choice is not None
     assert choice_is_committed(harness.app.saved_choice)
 
@@ -194,20 +209,20 @@ async def test_comparison_owns_pair_and_suppresses_poll_until_one_cleanup_refres
 
     polls = 0
 
-    async def fetch() -> ServerProbe:
+    async def fetch(_app: MlxTuiApp) -> ServerProbe:
         nonlocal polls
         polls += 1
         return ServerProbe(state="green", model_id=None)
 
     monkeypatch.setattr("mlx_tui.compare.workflow.run_comparison", blocked)
-    monkeypatch.setattr(harness.app, "_fetch_probe", fetch)
+    monkeypatch.setattr("mlx_tui.app.polling._fetch_probe", fetch)
     pane._preflight()
     pane._start_comparison()
     await asyncio.wait_for(entered.wait(), timeout=2)
     assert harness.app.operations.current is OperationKind.COMPARING
     assert harness.app.query_one("#chat-input", ChatInput).disabled
     assert harness.app.query_one("#models-table").disabled
-    await harness.app._poll()
+    await _app_polling._poll(harness.app)
     assert polls == 0
     finish.set()
     assert await harness.wait_for(
@@ -315,7 +330,7 @@ async def test_populated_result_renders_measurements_and_failures(
     pane._preflight()
     result = _populated_completed_result(harness, tmp_path)
     harness.app.last_comparison = result
-    pane._render_result(result)
+    _compare_render._render_result(pane, result)
     await harness.pilot.pause()
 
     header = pane.query_one("#comparison-result-header", Static)
@@ -355,7 +370,7 @@ async def test_changed_setup_cannot_relabel_prior_result(
     pane._preflight()
     result = _populated_completed_result(harness, tmp_path)
     harness.app.last_comparison = result
-    pane._render_result(result)
+    _compare_render._render_result(pane, result)
     await harness.pilot.pause()
     before = str(pane.query_one("#comparison-result-header", Static).render())
     keep_before = str(pane.query_one("#comparison-keep-a", Button).label)
@@ -398,7 +413,7 @@ async def test_busy_guards_block_decisions_and_open(
     pane._preflight()
     result = _populated_completed_result(harness, tmp_path)
     harness.app.last_comparison = result
-    pane._render_result(result)
+    _compare_render._render_result(pane, result)
     await harness.pilot.pause()
 
     entered = asyncio.Event()
@@ -427,7 +442,7 @@ async def test_busy_guards_block_decisions_and_open(
     assert not pane.query_one("#comparison-cancel", Button).disabled
 
     saved_before = harness.app.saved_choice
-    pane._commit_decision("keep", 0)
+    _compare_decisions._commit_decision(pane, "keep", 0)
     assert harness.app.saved_choice == saved_before
     pane.query_one("#comparison-open-path", Input).value = "/tmp/nope.json"
     # Direct open during busy must not replace the displayed result.
@@ -447,7 +462,7 @@ async def test_busy_guards_block_decisions_and_open(
     await harness.pilot.pause()
     assert pane.query_one("#comparison-keep-a", Button).disabled
     assert pane.query_one("#comparison-open-result", Button).disabled
-    pane._commit_decision("keep", 0)
+    _compare_decisions._commit_decision(pane, "keep", 0)
     assert harness.app.saved_choice == saved_before
     harness.app.operations.release(OperationKind.CHATTING)
     harness.app.refresh_activity()
@@ -463,7 +478,7 @@ async def test_save_then_failed_apply_is_truthful(
     pane._preflight()
     result = _populated_completed_result(harness, tmp_path)
     harness.app.last_comparison = result
-    pane._render_result(result)
+    _compare_render._render_result(pane, result)
     pane.query_one("#comparison-reason", Input).value = "prefer A"
     await harness.pilot.pause()
 
@@ -494,7 +509,7 @@ async def test_open_completed_partial_and_corrupt_preserves_state(
     harness.app.saved_choice = None
     harness.app.active_profile_id = None
     setup_before = harness.app.comparison_profile_ids
-    pane._render_result(completed)
+    _compare_render._render_result(pane, completed)
     await harness.pilot.pause()
 
     partial_input = pane._preflight_input
@@ -606,13 +621,13 @@ async def test_comparison_layout_adapts_and_reveals_results(
     pane._preflight()
     result = _populated_completed_result(harness, tmp_path)
     harness.app.last_comparison = result
-    pane._render_result(result)
+    _compare_render._render_result(pane, result)
     await harness.pilot.pause()
     assert pane.query_one("#comparison-results").display
     assert not pane.query_one("#comparison-empty").display
     assert pane.query_one("#comparison-decision").display
     harness.app.last_comparison = replace(result, status="failed")
-    pane._render_result(harness.app.last_comparison)
+    _compare_render._render_result(pane, harness.app.last_comparison)
     assert not pane.query_one("#comparison-decision").display
 
 
@@ -620,10 +635,10 @@ async def test_compare_download_uses_modal_pinned_discovery_and_returns(
     harness: AppHarness,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def no_metadata(_screen: SearchScreen, _repo_id: str) -> None:
+    def no_metadata(_screen: DiscoverPane, _repo_id: str) -> None:
         return
 
-    monkeypatch.setattr(SearchScreen, "_schedule_metadata", no_metadata)
+    monkeypatch.setattr(DiscoverPane, "_schedule_metadata", no_metadata)
     pane = harness.app.query_one(ComparePane)
     pane._download()
     await harness.pilot.pause()
@@ -635,9 +650,37 @@ async def test_compare_download_uses_modal_pinned_discovery_and_returns(
         for entry in harness.app.selected_comparison_profiles()
     }
     assert screen.discover._pinned_revisions == expected
-    assert screen._repo_ids == list(expected)
+    assert screen.discover._repo_ids == list(expected)
 
     await harness.pilot.press("escape")
     assert await harness.wait_for(
         lambda _app: not isinstance(harness.app.screen, SearchScreen)
+    )
+
+
+async def test_restoration_failure_releases_comparison_lease(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _stub_comparison_preflight(harness, monkeypatch, tmp_path)
+    pane = harness.app.query_one(ComparePane)
+
+    async def completed(value, *, on_progress):  # type: ignore[no-untyped-def]
+        return _comparison_result(value, "completed")
+
+    def fail_restore(config: AppConfig, model: str | None) -> None:
+        raise RuntimeError("injected restoration failure")
+
+    monkeypatch.setattr("mlx_tui.compare.workflow.run_comparison", completed)
+    monkeypatch.setattr(harness.app, "restore_request_state", fail_restore)
+    pane._preflight()
+    pane._start_comparison()
+    assert await harness.wait_for(
+        lambda app: app.operations.current is OperationKind.IDLE
+    )
+    assert pane._comparison_worker is None
+    assert not pane._comparison_active
+    assert not harness.app.query_one("#chat-input", ChatInput).disabled
+    assert not harness.app.query_one("#models-table").disabled
+    assert any(
+        "injected restoration failure" in line for line in harness.app_log_lines()
     )

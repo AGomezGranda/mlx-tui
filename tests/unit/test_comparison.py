@@ -78,8 +78,9 @@ def _same_identity(_host: str, _port: int) -> ProcessIdentity:
 
 def test_nested_trial_round_trip_rejects_unknown_fields(tmp_path: Path) -> None:
     identity = ProcessIdentity(123, 4.5)
+    value = _result_input(tmp_path)
     trial = contracts.TrialResult(
-        "profile-a",
+        value.profiles[0].profile.id,
         1,
         state="completed",
         payload={"messages": [{"role": "user", "content": "hello"}]},
@@ -90,8 +91,8 @@ def test_nested_trial_round_trip_rejects_unknown_fields(tmp_path: Path) -> None:
     )
     result = contracts.ComparisonResult(
         run_id="nested-trial",
-        status="completed",
-        comparison=_result_input(tmp_path),
+        status="interrupted",
+        comparison=value,
         trials=(trial,),
     )
     encoded = encoding.encode_comparison(result)
@@ -164,7 +165,7 @@ def test_task_id_default_is_neutral_and_historical_value_round_trips(
         status="completed",
         comparison=historical,
         trials=tuple(
-            contracts.TrialResult(entry.profile.id, index)
+            contracts.TrialResult(entry.profile.id, index, state="completed")
             for entry in entries
             for index in range(6)
         ),
@@ -190,7 +191,7 @@ def _completed_result(tmp_path: Path) -> contracts.ComparisonResult:
         status="completed",
         comparison=value,
         trials=tuple(
-            contracts.TrialResult(entry.profile.id, index)
+            contracts.TrialResult(entry.profile.id, index, state="completed")
             for entry in value.profiles
             for index in range(6)
         ),
@@ -435,3 +436,83 @@ async def test_cancellation_rethrows_and_checkpoints_cancelled_slot(
     assert saved.status == "cancelled"
     assert saved.trials[0].cancelled is True
     assert all(trial.state == "not_attempted" for trial in saved.trials[1:])
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("prompt_tokens", "invalid"),
+        ("completion_tokens", True),
+        ("cached_prompt_tokens", -1),
+        ("quality_pass", "yes"),
+        ("prompt_estimated", 1),
+        ("completion_estimated", "false"),
+        ("cancelled", "false"),
+        ("stream_complete", 1),
+        ("response_model", []),
+        ("finish_reason", False),
+        ("quality_reason", 1),
+        ("error", {}),
+    ],
+)
+def test_decoder_rejects_malformed_trial_scalars(
+    tmp_path: Path, field: str, bad_value: object
+) -> None:
+    result = _completed_result(tmp_path)
+    document = json.loads(encoding.encode_comparison(result))
+    document["trials"][0][field] = bad_value
+    with pytest.raises(contracts.ComparisonValidationError):
+        decoding.decode_comparison(document)
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "empty_profiles",
+        "duplicate_profiles",
+        "missing_path",
+        "misaligned_hashes",
+        "wrong_order",
+        "duplicate_trial",
+        "unknown_profile",
+        "missing_trial",
+        "unfinished_trial",
+    ],
+)
+def test_decoder_rejects_invalid_result_structure(tmp_path: Path, defect: str) -> None:
+    result = _completed_result(tmp_path)
+    document = json.loads(encoding.encode_comparison(result))
+    value = document["input"]
+    if defect == "empty_profiles":
+        value["profiles"].clear()
+        document["profile_fingerprints"].clear()
+    elif defect == "duplicate_profiles":
+        value["profiles"][1] = value["profiles"][0]
+        document["profile_fingerprints"][1] = document["profile_fingerprints"][0]
+    elif defect == "missing_path":
+        value["snapshot_paths"].pop()
+    elif defect == "misaligned_hashes":
+        value["verified_asset_hashes"] = [dict[str, str]()]
+    elif defect == "wrong_order":
+        value["profile_order"] = [
+            entry.profile.id for entry in result.comparison.profiles
+        ][::-1]
+    elif defect == "duplicate_trial":
+        document["trials"][1] = document["trials"][0]
+    elif defect == "unknown_profile":
+        document["trials"][0]["profile_id"] = "unknown"
+    elif defect == "missing_trial":
+        document["trials"].pop()
+    else:
+        document["trials"][0]["state"] = "not_attempted"
+    with pytest.raises(contracts.ComparisonValidationError):
+        decoding.decode_comparison(document)
+
+
+def test_decoder_preserves_legitimate_partial_trials(tmp_path: Path) -> None:
+    result = _completed_result(tmp_path)
+    partial_result = replace(result, status="cancelled", trials=result.trials[:1])
+    assert (
+        decoding.decode_comparison(encoding.encode_comparison(partial_result))
+        == partial_result
+    )

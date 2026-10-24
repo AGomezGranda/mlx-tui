@@ -5,12 +5,21 @@ from __future__ import annotations
 import math
 import os
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, cast
 
 SwapPolicy = Literal["auto", "warm", "restart"]
 RuntimeMode = Literal["attach", "managed"]
+
+DEFAULT_TEMPERATURE = 0.7
+DEFAULT_TOP_P = 1.0
+DEFAULT_MAX_TOKENS = 1024
+DEFAULT_MAX_CTX = 8192
+TEMPERATURE_RANGE = (0.0, 2.0)
+TOP_P_RANGE = (0.0, 1.0)
+MAX_TOKENS_RANGE = (1, 16384)
+MAX_CTX_RANGE = (1024, 131072)
 
 
 @dataclass(frozen=True)
@@ -29,9 +38,36 @@ class AppConfig:
     seed: int | None = None
     enable_thinking: bool | None = None
     system: str | None = None
-    max_ctx: int = 8192
+    max_ctx: int = DEFAULT_MAX_CTX
     swap_policy: SwapPolicy = "auto"
     runtime_mode: RuntimeMode = "attach"
+
+
+@dataclass(frozen=True)
+class ConfigIssue:
+    key: str
+    message: str
+    severity: Literal["error", "warning"]
+
+
+@dataclass(frozen=True)
+class LaunchOverrides:
+    host: str | None = None
+    port: int | None = None
+    runtime_mode: RuntimeMode | None = None
+
+
+def resolve_launch(config: AppConfig, overrides: LaunchOverrides) -> AppConfig:
+    mode = overrides.runtime_mode or config.runtime_mode
+    host, port = (
+        ("127.0.0.1", 18080) if mode == "managed" else (config.host, config.port)
+    )
+    return replace(
+        config,
+        runtime_mode=mode,
+        host=overrides.host if overrides.host is not None else host,
+        port=overrides.port if overrides.port is not None else port,
+    )
 
 
 def config_path() -> Path:
@@ -43,6 +79,8 @@ def config_path() -> Path:
 CONFIG_TEMPLATE = """\
 # mlx-tui config — model/host/port/runtime_mode/start_cmd/stop_cmd
 # runtime_mode = "attach"  # "attach" (default) | "managed"
+# host = "127.0.0.1"  # attach endpoint; managed defaults to 127.0.0.1:18080
+# port = 8080
 # model = "ornith-ai/Ornith-1.5-9B-MLX-4bit"
 # start_cmd = "mlx_lm.server --port 8080"
 # stop_cmd = "pkill -f mlx_lm.server"
@@ -58,30 +96,13 @@ CONFIG_TEMPLATE = """\
 # max_ctx = 8192
 # max_context = 8192  # alias for max_ctx
 # swap_policy = "auto"  # "auto" | "warm" | "restart"
+# Presets in this file take precedence over legacy presets.toml.
+# preset = []  # explicitly disable all presets
+# [[preset]]
+# name = "Coding"
+# system = "You are a coding assistant."
+# temperature = 0.2
 """
-
-
-def write_template(path: Path) -> None:
-    """Create parent directories and write the commented default config."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(CONFIG_TEMPLATE)
-
-
-def create_config(
-    path: Path, *, runtime_mode: RuntimeMode, host: str, port: int
-) -> bool:
-    """Create only a missing config; an existing user's file is untouched."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with path.open("x", encoding="utf-8") as handle:
-            handle.write(
-                f'runtime_mode = "{runtime_mode}"\nhost = "{host}"\nport = {port}\n'
-            )
-            if runtime_mode == "attach":
-                handle.write(f'start_cmd = "mlx_lm.server --port {port}"\n')
-    except FileExistsError:
-        return False
-    return True
 
 
 _KEY_TYPES: dict[str, type] = {
@@ -99,6 +120,61 @@ _KEY_TYPES: dict[str, type] = {
     "system": str,
     "max_ctx": int,
 }
+
+_RANGES = {
+    "port": (1, 65535),
+    "temperature": TEMPERATURE_RANGE,
+    "top_p": TOP_P_RANGE,
+    "max_tokens": MAX_TOKENS_RANGE,
+    "max_ctx": MAX_CTX_RANGE,
+    "max_context": MAX_CTX_RANGE,
+}
+_ENUMS = {
+    "runtime_mode": ("attach", "managed"),
+    "swap_policy": ("auto", "warm", "restart"),
+}
+
+
+def validate_config(data: dict[str, object]) -> tuple[ConfigIssue, ...]:
+    """Report invalid fields without changing or clamping their values."""
+    issues: list[ConfigIssue] = []
+    types = {**_KEY_TYPES, "max_context": int, "runtime_mode": str, "swap_policy": str}
+    for key, value in data.items():
+        if key == "preset":
+            continue  # The shared preset parser owns entry validation.
+        expected = types.get(key)
+        if expected is None:
+            issues.append(ConfigIssue(key, "Unknown key; preserved on save", "warning"))
+            continue
+        if (expected is float and _coerce_float_strict(value) is None) or (
+            expected is not float and type(value) is not expected
+        ):
+            issues.append(
+                ConfigIssue(key, f"Must be a finite {expected.__name__}", "error")
+            )
+            continue
+        if key in _RANGES:
+            lo, hi = _RANGES[key]
+            number = cast("int | float", value)
+            if not lo <= number <= hi:
+                issues.append(
+                    ConfigIssue(key, f"Must be between {lo} and {hi}", "error")
+                )
+        if key in _ENUMS and value not in _ENUMS[key]:
+            issues.append(
+                ConfigIssue(key, f"Must be one of {', '.join(_ENUMS[key])}", "error")
+            )
+        if key == "host" and not cast("str", value).strip():
+            issues.append(ConfigIssue(key, "Host must not be empty", "error"))
+        if key == "max_context":
+            issues.append(
+                ConfigIssue(
+                    key,
+                    "Alias takes precedence over max_ctx; editing context writes max_ctx",
+                    "warning",
+                )
+            )
+    return tuple(issues)
 
 
 class ConfigParseError(Exception):
@@ -135,13 +211,13 @@ def _from_mapping(data: dict[str, object]) -> AppConfig:
     port = found.get("port")
     temp = cast("float | None", found.get("temperature"))
     if temp is not None:
-        temp = _clamp(temp, 0.0, 2.0)
+        temp = _clamp(temp, *TEMPERATURE_RANGE)
     tp = cast("float | None", found.get("top_p"))
     if tp is not None:
-        tp = _clamp(tp, 0.0, 1.0)
+        tp = _clamp(tp, *TOP_P_RANGE)
     mt = cast("int | None", found.get("max_tokens"))
     if mt is not None:
-        mt = _clamp(mt, 1, 16384)
+        mt = _clamp(mt, *MAX_TOKENS_RANGE)
     raw_mc: int | None
     if type(data.get("max_context")) is int:
         raw_mc = data.get("max_context")  # type: ignore[assignment]
@@ -149,7 +225,7 @@ def _from_mapping(data: dict[str, object]) -> AppConfig:
         raw_mc = data.get("max_ctx")  # type: ignore[assignment]
     else:
         raw_mc = None
-    mc = _clamp(raw_mc, 1024, 131072) if raw_mc is not None else None
+    mc = _clamp(raw_mc, *MAX_CTX_RANGE) if raw_mc is not None else None
     raw_policy = data.get("swap_policy")
     if raw_policy in ("auto", "warm", "restart"):
         policy = cast("SwapPolicy", raw_policy)
@@ -172,7 +248,7 @@ def _from_mapping(data: dict[str, object]) -> AppConfig:
         seed=cast("int | None", found.get("seed")),
         enable_thinking=cast("bool | None", found.get("enable_thinking")),
         system=cast("str | None", found.get("system")),
-        max_ctx=mc if mc is not None else 8192,
+        max_ctx=mc if mc is not None else DEFAULT_MAX_CTX,
         swap_policy=policy,
         runtime_mode=mode,
     )
@@ -190,7 +266,7 @@ def parse_config(path: Path | None = None) -> AppConfig:
     try:
         with path.open("rb") as fh:
             data: dict[str, object] = tomllib.load(fh)
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise ConfigParseError(f"{path}: {exc}") from exc
     return _from_mapping(data)
 
